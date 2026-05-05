@@ -117,6 +117,8 @@ metalxr_frame_dump_dir="${METALXR_FRAME_DUMP_DIR:-${TMPDIR:-/tmp}/metalxr_unity_
 metalxr_frame_export_dir="${METALXR_FRAME_EXPORT_DIR:-}"
 metalxr_frame_export_mode="${METALXR_FRAME_EXPORT_MODE:-readback}"
 metalxr_swapchain_storage_mode="${METALXR_SWAPCHAIN_STORAGE_MODE:-}"
+metalxr_view_width="${METALXR_VIEW_WIDTH:-}"
+metalxr_view_height="${METALXR_VIEW_HEIGHT:-}"
 metalxr_tracking_state_path="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}"
 metalxr_haptic_command_path="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}"
 metalxr_timing_state_path="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}"
@@ -134,6 +136,9 @@ fi
 if [[ -n "$metalxr_swapchain_storage_mode" ]]; then
   echo "MetalXR swapchain storage mode: $metalxr_swapchain_storage_mode"
 fi
+if [[ -n "$metalxr_view_width" || -n "$metalxr_view_height" ]]; then
+  echo "MetalXR view size: ${metalxr_view_width:-runtime}x${metalxr_view_height:-runtime}"
+fi
 echo "MetalXR tracking state: $metalxr_tracking_state_path"
 echo "MetalXR haptic commands: $metalxr_haptic_command_path"
 echo "MetalXR timing state: $metalxr_timing_state_path"
@@ -145,6 +150,8 @@ METALXR_FRAME_DUMP_DIR="$metalxr_frame_dump_dir" \
 METALXR_FRAME_EXPORT_DIR="$metalxr_frame_export_dir" \
 METALXR_FRAME_EXPORT_MODE="$metalxr_frame_export_mode" \
 METALXR_SWAPCHAIN_STORAGE_MODE="$metalxr_swapchain_storage_mode" \
+METALXR_VIEW_WIDTH="$metalxr_view_width" \
+METALXR_VIEW_HEIGHT="$metalxr_view_height" \
 METALXR_START_ULOOP_SERVER="${METALXR_START_ULOOP_SERVER:-0}" \
 METALXR_TRACKING_STATE_PATH="$metalxr_tracking_state_path" \
 METALXR_HAPTIC_COMMAND_PATH="$metalxr_haptic_command_path" \

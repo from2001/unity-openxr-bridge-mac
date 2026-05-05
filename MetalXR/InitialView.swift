@@ -369,6 +369,8 @@ struct InitialView: View {
                     "METALXR_FRAME_EXPORT_DIR": utils.frameExportDirURL.path,
                     "METALXR_FRAME_EXPORT_MODE": "readback",
                     "METALXR_SWAPCHAIN_STORAGE_MODE": "shared",
+                    "METALXR_VIEW_WIDTH": "640",
+                    "METALXR_VIEW_HEIGHT": "360",
                     "METALXR_TRACKING_STATE_PATH": utils.trackingStateURL.path,
                     "METALXR_HAPTIC_COMMAND_PATH": utils.hapticCommandURL.path,
                     "METALXR_TIMING_STATE_PATH": utils.timingStateURL.path
