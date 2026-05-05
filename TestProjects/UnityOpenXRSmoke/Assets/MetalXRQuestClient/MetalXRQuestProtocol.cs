@@ -22,6 +22,7 @@ namespace MetalXR.QuestClient
         public const uint EyeLeft = 0;
         public const uint EyeRight = 1;
         public const uint VideoFrameFlagKeyframe = 0x00000001;
+        public const uint VideoFrameFlagProjectionMetadata = 0x00000002;
         public const uint TimingFlagClockSync = 0x00000001;
         public const uint TimingFlagFrameDisplay = 0x00000002;
         public const uint TrackingOrientationValid = 0x00000001;
@@ -43,7 +44,7 @@ namespace MetalXR.QuestClient
         private const uint CapabilityHaptics = 0x00000040;
         private const uint CapabilityLogStream = 0x00000080;
         private const int HelloPayloadSize = 96;
-        private const int VideoFramePayloadSize = 56;
+        private const int VideoFramePayloadSize = 132;
         private const int PoseSamplePayloadSize = 60;
         private const int ControllerInputPayloadSize = 104;
         private const int HapticCommandPayloadSize = 32;
@@ -87,6 +88,12 @@ namespace MetalXR.QuestClient
 
         public static byte[] CreateHelloPacket(ulong sequence)
         {
+            return CreateHelloPacket(sequence, MetalXRQuestDeviceProfile.Default);
+        }
+
+        public static byte[] CreateHelloPacket(ulong sequence, MetalXRQuestDeviceProfile profile)
+        {
+            MetalXRQuestDeviceProfile activeProfile = profile ?? MetalXRQuestDeviceProfile.Default;
             byte[] packet = new byte[HeaderSize + HelloPayloadSize];
             int offset = 0;
             WriteUInt32(packet, ref offset, Magic);
@@ -110,13 +117,13 @@ namespace MetalXR.QuestClient
                 CapabilityControllerInput |
                 CapabilityHaptics |
                 CapabilityLogStream);
-            WriteUInt32(packet, ref offset, 2064);
-            WriteUInt32(packet, ref offset, 2208);
-            WriteUInt32(packet, ref offset, 72);
+            WriteUInt32(packet, ref offset, activeProfile.MaxVideoWidth);
+            WriteUInt32(packet, ref offset, activeProfile.MaxVideoHeight);
+            WriteUInt32(packet, ref offset, activeProfile.PreferredFps);
             WriteUInt32(packet, ref offset, (uint)MetalXRQuestEndpoint.DefaultPort);
             WriteUInt32(packet, ref offset, 0);
             WriteUInt32(packet, ref offset, 0);
-            WriteFixedAscii(packet, ref offset, "MetalXR Quest Unity Client", DeviceNameSize);
+            WriteFixedAscii(packet, ref offset, activeProfile.DeviceName, DeviceNameSize);
 
             return packet;
         }
@@ -243,6 +250,16 @@ namespace MetalXR.QuestClient
             ulong encoderLatencyUs = ReadUInt64(payload, ref offset);
             uint payloadBytes = ReadUInt32(payload, ref offset);
             uint flags = ReadUInt32(payload, ref offset);
+            int imageRectX = ReadInt32(payload, ref offset);
+            int imageRectY = ReadInt32(payload, ref offset);
+            uint imageRectWidth = ReadUInt32(payload, ref offset);
+            uint imageRectHeight = ReadUInt32(payload, ref offset);
+            uint imageArrayIndex = ReadUInt32(payload, ref offset);
+            uint projectionFlags = ReadUInt32(payload, ref offset);
+            ulong referenceSpaceId = ReadUInt64(payload, ref offset);
+            float[] posePosition = ReadFloatArray(payload, ref offset, 3);
+            float[] poseOrientation = ReadFloatArray(payload, ref offset, 4);
+            float[] fov = ReadFloatArray(payload, ref offset, 4);
 
             if (codec != CodecH264 || (eye != EyeLeft && eye != EyeRight) || width == 0 || height == 0)
             {
@@ -266,6 +283,16 @@ namespace MetalXR.QuestClient
                 predictedDisplayTimeNs,
                 encoderLatencyUs,
                 flags,
+                imageRectX,
+                imageRectY,
+                imageRectWidth,
+                imageRectHeight,
+                imageArrayIndex,
+                projectionFlags,
+                referenceSpaceId,
+                posePosition,
+                poseOrientation,
+                fov,
                 header.Sequence,
                 header.TimestampNs,
                 receiveTimeNs,
@@ -421,6 +448,11 @@ namespace MetalXR.QuestClient
             return value;
         }
 
+        private static int ReadInt32(byte[] bytes, ref int offset)
+        {
+            return unchecked((int)ReadUInt32(bytes, ref offset));
+        }
+
         private static ulong ReadUInt64(byte[] bytes, ref int offset)
         {
             ulong low = ReadUInt32(bytes, ref offset);
@@ -434,6 +466,40 @@ namespace MetalXR.QuestClient
             offset += 4;
             return value;
         }
+
+        private static float[] ReadFloatArray(byte[] bytes, ref int offset, int count)
+        {
+            float[] values = new float[count];
+            for (int i = 0; i < count; i++)
+            {
+                values[i] = ReadSingle(bytes, ref offset);
+            }
+
+            return values;
+        }
+    }
+
+    public sealed class MetalXRQuestDeviceProfile
+    {
+        public static readonly MetalXRQuestDeviceProfile Default =
+            new MetalXRQuestDeviceProfile(2064, 2208, 72, "MetalXR Quest Unity Client");
+
+        public MetalXRQuestDeviceProfile(
+            uint maxVideoWidth,
+            uint maxVideoHeight,
+            uint preferredFps,
+            string deviceName)
+        {
+            MaxVideoWidth = maxVideoWidth > 0 ? maxVideoWidth : Default.MaxVideoWidth;
+            MaxVideoHeight = maxVideoHeight > 0 ? maxVideoHeight : Default.MaxVideoHeight;
+            PreferredFps = preferredFps > 0 ? preferredFps : Default.PreferredFps;
+            DeviceName = string.IsNullOrEmpty(deviceName) ? Default.DeviceName : deviceName;
+        }
+
+        public uint MaxVideoWidth { get; private set; }
+        public uint MaxVideoHeight { get; private set; }
+        public uint PreferredFps { get; private set; }
+        public string DeviceName { get; private set; }
     }
 
     public sealed class MetalXRQuestEncodedVideoFrame
@@ -448,6 +514,16 @@ namespace MetalXR.QuestClient
             ulong predictedDisplayTimeNs,
             ulong encoderLatencyUs,
             uint flags,
+            int imageRectX,
+            int imageRectY,
+            uint imageRectWidth,
+            uint imageRectHeight,
+            uint imageArrayIndex,
+            uint projectionFlags,
+            ulong referenceSpaceId,
+            float[] posePosition,
+            float[] poseOrientation,
+            float[] fov,
             ulong sequence,
             ulong packetTimestampNs,
             ulong receiveTimeNs,
@@ -462,6 +538,16 @@ namespace MetalXR.QuestClient
             PredictedDisplayTimeNs = predictedDisplayTimeNs;
             EncoderLatencyUs = encoderLatencyUs;
             Flags = flags;
+            ImageRectX = imageRectX;
+            ImageRectY = imageRectY;
+            ImageRectWidth = imageRectWidth;
+            ImageRectHeight = imageRectHeight;
+            ImageArrayIndex = imageArrayIndex;
+            ProjectionFlags = projectionFlags;
+            ReferenceSpaceId = referenceSpaceId;
+            PosePosition = posePosition ?? new float[3];
+            PoseOrientation = poseOrientation ?? new float[] { 0.0f, 0.0f, 0.0f, 1.0f };
+            Fov = fov ?? new float[] { -0.7853982f, 0.7853982f, 0.7853982f, -0.7853982f };
             Sequence = sequence;
             PacketTimestampNs = packetTimestampNs;
             ReceiveTimeNs = receiveTimeNs;
@@ -477,12 +563,23 @@ namespace MetalXR.QuestClient
         public ulong PredictedDisplayTimeNs { get; }
         public ulong EncoderLatencyUs { get; }
         public uint Flags { get; }
+        public int ImageRectX { get; }
+        public int ImageRectY { get; }
+        public uint ImageRectWidth { get; }
+        public uint ImageRectHeight { get; }
+        public uint ImageArrayIndex { get; }
+        public uint ProjectionFlags { get; }
+        public ulong ReferenceSpaceId { get; }
+        public float[] PosePosition { get; }
+        public float[] PoseOrientation { get; }
+        public float[] Fov { get; }
         public ulong Sequence { get; }
         public ulong PacketTimestampNs { get; }
         public ulong ReceiveTimeNs { get; }
         public byte[] EncodedBytes { get; }
         public bool IsLeftEye { get { return Eye == MetalXRQuestProtocol.EyeLeft; } }
         public bool IsKeyframe { get { return (Flags & MetalXRQuestProtocol.VideoFrameFlagKeyframe) != 0; } }
+        public bool HasProjectionMetadata { get { return (Flags & MetalXRQuestProtocol.VideoFrameFlagProjectionMetadata) != 0; } }
     }
 
     public sealed class MetalXRQuestEncodedStereoFrameSet

@@ -18,6 +18,7 @@ namespace MetalXR.QuestClient
         private const int MaxQueuedOutgoingPackets = 32;
         private const int MaxQueuedHaptics = 8;
         private readonly MetalXRQuestEndpoint _endpoint;
+        private readonly MetalXRQuestDeviceProfile _deviceProfile;
         private readonly ConcurrentQueue<string> _logs = new ConcurrentQueue<string>();
         private readonly ConcurrentQueue<MetalXRQuestEncodedStereoFrameSet> _frameSets = new ConcurrentQueue<MetalXRQuestEncodedStereoFrameSet>();
         private readonly ConcurrentQueue<byte[]> _outgoingPackets = new ConcurrentQueue<byte[]>();
@@ -31,9 +32,10 @@ namespace MetalXR.QuestClient
         private int _failureCount;
         private ulong _receivedFrameSets;
 
-        public MetalXRQuestHandshakeClient(MetalXRQuestEndpoint endpoint)
+        public MetalXRQuestHandshakeClient(MetalXRQuestEndpoint endpoint, MetalXRQuestDeviceProfile deviceProfile)
         {
             _endpoint = endpoint;
+            _deviceProfile = deviceProfile ?? MetalXRQuestDeviceProfile.Default;
         }
 
         public int QueuedFrameCount { get { return _frameSets.Count * 2; } }
@@ -233,9 +235,12 @@ namespace MetalXR.QuestClient
                     using (NetworkStream stream = client.GetStream())
                     {
                         stream.ReadTimeout = ReadTimeoutMs;
-                        byte[] hello = MetalXRQuestProtocol.CreateHelloPacket(NextSequence());
+                        byte[] hello = MetalXRQuestProtocol.CreateHelloPacket(NextSequence(), _deviceProfile);
                         stream.Write(hello, 0, hello.Length);
-                        _logs.Enqueue("sent HELLO to " + _endpoint.Host + ":" + _endpoint.Port);
+                        _logs.Enqueue(
+                            "sent HELLO to " + _endpoint.Host + ":" + _endpoint.Port +
+                            " max=" + _deviceProfile.MaxVideoWidth + "x" + _deviceProfile.MaxVideoHeight +
+                            " fps=" + _deviceProfile.PreferredFps);
 
                         MetalXRQuestProtocol.PacketHeader header;
                         if (TryReadHeader(stream, out header))
@@ -445,7 +450,9 @@ namespace MetalXR.QuestClient
                     " left_bytes=" + frameSet.Left.EncodedBytes.Length +
                     " right_bytes=" + frameSet.Right.EncodedBytes.Length +
                     " left_keyframe=" + frameSet.Left.IsKeyframe +
-                    " right_keyframe=" + frameSet.Right.IsKeyframe);
+                    " right_keyframe=" + frameSet.Right.IsKeyframe +
+                    " left_projection_metadata=" + frameSet.Left.HasProjectionMetadata +
+                    " right_projection_metadata=" + frameSet.Right.HasProjectionMetadata);
             }
         }
 
