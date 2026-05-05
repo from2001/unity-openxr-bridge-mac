@@ -105,9 +105,12 @@ namespace MetalXR.QuestClient
                 return;
             }
 
+            ulong decodeStartTimeNs = MetalXRQuestProtocol.NowNs();
             MetalXRQuestDecodedVideoFrame decodedFrame;
             if (_videoDecoder.TryDecode(encodedFrame, out decodedFrame) && decodedFrame != null)
             {
+                ulong decodeEndTimeNs = MetalXRQuestProtocol.NowNs();
+                decodedFrame.SetDecodeTiming(decodeStartTimeNs, decodeEndTimeNs);
                 UpdateStreamTexture(decodedFrame);
             }
         }
@@ -475,6 +478,7 @@ namespace MetalXR.QuestClient
 
             texture.SetPixels32(pixels);
             texture.Apply(false);
+            ulong displayTimeNs = MetalXRQuestProtocol.NowNs();
             _lastStreamFrameTime = Time.unscaledTime;
             _displayedEyeFrames++;
             ulong displayedThisEye;
@@ -489,12 +493,21 @@ namespace MetalXR.QuestClient
                 displayedThisEye = _displayedRightEyeFrames;
             }
 
+            SendFrameTimingSample(frame, displayTimeNs);
+
             if (displayedThisEye <= 4 || (_displayedEyeFrames % 120) == 0)
             {
-                ulong displayTimeNs = MetalXRQuestProtocol.NowNs();
                 ulong receiveToDisplayUs =
                     displayTimeNs >= frame.ReceiveTimeNs ?
                         (displayTimeNs - frame.ReceiveTimeNs) / 1000ul :
+                        0ul;
+                ulong decodeUs =
+                    frame.DecodeEndTimeNs >= frame.DecodeStartTimeNs ?
+                        (frame.DecodeEndTimeNs - frame.DecodeStartTimeNs) / 1000ul :
+                        0ul;
+                ulong submitUs =
+                    displayTimeNs >= frame.DecodeEndTimeNs ?
+                        (displayTimeNs - frame.DecodeEndTimeNs) / 1000ul :
                         0ul;
                 string decoderName = frame.DecodedByMediaCodec ? "MediaCodec" : "compressed-preview";
                 string eyeName = frame.IsLeftEye ? "left" : "right";
@@ -505,8 +518,45 @@ namespace MetalXR.QuestClient
                     " decoder=" + decoderName +
                     " host_encoder_us=" + frame.EncoderLatencyUs +
                     " client_receive_to_display_us=" + receiveToDisplayUs +
+                    " client_decode_us=" + decodeUs +
+                    " client_submit_us=" + submitUs +
+                    " queue_depth=" + CurrentQueuedFrameCount() +
                     " bytes=" + frame.EncodedBytes);
             }
+        }
+
+        private void SendFrameTimingSample(MetalXRQuestDecodedVideoFrame frame, ulong displayTimeNs)
+        {
+            if (_handshakeClient == null)
+            {
+                return;
+            }
+
+            ulong encodeLatencyNs = frame.EncoderLatencyUs * 1000ul;
+            ulong encodeEndTimeNs = frame.PacketTimestampNs;
+            ulong encodeStartTimeNs =
+                encodeEndTimeNs >= encodeLatencyNs ?
+                    encodeEndTimeNs - encodeLatencyNs :
+                    0ul;
+
+            _handshakeClient.EnqueueTimingSample(new MetalXRQuestTimingSample(
+                frame.FrameId,
+                frame.HostCaptureTimeNs,
+                frame.PredictedDisplayTimeNs,
+                encodeStartTimeNs,
+                encodeEndTimeNs,
+                frame.ReceiveTimeNs,
+                displayTimeNs,
+                frame.DecodeStartTimeNs,
+                frame.DecodeEndTimeNs,
+                displayTimeNs,
+                (uint)CurrentQueuedFrameCount(),
+                MetalXRQuestProtocol.TimingFlagFrameDisplay));
+        }
+
+        private int CurrentQueuedFrameCount()
+        {
+            return _handshakeClient != null ? _handshakeClient.QueuedFrameCount : 0;
         }
 
         private static Color32 StreamColor(bool leftEye, byte luma)
@@ -591,6 +641,9 @@ namespace MetalXR.QuestClient
             IsLeftEye = source.IsLeftEye;
             Width = source.Width;
             Height = source.Height;
+            HostCaptureTimeNs = source.TimestampNs;
+            PredictedDisplayTimeNs = source.PredictedDisplayTimeNs;
+            PacketTimestampNs = source.PacketTimestampNs;
             EncoderLatencyUs = source.EncoderLatencyUs;
             ReceiveTimeNs = source.ReceiveTimeNs;
             EncodedBytes = source.EncodedBytes.Length;
@@ -603,12 +656,23 @@ namespace MetalXR.QuestClient
         public bool IsLeftEye { get; }
         public int Width { get; }
         public int Height { get; }
+        public ulong HostCaptureTimeNs { get; }
+        public ulong PredictedDisplayTimeNs { get; }
+        public ulong PacketTimestampNs { get; }
         public ulong EncoderLatencyUs { get; }
         public ulong ReceiveTimeNs { get; }
+        public ulong DecodeStartTimeNs { get; private set; }
+        public ulong DecodeEndTimeNs { get; private set; }
         public int EncodedBytes { get; }
         public byte[] LumaBytes { get; }
         public int Stride { get; }
         public bool DecodedByMediaCodec { get; }
+
+        public void SetDecodeTiming(ulong decodeStartTimeNs, ulong decodeEndTimeNs)
+        {
+            DecodeStartTimeNs = decodeStartTimeNs;
+            DecodeEndTimeNs = decodeEndTimeNs;
+        }
     }
 
     public sealed class MetalXRQuestVideoDecoder : IDisposable

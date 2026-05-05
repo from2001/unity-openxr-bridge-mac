@@ -10,6 +10,7 @@ probe_source="${TMPDIR:-/tmp}/metalxr_input_bridge_probe.c"
 probe_binary="${TMPDIR:-/tmp}/metalxr_input_bridge_probe"
 tracking_state="${TMPDIR:-/tmp}/metalxr_tracking_state_probe.txt"
 haptic_command="${TMPDIR:-/tmp}/metalxr_haptic_command_probe.txt"
+timing_state="${TMPDIR:-/tmp}/metalxr_timing_state_probe.txt"
 
 if [[ ! -f "$runtime_dylib" ]]; then
   "$repo_root/Scripts/build-metalxr-runtime.sh"
@@ -21,6 +22,7 @@ controller 0 8 1100 15 1 0.7 0.4 0.1 -0.2 -0.2 1.2 -0.6 0 0 0 1 -0.25 1.1 -0.55 
 controller 1 9 1200 15 2 0.2 0.9 0.5 0.25 0.2 1.2 -0.6 0 0 0 1 0.25 1.1 -0.55 0 0 0 1
 STATE
 rm -f "$haptic_command"
+rm -f "$timing_state"
 
 cat > "$probe_source" <<'PROBE'
 #include "MetalXRRuntime/openxr_minimal.h"
@@ -29,6 +31,7 @@ cat > "$probe_source" <<'PROBE'
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 typedef XrResult (*PFN_xrNegotiateLoaderRuntimeInterface)(
     const XrNegotiateLoaderInfo* loaderInfo,
@@ -40,6 +43,7 @@ typedef XrResult (*PFN_xrGetSystem)(XrInstance instance, const XrSystemGetInfo* 
 typedef XrResult (*PFN_xrCreateSession)(XrInstance instance, const XrSessionCreateInfo* createInfo, XrSession* session);
 typedef XrResult (*PFN_xrDestroySession)(XrSession session);
 typedef XrResult (*PFN_xrBeginSession)(XrSession session, const XrSessionBeginInfo* beginInfo);
+typedef XrResult (*PFN_xrWaitFrame)(XrSession session, const XrFrameWaitInfo* frameWaitInfo, XrFrameState* frameState);
 typedef XrResult (*PFN_xrCreateReferenceSpace)(XrSession session, const XrReferenceSpaceCreateInfo* createInfo, XrSpace* space);
 typedef XrResult (*PFN_xrDestroySpace)(XrSpace space);
 typedef XrResult (*PFN_xrLocateViews)(XrSession session, const XrViewLocateInfo* viewLocateInfo, XrViewState* viewState, uint32_t viewCapacityInput, uint32_t* viewCountOutput, XrView* views);
@@ -59,6 +63,13 @@ typedef XrResult (*PFN_xrApplyHapticFeedback)(XrSession session, const XrHapticA
 static int near(float actual, float expected)
 {
     return fabsf(actual - expected) < 0.001f;
+}
+
+static unsigned long long monotonic_ns(void)
+{
+    struct timespec timestamp;
+    clock_gettime(CLOCK_MONOTONIC, &timestamp);
+    return ((unsigned long long)timestamp.tv_sec * 1000000000ull) + (unsigned long long)timestamp.tv_nsec;
 }
 
 #define LOAD(handle, type, var, name) \
@@ -132,6 +143,7 @@ int main(int argc, char** argv)
     LOAD(instance, PFN_xrCreateSession, xrCreateSession, "xrCreateSession")
     LOAD(instance, PFN_xrDestroySession, xrDestroySession, "xrDestroySession")
     LOAD(instance, PFN_xrBeginSession, xrBeginSession, "xrBeginSession")
+    LOAD(instance, PFN_xrWaitFrame, xrWaitFrame, "xrWaitFrame")
     LOAD(instance, PFN_xrCreateReferenceSpace, xrCreateReferenceSpace, "xrCreateReferenceSpace")
     LOAD(instance, PFN_xrDestroySpace, xrDestroySpace, "xrDestroySpace")
     LOAD(instance, PFN_xrLocateViews, xrLocateViews, "xrLocateViews")
@@ -208,6 +220,29 @@ int main(int argc, char** argv)
     XrSessionBeginInfo beginInfo = { XR_TYPE_SESSION_BEGIN_INFO, NULL, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO };
     xrBeginSession(session, &beginInfo);
 
+    const char* timingPath = getenv("METALXR_TIMING_STATE_PATH");
+    if (timingPath != NULL && timingPath[0] != '\0') {
+        unsigned long long nowNs = monotonic_ns();
+        FILE* timing = fopen(timingPath, "w");
+        if (timing != NULL) {
+            fprintf(timing,
+                    "timing 1 %llu 0 1000000 16666666 %llu 3000000 0 0 0 0 0 0 0 0\n",
+                    nowNs,
+                    nowNs - 16666666ull);
+            fclose(timing);
+        }
+    }
+
+    XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO, NULL };
+    XrFrameState frameState = { XR_TYPE_FRAME_STATE, NULL, 0, 0, XR_FALSE };
+    xrWaitFrame(session, &waitInfo, &frameState);
+    printf("timing period=%lld predicted=%lld\n",
+           (long long)frameState.predictedDisplayPeriod,
+           (long long)frameState.predictedDisplayTime);
+    if (frameState.predictedDisplayPeriod != 16666666) {
+        return 1;
+    }
+
     XrReferenceSpaceCreateInfo localCreate = { XR_TYPE_REFERENCE_SPACE_CREATE_INFO, NULL, XR_REFERENCE_SPACE_TYPE_LOCAL, { {0, 0, 0, 1}, {0, 0, 0} } };
     XrSpace localSpace = NULL;
     xrCreateReferenceSpace(session, &localCreate, &localSpace);
@@ -280,6 +315,7 @@ clang -std=c11 -Wall -Wextra -Werror \
 
 METALXR_TRACKING_STATE_PATH="$tracking_state" \
 METALXR_HAPTIC_COMMAND_PATH="$haptic_command" \
+METALXR_TIMING_STATE_PATH="$timing_state" \
   "$probe_binary" "$runtime_dylib"
 
 if [[ ! -s "$haptic_command" ]]; then

@@ -13,10 +13,17 @@ Environment:
   METALXR_RUNTIME_JSON     Full path to an OpenXR runtime JSON manifest.
   METALXR_RUNTIME_LOG      Runtime log path. Defaults to TMPDIR/metalxr_unity_runtime.log.
   METALXR_FRAME_DUMP_DIR   Directory for frame metadata dumps from the MetalXR runtime.
+  METALXR_VIEW_WIDTH       Runtime eye width. Defaults to runtime fallback.
+  METALXR_VIEW_HEIGHT      Runtime eye height. Defaults to runtime fallback.
+  METALXR_REFRESH_RATE     Runtime refresh rate in Hz. Defaults to runtime fallback.
+  METALXR_PREDICTION_OFFSET_MS
+                           Signed prediction offset in milliseconds. Defaults to timing-state value or 0.
   METALXR_TRACKING_STATE_PATH
                            HMD/controller state file. Defaults to /tmp/metalxr_tracking_state.txt.
   METALXR_HAPTIC_COMMAND_PATH
                            Haptic command file. Defaults to /tmp/metalxr_haptic_command.txt.
+  METALXR_TIMING_STATE_PATH
+                           Timing state file. Defaults to /tmp/metalxr_timing_state.txt.
   UNITY_APP                Full path to Unity.app. If omitted, the newest Unity Hub editor is used.
   METALXR_START_SIMULATOR  Set to 0 to avoid launching MetaXRSimulator.app automatically.
   XR_LOADER_DEBUG          OpenXR loader logging level. Defaults to warn.
@@ -88,12 +95,14 @@ metalxr_runtime_log="${METALXR_RUNTIME_LOG:-${TMPDIR:-/tmp}/metalxr_unity_runtim
 metalxr_frame_dump_dir="${METALXR_FRAME_DUMP_DIR:-${TMPDIR:-/tmp}/metalxr_unity_frames}"
 metalxr_tracking_state_path="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}"
 metalxr_haptic_command_path="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}"
+metalxr_timing_state_path="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}"
 mkdir -p "$metalxr_frame_dump_dir"
 
 echo "MetalXR runtime log: $metalxr_runtime_log"
 echo "MetalXR frame dumps: $metalxr_frame_dump_dir"
 echo "MetalXR tracking state: $metalxr_tracking_state_path"
 echo "MetalXR haptic commands: $metalxr_haptic_command_path"
+echo "MetalXR timing state: $metalxr_timing_state_path"
 
 XR_RUNTIME_JSON="$runtime_json" \
 XR_LOADER_DEBUG="${XR_LOADER_DEBUG:-warn}" \
@@ -101,4 +110,5 @@ METALXR_RUNTIME_LOG="$metalxr_runtime_log" \
 METALXR_FRAME_DUMP_DIR="$metalxr_frame_dump_dir" \
 METALXR_TRACKING_STATE_PATH="$metalxr_tracking_state_path" \
 METALXR_HAPTIC_COMMAND_PATH="$metalxr_haptic_command_path" \
+METALXR_TIMING_STATE_PATH="$metalxr_timing_state_path" \
 "$unity_app/Contents/MacOS/Unity" "${unity_args[@]}"

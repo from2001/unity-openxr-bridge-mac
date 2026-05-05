@@ -11,6 +11,7 @@ probe_source="${TMPDIR:-/tmp}/metalxr_runtime_probe.c"
 probe_binary="${TMPDIR:-/tmp}/metalxr_runtime_probe"
 probe_log="${TMPDIR:-/tmp}/metalxr_runtime_probe.log"
 probe_dump_dir="${TMPDIR:-/tmp}/metalxr_frame_dump"
+probe_timing_state="${TMPDIR:-/tmp}/metalxr_runtime_probe_timing_state.txt"
 
 if [[ ! -f "$runtime_dylib" ]]; then
   "$repo_root/Scripts/build-metalxr-runtime.sh"
@@ -624,10 +625,12 @@ clang -std=c11 -Wall -Wextra -Werror \
   -o "$probe_binary"
 
 rm -f "$probe_log"
+rm -f "$probe_timing_state"
 rm -rf "$probe_dump_dir"
 mkdir -p "$probe_dump_dir"
 METALXR_RUNTIME_LOG="$probe_log" \
 METALXR_FRAME_DUMP_DIR="$probe_dump_dir" \
+METALXR_TIMING_STATE_PATH="$probe_timing_state" \
 "$probe_binary" "$runtime_dylib"
 
 echo "Runtime log: $probe_log"

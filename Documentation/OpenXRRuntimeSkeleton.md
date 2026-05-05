@@ -97,12 +97,15 @@ The development input bridge uses a text state file so the host streamer and nat
 
 - `METALXR_TRACKING_STATE_PATH=/tmp/metalxr_tracking_state.txt`
 - `METALXR_HAPTIC_COMMAND_PATH=/tmp/metalxr_haptic_command.txt`
+- `METALXR_TIMING_STATE_PATH=/tmp/metalxr_timing_state.txt`
 
 `xrLocateViews` reads the latest HMD pose and offsets the left and right eye views by a fixed 64 mm IPD. Action-space locations read the controller aim or grip pose based on the action name. Boolean, float, and vector action states map to Oculus Touch-style primary/secondary/menu/thumbstick buttons, trigger, grip, and thumbstick axes.
 
 `xrApplyHapticFeedback` writes the latest vibration request to the haptic command file. The host streamer polls that file and forwards the command to the Quest client.
 
 This path is intentionally narrow. It is enough for Unity Play Mode smoke tests, but it does not replace production action binding coverage, synchronized prediction, richer interaction profiles, or a robust lost-tracking/reconnect policy.
+
+`xrWaitFrame` reads measured Quest timing from `METALXR_TIMING_STATE_PATH` when it is fresh. The runtime uses the measured display period and latest Quest display time to predict the next frame; otherwise it falls back to local timing. `METALXR_VIEW_WIDTH`, `METALXR_VIEW_HEIGHT`, `METALXR_REFRESH_RATE`, and `METALXR_PREDICTION_OFFSET_MS` can tune the runtime before launch without rebuilding.
 
 ## Build
 
@@ -138,7 +141,7 @@ Input bridge coverage is in:
 Scripts/probe-metalxr-input-bridge.sh
 ```
 
-That probe writes a tracking-state fixture, verifies `xrLocateViews`, boolean/float/vector/pose action reads, action-space location, and haptic command output.
+That probe writes tracking and timing fixtures, verifies measured-period `xrWaitFrame` output, `xrLocateViews`, boolean/float/vector/pose action reads, action-space location, and haptic command output.
 
 ## Unity Launch
 

@@ -18,8 +18,14 @@ Environment:
   METALXR_STREAM_FPS          Stream frame rate. Defaults to 60.
   METALXR_STREAM_BITRATE      H.264 bitrate in bits per second. Defaults to 8000000.
   METALXR_STREAM_FRAMES       Frame count. Defaults to 0, which streams until disconnect.
+  METALXR_STREAM_QUEUE_DEPTH  Max pending encoder frames per eye. Defaults to 3.
+  METALXR_PREDICTION_OFFSET_MS
+                              Signed prediction offset in milliseconds. Defaults to 0.
+  METALXR_CLOCK_SYNC_INTERVAL_MS
+                              Clock sync probe interval. Defaults to 500.
   METALXR_TRACKING_STATE_PATH Host tracking state output. Defaults to /tmp/metalxr_tracking_state.txt.
   METALXR_HAPTIC_COMMAND_PATH Runtime haptic command input. Defaults to /tmp/metalxr_haptic_command.txt.
+  METALXR_TIMING_STATE_PATH   Host timing state output. Defaults to /tmp/metalxr_timing_state.txt.
 USAGE
 }
 
@@ -37,8 +43,12 @@ height="${METALXR_STREAM_HEIGHT:-360}"
 fps="${METALXR_STREAM_FPS:-60}"
 bitrate="${METALXR_STREAM_BITRATE:-8000000}"
 frames="${METALXR_STREAM_FRAMES:-0}"
+queue_depth="${METALXR_STREAM_QUEUE_DEPTH:-3}"
+prediction_offset_ms="${METALXR_PREDICTION_OFFSET_MS:-0}"
+clock_sync_interval_ms="${METALXR_CLOCK_SYNC_INTERVAL_MS:-500}"
 tracking_state_path="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}"
 haptic_command_path="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}"
+timing_state_path="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}"
 
 if [[ ! -x "$streamer" ]]; then
   "$repo_root/Scripts/build-metalxr-host.sh"
@@ -81,5 +91,9 @@ exec "$streamer" \
   --width "$width" \
   --height "$height" \
   --bitrate "$bitrate" \
+  --queue-depth "$queue_depth" \
+  --prediction-offset-ms "$prediction_offset_ms" \
+  --clock-sync-interval-ms "$clock_sync_interval_ms" \
   --tracking-state-path "$tracking_state_path" \
-  --haptic-command-path "$haptic_command_path"
+  --haptic-command-path "$haptic_command_path" \
+  --timing-state-path "$timing_state_path"
