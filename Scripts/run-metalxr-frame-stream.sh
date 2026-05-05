@@ -19,6 +19,8 @@ Environment:
   METALXR_STREAM_BITRATE      H.264 bitrate in bits per second. Defaults to 8000000.
   METALXR_STREAM_FRAMES       Frame count. Defaults to 0, which streams until disconnect.
   METALXR_STREAM_QUEUE_DEPTH  Max pending encoder frames per eye. Defaults to 3.
+  METALXR_FRAME_SOURCE        synthetic or unity-export. Defaults to synthetic.
+  METALXR_FRAME_EXPORT_DIR    Runtime frame export directory for unity-export source.
   METALXR_PREDICTION_OFFSET_MS
                               Signed prediction offset in milliseconds. Defaults to 0.
   METALXR_CLOCK_SYNC_INTERVAL_MS
@@ -44,6 +46,8 @@ fps="${METALXR_STREAM_FPS:-60}"
 bitrate="${METALXR_STREAM_BITRATE:-8000000}"
 frames="${METALXR_STREAM_FRAMES:-0}"
 queue_depth="${METALXR_STREAM_QUEUE_DEPTH:-3}"
+frame_source="${METALXR_FRAME_SOURCE:-synthetic}"
+frame_export_dir="${METALXR_FRAME_EXPORT_DIR:-}"
 prediction_offset_ms="${METALXR_PREDICTION_OFFSET_MS:-0}"
 clock_sync_interval_ms="${METALXR_CLOCK_SYNC_INTERVAL_MS:-500}"
 tracking_state_path="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}"
@@ -83,17 +87,36 @@ elif [[ "$transport" != "wifi" ]]; then
   exit 1
 fi
 
-exec "$streamer" \
-  --bind-host "$bind_host" \
-  --port "$port" \
-  --frames "$frames" \
-  --fps "$fps" \
-  --width "$width" \
-  --height "$height" \
-  --bitrate "$bitrate" \
-  --queue-depth "$queue_depth" \
-  --prediction-offset-ms "$prediction_offset_ms" \
-  --clock-sync-interval-ms "$clock_sync_interval_ms" \
-  --tracking-state-path "$tracking_state_path" \
-  --haptic-command-path "$haptic_command_path" \
+if [[ "$frame_source" != "synthetic" && "$frame_source" != "unity-export" ]]; then
+  echo "METALXR_FRAME_SOURCE must be synthetic or unity-export, got: $frame_source" >&2
+  exit 1
+fi
+
+if [[ "$frame_source" == "unity-export" && -z "$frame_export_dir" ]]; then
+  echo "METALXR_FRAME_EXPORT_DIR is required when METALXR_FRAME_SOURCE=unity-export." >&2
+  exit 1
+fi
+
+streamer_args=(
+  --bind-host "$bind_host"
+  --port "$port"
+  --frames "$frames"
+  --fps "$fps"
+  --width "$width"
+  --height "$height"
+  --bitrate "$bitrate"
+  --queue-depth "$queue_depth"
+  --frame-source "$frame_source"
+  --prediction-offset-ms "$prediction_offset_ms"
+  --clock-sync-interval-ms "$clock_sync_interval_ms"
+  --tracking-state-path "$tracking_state_path"
+  --haptic-command-path "$haptic_command_path"
   --timing-state-path "$timing_state_path"
+)
+
+if [[ -n "$frame_export_dir" ]]; then
+  streamer_args+=(--frame-export-dir "$frame_export_dir")
+fi
+
+exec "$streamer" \
+  "${streamer_args[@]}"

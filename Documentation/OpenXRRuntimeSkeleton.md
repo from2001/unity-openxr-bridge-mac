@@ -159,4 +159,4 @@ METALXR_RUNTIME_JSON=/absolute/path/to/runtime.json Scripts/launch-unity-openxr.
 
 ## Next Step
 
-The remaining graphics integration work is teaching the host encoder to consume the exported frame records, then replacing the development file export with a lower-latency path such as IOSurface-backed textures or direct VideoToolbox-compatible pixel buffers. The remaining input integration work is replacing the state-file bridge with synchronized transport and broader OpenXR interaction-profile support.
+The host streamer can now consume the exported frame records as a development bridge. The remaining graphics integration work is replacing that file export with a lower-latency path such as IOSurface-backed textures or direct VideoToolbox-compatible pixel buffers. The remaining input integration work is replacing the state-file bridge with synchronized transport and broader OpenXR interaction-profile support.

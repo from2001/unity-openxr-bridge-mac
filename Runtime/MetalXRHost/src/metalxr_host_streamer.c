@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <netdb.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
@@ -19,11 +20,18 @@
 #include <string.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 #define METALXR_DEFAULT_STREAM_PORT 47000
 #define METALXR_VIDEO_FRAME_FLAG_KEYFRAME 0x00000001u
+#define METALXR_MAX_UNITY_EXPORT_PAYLOAD_BYTES (512ull * 1024ull * 1024ull)
+
+typedef enum FrameSourceMode {
+    FRAME_SOURCE_SYNTHETIC = 0,
+    FRAME_SOURCE_UNITY_EXPORT = 1,
+} FrameSourceMode;
 
 typedef struct StreamerOptions {
     char bindHost[256];
@@ -35,12 +43,42 @@ typedef struct StreamerOptions {
     int bitrate;
     int realtime;
     int queueDepth;
+    FrameSourceMode frameSource;
+    char frameExportDir[1024];
     int clockSyncIntervalMs;
     int64_t predictionOffsetNs;
     char trackingStatePath[1024];
     char hapticCommandPath[1024];
     char timingStatePath[1024];
 } StreamerOptions;
+
+typedef struct UnityExportRecord {
+    uint64_t sourceFrameId;
+    int eye;
+    uint64_t displayTimeNs;
+    int width;
+    int height;
+    size_t bytesPerRow;
+    size_t payloadBytes;
+    char payloadFormat[32];
+    char payloadPath[1024];
+} UnityExportRecord;
+
+typedef struct UnityExportFramePair {
+    uint64_t sourceFrameId;
+    UnityExportRecord eyes[2];
+} UnityExportFramePair;
+
+typedef struct UnityExportFrameSource {
+    char exportDir[1024];
+    long indexOffset;
+    int hasLatestEye[2];
+    UnityExportRecord latestEye[2];
+    int hasLatestPair;
+    UnityExportFramePair latestPair;
+    uint64_t repeatedFrames;
+    uint64_t missingPolls;
+} UnityExportFrameSource;
 
 typedef struct ByteBuffer {
     uint8_t* data;
@@ -178,6 +216,7 @@ static void print_usage(const char* argv0)
             "Usage: %s [--bind-host HOST] [--port N] [--frames N] [--fps N] "
             "[--width N] [--height N] [--bitrate BPS] [--tracking-state-path PATH] "
             "[--haptic-command-path PATH] [--timing-state-path PATH] [--queue-depth N] "
+            "[--frame-source synthetic|unity-export] [--frame-export-dir PATH] "
             "[--prediction-offset-ms N] [--clock-sync-interval-ms N] [--no-realtime]\n\n"
             "frames=0 streams until the client disconnects. The default bind host is 127.0.0.1,\n"
             "which is suitable for adb reverse. Use --bind-host 0.0.0.0 for Wi-Fi tests.\n",
@@ -209,6 +248,8 @@ static StreamerOptions parse_options(int argc, char** argv)
     options.bitrate = 8000000;
     options.realtime = 1;
     options.queueDepth = 3;
+    options.frameSource = FRAME_SOURCE_SYNTHETIC;
+    options.frameExportDir[0] = '\0';
     options.clockSyncIntervalMs = 500;
     options.predictionOffsetNs = 0;
     snprintf(options.trackingStatePath, sizeof(options.trackingStatePath), "%s", "/tmp/metalxr_tracking_state.txt");
@@ -242,6 +283,18 @@ static StreamerOptions parse_options(int argc, char** argv)
             snprintf(options.timingStatePath, sizeof(options.timingStatePath), "%s", argv[++i]);
         } else if (strcmp(arg, "--queue-depth") == 0 && i + 1 < argc) {
             options.queueDepth = parse_int_arg(argv[++i], "queue depth", 1, 64);
+        } else if (strcmp(arg, "--frame-source") == 0 && i + 1 < argc) {
+            const char* source = argv[++i];
+            if (strcmp(source, "synthetic") == 0) {
+                options.frameSource = FRAME_SOURCE_SYNTHETIC;
+            } else if (strcmp(source, "unity-export") == 0) {
+                options.frameSource = FRAME_SOURCE_UNITY_EXPORT;
+            } else {
+                fprintf(stderr, "Invalid frame source: %s\n", source);
+                exit(2);
+            }
+        } else if (strcmp(arg, "--frame-export-dir") == 0 && i + 1 < argc) {
+            snprintf(options.frameExportDir, sizeof(options.frameExportDir), "%s", argv[++i]);
         } else if (strcmp(arg, "--prediction-offset-ms") == 0 && i + 1 < argc) {
             options.predictionOffsetNs = (int64_t)parse_int_arg(argv[++i], "prediction offset ms", -500, 500) * 1000000;
         } else if (strcmp(arg, "--clock-sync-interval-ms") == 0 && i + 1 < argc) {
@@ -254,7 +307,309 @@ static StreamerOptions parse_options(int argc, char** argv)
         }
     }
 
+    if (options.frameSource == FRAME_SOURCE_UNITY_EXPORT && options.frameExportDir[0] == '\0') {
+        fprintf(stderr, "--frame-export-dir is required for --frame-source unity-export\n");
+        exit(2);
+    }
+
     return options;
+}
+
+static const char* frame_source_name(FrameSourceMode mode)
+{
+    switch (mode) {
+        case FRAME_SOURCE_SYNTHETIC:
+            return "synthetic";
+        case FRAME_SOURCE_UNITY_EXPORT:
+            return "unity-export";
+        default:
+            return "unknown";
+    }
+}
+
+static uint64_t realtime_now_ns(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        return 0;
+    }
+
+    return ((uint64_t)now.tv_sec * 1000000000ull) + (uint64_t)now.tv_nsec;
+}
+
+static uint64_t timespec_to_ns(const struct timespec* value)
+{
+    if (value == NULL || value->tv_sec < 0 || value->tv_nsec < 0) {
+        return 0;
+    }
+
+    return ((uint64_t)value->tv_sec * 1000000000ull) + (uint64_t)value->tv_nsec;
+}
+
+static uint64_t file_modified_realtime_ns(const char* path)
+{
+    if (path == NULL || path[0] == '\0') {
+        return 0;
+    }
+
+    struct stat info;
+    if (stat(path, &info) != 0) {
+        return 0;
+    }
+
+#if defined(__APPLE__)
+    return timespec_to_ns(&info.st_mtimespec);
+#else
+    return timespec_to_ns(&info.st_mtim);
+#endif
+}
+
+static uint64_t file_age_ms(const char* path)
+{
+    const uint64_t modifiedNs = file_modified_realtime_ns(path);
+    const uint64_t nowNs = realtime_now_ns();
+    if (modifiedNs == 0 || nowNs == 0 || nowNs < modifiedNs) {
+        return 0;
+    }
+
+    return (nowNs - modifiedNs) / 1000000ull;
+}
+
+static const char* json_find_value(const char* json, const char* key)
+{
+    const char* value = strstr(json, key);
+    return value != NULL ? value + strlen(key) : NULL;
+}
+
+static int json_read_u64_field(const char* json, const char* key, uint64_t* output)
+{
+    const char* value = json_find_value(json, key);
+    if (value == NULL || output == NULL) {
+        return 0;
+    }
+
+    char* end = NULL;
+    errno = 0;
+    const unsigned long long parsed = strtoull(value, &end, 10);
+    if (end == value || errno != 0) {
+        return 0;
+    }
+
+    *output = (uint64_t)parsed;
+    return 1;
+}
+
+static int json_read_i64_field(const char* json, const char* key, int64_t* output)
+{
+    const char* value = json_find_value(json, key);
+    if (value == NULL || output == NULL) {
+        return 0;
+    }
+
+    char* end = NULL;
+    errno = 0;
+    const long long parsed = strtoll(value, &end, 10);
+    if (end == value || errno != 0) {
+        return 0;
+    }
+
+    *output = (int64_t)parsed;
+    return 1;
+}
+
+static int json_read_string_field(const char* json, const char* key, char* output, size_t outputSize)
+{
+    const char* value = json_find_value(json, key);
+    if (value == NULL || output == NULL || outputSize == 0) {
+        return 0;
+    }
+
+    const char* end = value;
+    while (*end != '\0' && *end != '"') {
+        if (*end == '\\') {
+            return 0;
+        }
+        ++end;
+    }
+    if (*end != '"') {
+        return 0;
+    }
+
+    const size_t length = (size_t)(end - value);
+    if (length >= outputSize) {
+        return 0;
+    }
+
+    memcpy(output, value, length);
+    output[length] = '\0';
+    return 1;
+}
+
+static int parse_unity_export_record(const char* line, UnityExportRecord* record)
+{
+    if (line == NULL || record == NULL) {
+        return 0;
+    }
+
+    memset(record, 0, sizeof(*record));
+    uint64_t eye = 0;
+    uint64_t width = 0;
+    uint64_t height = 0;
+    uint64_t bytesPerRow = 0;
+    uint64_t payloadBytes = 0;
+    int64_t displayTime = 0;
+
+    if (!json_read_u64_field(line, "\"frame\":", &record->sourceFrameId) ||
+        !json_read_u64_field(line, "\"eye\":", &eye) ||
+        !json_read_i64_field(line, "\"displayTime\":", &displayTime) ||
+        !json_read_string_field(line, "\"payloadFormat\":\"", record->payloadFormat, sizeof(record->payloadFormat)) ||
+        !json_read_u64_field(line, "\"width\":", &width) ||
+        !json_read_u64_field(line, "\"height\":", &height) ||
+        !json_read_u64_field(line, "\"bytesPerRow\":", &bytesPerRow) ||
+        !json_read_u64_field(line, "\"payloadBytes\":", &payloadBytes) ||
+        !json_read_string_field(line, "\"payloadPath\":\"", record->payloadPath, sizeof(record->payloadPath))) {
+        return 0;
+    }
+
+    if (eye > 1 || width > INT_MAX || height > INT_MAX ||
+        bytesPerRow > SIZE_MAX || payloadBytes > SIZE_MAX ||
+        strcmp(record->payloadFormat, "BGRA8") != 0) {
+        return 0;
+    }
+
+    record->eye = (int)eye;
+    record->displayTimeNs = displayTime > 0 ? (uint64_t)displayTime : 0;
+    record->width = (int)width;
+    record->height = (int)height;
+    record->bytesPerRow = (size_t)bytesPerRow;
+    record->payloadBytes = (size_t)payloadBytes;
+    return 1;
+}
+
+static void unity_export_source_init(UnityExportFrameSource* source, const char* exportDir)
+{
+    memset(source, 0, sizeof(*source));
+    snprintf(source->exportDir, sizeof(source->exportDir), "%s", exportDir);
+}
+
+static void update_unity_export_source(UnityExportFrameSource* source, const UnityExportRecord* record)
+{
+    if (source == NULL || record == NULL || record->eye < 0 || record->eye > 1) {
+        return;
+    }
+
+    source->latestEye[record->eye] = *record;
+    source->hasLatestEye[record->eye] = 1;
+    if (source->hasLatestEye[0] && source->hasLatestEye[1] &&
+        source->latestEye[0].sourceFrameId == source->latestEye[1].sourceFrameId) {
+        source->latestPair.sourceFrameId = source->latestEye[0].sourceFrameId;
+        source->latestPair.eyes[0] = source->latestEye[0];
+        source->latestPair.eyes[1] = source->latestEye[1];
+        source->hasLatestPair = 1;
+    }
+}
+
+static int poll_unity_export_frame_source(UnityExportFrameSource* source, UnityExportFramePair* pair)
+{
+    if (source == NULL || source->exportDir[0] == '\0') {
+        return 0;
+    }
+
+    char indexPath[1024];
+    snprintf(indexPath, sizeof(indexPath), "%s/frames.jsonl", source->exportDir);
+
+    FILE* input = fopen(indexPath, "r");
+    if (input == NULL) {
+        ++source->missingPolls;
+        return source->hasLatestPair && pair != NULL ? (*pair = source->latestPair, 1) : 0;
+    }
+
+    if (source->indexOffset > 0) {
+        if (fseek(input, 0, SEEK_END) == 0) {
+            const long indexSize = ftell(input);
+            if (indexSize >= 0 && indexSize < source->indexOffset) {
+                source->indexOffset = 0;
+            }
+        }
+    }
+
+    if (source->indexOffset > 0) {
+        (void)fseek(input, source->indexOffset, SEEK_SET);
+    }
+
+    int parsedRecords = 0;
+    char line[4096];
+    while (fgets(line, sizeof(line), input) != NULL) {
+        UnityExportRecord record;
+        if (parse_unity_export_record(line, &record)) {
+            update_unity_export_source(source, &record);
+            ++parsedRecords;
+        }
+    }
+
+    const long nextOffset = ftell(input);
+    if (nextOffset >= 0) {
+        source->indexOffset = nextOffset;
+    }
+    fclose(input);
+
+    if (!source->hasLatestPair) {
+        ++source->missingPolls;
+        return 0;
+    }
+
+    if (parsedRecords == 0) {
+        ++source->repeatedFrames;
+    }
+    if (pair != NULL) {
+        *pair = source->latestPair;
+    }
+    return 1;
+}
+
+static uint64_t unity_export_pair_age_ms(const UnityExportFramePair* pair)
+{
+    if (pair == NULL) {
+        return 0;
+    }
+
+    const uint64_t leftAgeMs = file_age_ms(pair->eyes[0].payloadPath);
+    const uint64_t rightAgeMs = file_age_ms(pair->eyes[1].payloadPath);
+    return leftAgeMs > rightAgeMs ? leftAgeMs : rightAgeMs;
+}
+
+static int is_plausible_host_display_time(uint64_t displayTimeNs, uint64_t captureTimeNs)
+{
+    if (displayTimeNs == 0 || captureTimeNs == 0) {
+        return 0;
+    }
+
+    const uint64_t deltaNs =
+        displayTimeNs > captureTimeNs ?
+            displayTimeNs - captureTimeNs :
+            captureTimeNs - displayTimeNs;
+    return deltaNs < 2000000000ull;
+}
+
+static int validate_unity_export_pair_dimensions(
+    const UnityExportFramePair* pair,
+    int expectedWidth,
+    int expectedHeight)
+{
+    if (pair == NULL) {
+        return 0;
+    }
+
+    for (size_t eye = 0; eye < 2; ++eye) {
+        const UnityExportRecord* record = &pair->eyes[eye];
+        if (record->eye != (int)eye ||
+            record->width != expectedWidth ||
+            record->height != expectedHeight) {
+            return 0;
+        }
+    }
+
+    return 1;
 }
 
 static int append_bytes(ByteBuffer* buffer, const void* data, size_t size)
@@ -596,6 +951,73 @@ static CVPixelBufferRef create_synthetic_pixel_buffer(int width, int height, uin
     return pixelBuffer;
 }
 
+static int read_file_exact(const char* path, uint8_t* data, size_t size)
+{
+    FILE* input = fopen(path, "rb");
+    if (input == NULL) {
+        return 0;
+    }
+
+    const size_t readBytes = fread(data, 1, size, input);
+    const int ok = readBytes == size && ferror(input) == 0;
+    fclose(input);
+    return ok;
+}
+
+static CVPixelBufferRef create_unity_export_pixel_buffer(const UnityExportRecord* record)
+{
+    if (record == NULL || strcmp(record->payloadFormat, "BGRA8") != 0 ||
+        record->width <= 0 || record->height <= 0 ||
+        record->bytesPerRow < (size_t)record->width * 4u ||
+        record->bytesPerRow > SIZE_MAX / (size_t)record->height ||
+        record->payloadBytes < record->bytesPerRow * (size_t)record->height ||
+        record->payloadBytes > METALXR_MAX_UNITY_EXPORT_PAYLOAD_BYTES) {
+        return NULL;
+    }
+
+    uint8_t* payload = (uint8_t*)malloc(record->payloadBytes);
+    if (payload == NULL) {
+        return NULL;
+    }
+
+    if (!read_file_exact(record->payloadPath, payload, record->payloadBytes)) {
+        free(payload);
+        return NULL;
+    }
+
+    CVPixelBufferRef pixelBuffer = NULL;
+    const OSStatus createStatus = CVPixelBufferCreate(
+        kCFAllocatorDefault,
+        (size_t)record->width,
+        (size_t)record->height,
+        kCVPixelFormatType_32BGRA,
+        NULL,
+        &pixelBuffer);
+    if (createStatus != kCVReturnSuccess || pixelBuffer == NULL) {
+        free(payload);
+        return NULL;
+    }
+
+    if (CVPixelBufferLockBaseAddress(pixelBuffer, 0) != kCVReturnSuccess) {
+        CVPixelBufferRelease(pixelBuffer);
+        free(payload);
+        return NULL;
+    }
+
+    uint8_t* base = (uint8_t*)CVPixelBufferGetBaseAddress(pixelBuffer);
+    const size_t destinationBytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
+    const size_t copiedRowBytes = (size_t)record->width * 4u;
+    for (int y = 0; y < record->height; ++y) {
+        const uint8_t* sourceRow = payload + ((size_t)y * record->bytesPerRow);
+        uint8_t* destinationRow = base + ((size_t)y * destinationBytesPerRow);
+        memcpy(destinationRow, sourceRow, copiedRowBytes);
+    }
+
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+    free(payload);
+    return pixelBuffer;
+}
+
 static int create_encoder(EncoderContext* context, const StreamerOptions* options, StreamSession* stream)
 {
     context->width = options->width;
@@ -662,20 +1084,19 @@ static int create_encoder(EncoderContext* context, const StreamerOptions* option
     return 1;
 }
 
-static int encode_eye_frame(
+static int submit_pixel_buffer_frame(
     EncoderContext* context,
     uint64_t frameId,
     uint64_t captureTimeNs,
-    uint64_t predictedDisplayTimeNs)
+    uint64_t predictedDisplayTimeNs,
+    CVPixelBufferRef pixelBuffer)
 {
     if (!reserve_encoder_queue_slot(context, frameId)) {
         return 1;
     }
 
-    CVPixelBufferRef pixelBuffer =
-        create_synthetic_pixel_buffer(context->width, context->height, frameId, context->eyeIndex);
     if (pixelBuffer == NULL) {
-        fprintf(stderr, "Failed to create pixel buffer for %s frame %" PRIu64 "\n",
+        fprintf(stderr, "Missing pixel buffer for %s frame %" PRIu64 "\n",
                 context->eyeName,
                 frameId);
         ++context->stats.droppedFrames;
@@ -708,7 +1129,6 @@ static int encode_eye_frame(
         NULL,
         frame,
         NULL);
-    CVPixelBufferRelease(pixelBuffer);
 
     if (status != noErr) {
         fprintf(stderr, "VTCompressionSessionEncodeFrame failed for %s frame %" PRIu64 ": %d\n",
@@ -723,6 +1143,76 @@ static int encode_eye_frame(
 
     ++context->stats.submittedFrames;
     return 1;
+}
+
+static int encode_synthetic_eye_frame(
+    EncoderContext* context,
+    uint64_t frameId,
+    uint64_t captureTimeNs,
+    uint64_t predictedDisplayTimeNs)
+{
+    CVPixelBufferRef pixelBuffer =
+        create_synthetic_pixel_buffer(context->width, context->height, frameId, context->eyeIndex);
+    if (pixelBuffer == NULL) {
+        fprintf(stderr, "Failed to create synthetic pixel buffer for %s frame %" PRIu64 "\n",
+                context->eyeName,
+                frameId);
+        ++context->stats.droppedFrames;
+        return 0;
+    }
+
+    const int ok = submit_pixel_buffer_frame(
+        context,
+        frameId,
+        captureTimeNs,
+        predictedDisplayTimeNs,
+        pixelBuffer);
+    CVPixelBufferRelease(pixelBuffer);
+    return ok;
+}
+
+static int encode_unity_export_eye_frame(
+    EncoderContext* context,
+    uint64_t frameId,
+    uint64_t captureTimeNs,
+    uint64_t predictedDisplayTimeNs,
+    const UnityExportRecord* record)
+{
+    if (record == NULL || record->width != context->width || record->height != context->height) {
+        fprintf(stderr,
+                "{\"event\":\"drop\",\"reason\":\"unity_export_dimensions\","
+                "\"frame\":%" PRIu64 ",\"eye\":%d,\"expected_width\":%d,"
+                "\"expected_height\":%d}\n",
+                frameId,
+                context->eyeIndex,
+                context->width,
+                context->height);
+        ++context->stats.droppedFrames;
+        return 0;
+    }
+
+    CVPixelBufferRef pixelBuffer = create_unity_export_pixel_buffer(record);
+    if (pixelBuffer == NULL) {
+        fprintf(stderr,
+                "{\"event\":\"drop\",\"reason\":\"unity_export_payload\","
+                "\"frame\":%" PRIu64 ",\"source_frame\":%" PRIu64 ","
+                "\"eye\":%d,\"payload\":\"%s\"}\n",
+                frameId,
+                record->sourceFrameId,
+                record->eye,
+                record->payloadPath);
+        ++context->stats.droppedFrames;
+        return 0;
+    }
+
+    const int ok = submit_pixel_buffer_frame(
+        context,
+        frameId,
+        captureTimeNs,
+        predictedDisplayTimeNs,
+        pixelBuffer);
+    CVPixelBufferRelease(pixelBuffer);
+    return ok;
 }
 
 static void destroy_encoder(EncoderContext* context)
@@ -1433,6 +1923,49 @@ static int send_hello_ack(int fd, StreamSession* session, const StreamerOptions*
     return metalxr_protocol_send_packet(fd, &ackHeader, &ack);
 }
 
+static int configure_unity_export_stream(
+    StreamerOptions* activeOptions,
+    UnityExportFrameSource* source,
+    UnityExportFramePair* initialPair)
+{
+    if (activeOptions == NULL || activeOptions->frameSource != FRAME_SOURCE_UNITY_EXPORT) {
+        return 1;
+    }
+
+    unity_export_source_init(source, activeOptions->frameExportDir);
+    if (!poll_unity_export_frame_source(source, initialPair)) {
+        fprintf(stderr,
+                "No complete Unity frame export pair found in %s. "
+                "Start Unity Play Mode with METALXR_FRAME_EXPORT_DIR set before using unity-export source.\n",
+                activeOptions->frameExportDir);
+        return 0;
+    }
+
+    if (initialPair->eyes[0].width != initialPair->eyes[1].width ||
+        initialPair->eyes[0].height != initialPair->eyes[1].height) {
+        fprintf(stderr,
+                "Unity export eye dimensions do not match: left=%dx%d right=%dx%d\n",
+                initialPair->eyes[0].width,
+                initialPair->eyes[0].height,
+                initialPair->eyes[1].width,
+                initialPair->eyes[1].height);
+        return 0;
+    }
+
+    activeOptions->width = initialPair->eyes[0].width;
+    activeOptions->height = initialPair->eyes[0].height;
+    printf("{\"event\":\"frame_source\",\"source\":\"unity-export\","
+           "\"state\":\"ready\",\"source_frame\":%" PRIu64 ",\"width\":%d,"
+           "\"height\":%d,\"age_ms\":%" PRIu64 ",\"export_dir\":\"%s\"}\n",
+           initialPair->sourceFrameId,
+           activeOptions->width,
+           activeOptions->height,
+           unity_export_pair_age_ms(initialPair),
+           activeOptions->frameExportDir);
+    fflush(stdout);
+    return 1;
+}
+
 static int stream_client(int clientFd, const StreamerOptions* options)
 {
     MetalXRHelloPayload clientHello;
@@ -1441,20 +1974,31 @@ static int stream_client(int clientFd, const StreamerOptions* options)
         return 0;
     }
 
+    StreamerOptions activeOptions = *options;
+    UnityExportFrameSource unityExportSource;
+    memset(&unityExportSource, 0, sizeof(unityExportSource));
+    UnityExportFramePair initialUnityPair;
+    memset(&initialUnityPair, 0, sizeof(initialUnityPair));
+
     StreamSession stream;
     memset(&stream, 0, sizeof(stream));
     stream.clientFd = clientFd;
     stream.sequence = firstSequence + 1;
-    snprintf(stream.trackingStatePath, sizeof(stream.trackingStatePath), "%s", options->trackingStatePath);
-    snprintf(stream.hapticCommandPath, sizeof(stream.hapticCommandPath), "%s", options->hapticCommandPath);
-    snprintf(stream.timingStatePath, sizeof(stream.timingStatePath), "%s", options->timingStatePath);
-    stream.timing = make_default_timing_state(options);
+    snprintf(stream.trackingStatePath, sizeof(stream.trackingStatePath), "%s", activeOptions.trackingStatePath);
+    snprintf(stream.hapticCommandPath, sizeof(stream.hapticCommandPath), "%s", activeOptions.hapticCommandPath);
+    snprintf(stream.timingStatePath, sizeof(stream.timingStatePath), "%s", activeOptions.timingStatePath);
+    stream.timing = make_default_timing_state(&activeOptions);
     pthread_mutex_init(&stream.sendLock, NULL);
     HostInputState inputState = make_default_input_state();
     write_tracking_state_file(&stream, &inputState);
     write_timing_state_file(&stream);
 
-    if (!send_hello_ack(clientFd, &stream, options)) {
+    if (!configure_unity_export_stream(&activeOptions, &unityExportSource, &initialUnityPair)) {
+        pthread_mutex_destroy(&stream.sendLock);
+        return 0;
+    }
+
+    if (!send_hello_ack(clientFd, &stream, &activeOptions)) {
         pthread_mutex_destroy(&stream.sendLock);
         return 0;
     }
@@ -1471,29 +2015,76 @@ static int stream_client(int clientFd, const StreamerOptions* options)
     right.stream = &stream;
     int ok = 1;
 
-    if (!create_encoder(&left, options, &stream) ||
-        !create_encoder(&right, options, &stream)) {
+    if (!create_encoder(&left, &activeOptions, &stream) ||
+        !create_encoder(&right, &activeOptions, &stream)) {
         ok = 0;
     }
 
     const uint64_t startNs = host_time_ns();
-    const uint64_t framePeriodNs = 1000000000ull / (uint64_t)options->fps;
-    const uint64_t clockSyncIntervalNs = (uint64_t)options->clockSyncIntervalMs * 1000000ull;
-    for (int frame = 0; ok && !stream.failed && (options->frames == 0 || frame < options->frames); ++frame) {
+    const uint64_t framePeriodNs = 1000000000ull / (uint64_t)activeOptions.fps;
+    const uint64_t clockSyncIntervalNs = (uint64_t)activeOptions.clockSyncIntervalMs * 1000000ull;
+    for (int frame = 0; ok && !stream.failed && (activeOptions.frames == 0 || frame < activeOptions.frames); ++frame) {
         drain_client_input_packets(&stream, &inputState);
         poll_haptic_command_file(&stream);
         send_clock_sync_if_due(&stream, clockSyncIntervalNs);
 
         const uint64_t captureTimeNs = host_time_ns();
-        const uint64_t predictedDisplayTimeNs =
+        uint64_t predictedDisplayTimeNs =
             next_predicted_display_time_ns(&stream.timing, captureTimeNs, framePeriodNs);
 
-        if (!encode_eye_frame(&left, (uint64_t)frame, captureTimeNs, predictedDisplayTimeNs) ||
-            !encode_eye_frame(&right, (uint64_t)frame, captureTimeNs, predictedDisplayTimeNs)) {
+        if (activeOptions.frameSource == FRAME_SOURCE_UNITY_EXPORT) {
+            UnityExportFramePair pair;
+            if (!poll_unity_export_frame_source(&unityExportSource, &pair)) {
+                fprintf(stderr,
+                        "{\"event\":\"drop\",\"reason\":\"unity_export_missing\","
+                        "\"frame\":%d,\"missing_polls\":%" PRIu64 "}\n",
+                        frame,
+                        unityExportSource.missingPolls);
+                ok = 0;
+            } else if (!validate_unity_export_pair_dimensions(&pair, activeOptions.width, activeOptions.height)) {
+                fprintf(stderr,
+                        "{\"event\":\"drop\",\"reason\":\"unity_export_dimensions\","
+                        "\"frame\":%d,\"source_frame\":%" PRIu64 ","
+                        "\"expected_width\":%d,\"expected_height\":%d}\n",
+                        frame,
+                        pair.sourceFrameId,
+                        activeOptions.width,
+                        activeOptions.height);
+                ok = 0;
+            } else {
+                if (is_plausible_host_display_time(pair.eyes[0].displayTimeNs, captureTimeNs)) {
+                    predictedDisplayTimeNs = pair.eyes[0].displayTimeNs;
+                }
+                if (frame < 4 || (frame % (activeOptions.fps * 2)) == 0) {
+                    printf("{\"event\":\"frame_source\",\"source\":\"unity-export\","
+                           "\"frame\":%d,\"source_frame\":%" PRIu64 ","
+                           "\"age_ms\":%" PRIu64 ",\"repeated\":%" PRIu64 "}\n",
+                           frame,
+                           pair.sourceFrameId,
+                           unity_export_pair_age_ms(&pair),
+                           unityExportSource.repeatedFrames);
+                    fflush(stdout);
+                }
+
+                if (!encode_unity_export_eye_frame(&left,
+                                                   (uint64_t)frame,
+                                                   captureTimeNs,
+                                                   predictedDisplayTimeNs,
+                                                   &pair.eyes[0]) ||
+                    !encode_unity_export_eye_frame(&right,
+                                                   (uint64_t)frame,
+                                                   captureTimeNs,
+                                                   predictedDisplayTimeNs,
+                                                   &pair.eyes[1])) {
+                    ok = 0;
+                }
+            }
+        } else if (!encode_synthetic_eye_frame(&left, (uint64_t)frame, captureTimeNs, predictedDisplayTimeNs) ||
+                   !encode_synthetic_eye_frame(&right, (uint64_t)frame, captureTimeNs, predictedDisplayTimeNs)) {
             ok = 0;
         }
 
-        if (options->realtime) {
+        if (activeOptions.realtime) {
             sleep_until_ns(startNs + ((uint64_t)(frame + 1) * framePeriodNs));
         }
     }
@@ -1528,7 +2119,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d prediction_offset_ns=%" PRId64 " tracking=%s haptics=%s timing=%s\n",
+    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d source=%s export_dir=%s prediction_offset_ns=%" PRId64 " tracking=%s haptics=%s timing=%s\n",
            options.bindHost,
            options.port,
            options.width,
@@ -1537,6 +2128,8 @@ int main(int argc, char** argv)
            options.bitrate,
            options.frames,
            options.queueDepth,
+           frame_source_name(options.frameSource),
+           options.frameExportDir[0] != '\0' ? options.frameExportDir : "-",
            options.predictionOffsetNs,
            options.trackingStatePath,
            options.hapticCommandPath,
