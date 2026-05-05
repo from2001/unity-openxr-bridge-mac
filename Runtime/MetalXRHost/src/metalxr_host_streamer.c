@@ -1415,6 +1415,8 @@ static HostInputState make_default_input_state(void)
     HostInputState state;
     memset(&state, 0, sizeof(state));
     state.hmd.orientation[3] = 1.0f;
+    state.hmd.trackingFlags = METALXR_TRACKING_ORIENTATION_VALID |
+                              METALXR_TRACKING_POSITION_VALID;
     for (size_t hand = 0; hand < 2; ++hand) {
         state.controllers[hand].hand = (uint32_t)hand;
         state.controllers[hand].aimOrientation[3] = 1.0f;

@@ -95,7 +95,7 @@ tracking state stale
 xrWaitFrame ... timing=stale
 ```
 
-This means the Quest client or host streamer stopped updating input/timing files. Restart the Quest client or streamer. For USB, confirm adb reverse is active. During normal reconnects, the runtime preserves the last pose but clears tracking/action flags so Unity does not treat frozen samples as live tracking.
+This means the Quest client or host streamer stopped updating input/timing files. Restart the Quest client or streamer. For USB, confirm adb reverse is active. During normal reconnects, the runtime keeps the HMD view pose valid so Unity continues rendering, but clears live tracking bits and controller/action state so Unity does not treat frozen samples as live input.
 
 ## VideoToolbox Encoder Fails
 

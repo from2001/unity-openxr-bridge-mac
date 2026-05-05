@@ -98,7 +98,7 @@ The Quest client samples the center-eye HMD, left controller, and right controll
 - `METALXR_PACKET_POSE_SAMPLE` for HMD position, orientation, and tracking flags.
 - `METALXR_PACKET_CONTROLLER_INPUT` for controller buttons, trigger, grip, thumbstick, tracking flags, and aim/grip poses.
 
-The macOS host streamer drains those packets on the stream socket and atomically rewrites `METALXR_TRACKING_STATE_PATH`. The native runtime consumes that file for `xrLocateViews`, action-space locations, and action-state reads. If the state file is older than `METALXR_TRACKING_STALE_TIMEOUT_MS` (default 1000), the runtime keeps the last pose for continuity but clears OpenXR tracking flags, button states, triggers, grips, and thumbsticks so Unity sees inactive/stale input instead of frozen valid tracking.
+The macOS host streamer drains those packets on the stream socket and atomically rewrites `METALXR_TRACKING_STATE_PATH`. The native runtime consumes that file for `xrLocateViews`, action-space locations, and action-state reads. If the state file is older than `METALXR_TRACKING_STALE_TIMEOUT_MS` (default 1000), the runtime keeps the last or identity HMD pose valid for view rendering, but clears live tracking bits, controller tracking flags, button states, triggers, grips, and thumbsticks so Unity can continue submitting projection layers without treating stale input as live controller state.
 
 Haptics flow in the opposite direction. The runtime writes the latest command to `METALXR_HAPTIC_COMMAND_PATH` from `xrApplyHapticFeedback`; the host streamer sends it as `METALXR_PACKET_HAPTIC_COMMAND`; the Quest client applies it with Unity XR `SendHapticImpulse` on the main thread.
 

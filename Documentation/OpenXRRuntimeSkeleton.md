@@ -102,7 +102,7 @@ The development input bridge uses a text state file so the host streamer and nat
 
 `xrLocateViews` reads the latest HMD pose and offsets the left and right eye views by a fixed 64 mm IPD. Action-space locations read the controller aim or grip pose based on the action name. Boolean, float, and vector action states map to Oculus Touch-style primary/secondary/menu/thumbstick buttons, trigger, grip, and thumbstick axes.
 
-Tracking samples remain timestamped with Quest sample ids and timestamps. If the state file stops updating past `METALXR_TRACKING_STALE_TIMEOUT_MS`, the runtime logs the stale age, preserves the last pose for continuity, and clears OpenXR tracking/action flags and controller inputs so consumers can distinguish stale data from live tracking.
+Tracking samples remain timestamped with Quest sample ids and timestamps. If the state file stops updating past `METALXR_TRACKING_STALE_TIMEOUT_MS`, the runtime logs the stale age, preserves the last or identity HMD pose as a valid view pose so Unity keeps rendering, and clears live tracking bits plus controller action flags and inputs so consumers can distinguish stale data from live tracking.
 
 `xrApplyHapticFeedback` writes the latest vibration request to the haptic command file. The host streamer polls that file and forwards the command to the Quest client.
 
