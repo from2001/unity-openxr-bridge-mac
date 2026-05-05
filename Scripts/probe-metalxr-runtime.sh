@@ -11,6 +11,7 @@ probe_source="${TMPDIR:-/tmp}/metalxr_runtime_probe.c"
 probe_binary="${TMPDIR:-/tmp}/metalxr_runtime_probe"
 probe_log="${TMPDIR:-/tmp}/metalxr_runtime_probe.log"
 probe_dump_dir="${TMPDIR:-/tmp}/metalxr_frame_dump"
+probe_export_dir="${TMPDIR:-/tmp}/metalxr_frame_export"
 probe_timing_state="${TMPDIR:-/tmp}/metalxr_runtime_probe_timing_state.txt"
 
 if [[ ! -f "$runtime_dylib" ]]; then
@@ -627,10 +628,16 @@ clang -std=c11 -Wall -Wextra -Werror \
 rm -f "$probe_log"
 rm -f "$probe_timing_state"
 rm -rf "$probe_dump_dir"
+rm -rf "$probe_export_dir"
 mkdir -p "$probe_dump_dir"
+mkdir -p "$probe_export_dir"
 METALXR_RUNTIME_LOG="$probe_log" \
 METALXR_FRAME_DUMP_DIR="$probe_dump_dir" \
+METALXR_FRAME_EXPORT_DIR="$probe_export_dir" \
+METALXR_FRAME_EXPORT_MODE=fixture \
 METALXR_TIMING_STATE_PATH="$probe_timing_state" \
+METALXR_VIEW_WIDTH=64 \
+METALXR_VIEW_HEIGHT=64 \
 "$probe_binary" "$runtime_dylib"
 
 echo "Runtime log: $probe_log"
@@ -644,3 +651,37 @@ fi
 
 echo "Frame metadata: $metadata_file"
 sed -n '1,80p' "$metadata_file"
+
+export_index="$probe_export_dir/frames.jsonl"
+if [[ ! -f "$export_index" ]]; then
+  echo "Expected frame export index was not written: $export_index" >&2
+  exit 1
+fi
+
+for eye in 0 1; do
+  payload_file="$probe_export_dir/frame_000001_eye_${eye}.bgra"
+  record_file="$probe_export_dir/frame_000001_eye_${eye}.json"
+  if [[ ! -s "$payload_file" ]]; then
+    echo "Expected non-empty frame export payload was not written: $payload_file" >&2
+    exit 1
+  fi
+  if [[ ! -f "$record_file" ]]; then
+    echo "Expected frame export record was not written: $record_file" >&2
+    exit 1
+  fi
+  first_byte="$(od -An -tu1 -N1 "$payload_file" | tr -d ' ')"
+  if [[ -z "$first_byte" || "$first_byte" == "0" ]]; then
+    echo "Expected deterministic non-zero fixture pixel in $payload_file" >&2
+    exit 1
+  fi
+  grep -q "\"frame\":1" "$record_file"
+  grep -q "\"eye\":$eye" "$record_file"
+  grep -q "\"payloadFormat\":\"BGRA8\"" "$record_file"
+  grep -q "\"payloadPath\":\"$payload_file\"" "$record_file"
+done
+
+grep -q "\"eye\":0" "$export_index"
+grep -q "\"eye\":1" "$export_index"
+
+echo "Frame exports: $probe_export_dir"
+sed -n '1,4p' "$export_index"

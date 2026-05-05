@@ -87,9 +87,9 @@ Tradeoffs and limitations:
 
 - The runtime can prove frame access at the GPU-resource level because Unity renders into textures allocated by the runtime.
 - `METALXR_FRAME_DUMP_DIR` writes metadata for submitted projection frames, including swapchain ids, Metal texture pointers, image indices, formats, and rectangles.
-- The runtime does not read pixels back to CPU memory yet.
+- `METALXR_FRAME_EXPORT_DIR` writes per-eye JSON records and BGRA/raw payload files for submitted projection views. By default the runtime attempts CPU readback from the submitted Metal texture; `METALXR_FRAME_EXPORT_MODE=fixture` writes deterministic probe pixels instead.
 - The runtime does not allocate IOSurface-backed textures yet, so there is no cross-process share handle or VideoToolbox encode path.
-- Synchronization is minimal and only models the OpenXR acquire/wait/release call order. Real GPU fences must be added before encoding or streaming.
+- Synchronization is minimal and uses a development Metal blit synchronization when a Unity command queue is available. Real GPU fences must be added before production encoding or streaming.
 
 ## Tracking, Actions, And Haptics
 
@@ -133,7 +133,7 @@ Scripts/probe-metalxr-runtime.sh
 
 The probe uses `dlopen`, calls `xrNegotiateLoaderRuntimeInterface`, creates an instance with Unity's `XR_KHRX2_metal_enable` path, discovers the dummy HMD system, creates a session, consumes session-state events, creates a local reference space, creates one Metal swapchain per eye, and runs three deterministic frames through `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews`, swapchain acquire/wait/release, and `xrEndFrame`.
 
-The probe also sets `METALXR_FRAME_DUMP_DIR` and fails unless `frame_000001.txt` is written with projection frame metadata.
+The probe also sets `METALXR_FRAME_DUMP_DIR` and `METALXR_FRAME_EXPORT_DIR`. It fails unless `frame_000001.txt` is written with projection frame metadata and `frames.jsonl` plus non-empty left/right fixture payloads are written by the frame export path.
 
 Input bridge coverage is in:
 
@@ -159,4 +159,4 @@ METALXR_RUNTIME_JSON=/absolute/path/to/runtime.json Scripts/launch-unity-openxr.
 
 ## Next Step
 
-The remaining graphics integration work is connecting runtime-owned Metal textures to the host encoder through a Metal blit into VideoToolbox-compatible pixel buffers or by changing swapchain allocation to IOSurface-backed textures that can be handed to the encoder with lower copy overhead. The remaining input integration work is replacing the state-file bridge with synchronized transport and broader OpenXR interaction-profile support.
+The remaining graphics integration work is teaching the host encoder to consume the exported frame records, then replacing the development file export with a lower-latency path such as IOSurface-backed textures or direct VideoToolbox-compatible pixel buffers. The remaining input integration work is replacing the state-file bridge with synchronized transport and broader OpenXR interaction-profile support.
