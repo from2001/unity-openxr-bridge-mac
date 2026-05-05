@@ -1,12 +1,83 @@
-# MetalXR | SteamVR*/OpenXR on MacOS!
+# MetalXR | OpenXR experiments on macOS
 
-### MetalXR is a full-scale implementation of OpenComposite and OpenXR on MacOS including support for launching SteamVR applications by utilizing layering such as Box64 (For M1).
+MetalXR is a work-in-progress macOS helper for OpenXR development. The original repository described a full OpenXR/OpenComposite runtime for macOS, but the checked-in code only contained a SwiftUI app and a bundled Android platform-tools/adb folder. This fork now makes the existing app runnable as a Quest APK installer and adds scripts for launching Unity with a macOS OpenXR runtime manifest.
+
+## Current status
+
+Working:
+
+- Detect an authorized Quest/Android headset through the bundled `adb`.
+- Install a local APK onto the headset from the macOS app or from `Scripts/install-quest-apk.sh`.
+- Launch Unity with `XR_RUNTIME_JSON` set to an installed macOS OpenXR runtime, without changing system-wide OpenXR runtime registration.
+- Use Meta XR Simulator as the default macOS OpenXR runtime when it is installed at `/Applications/MetaXRSimulator.app`.
+
+Not implemented yet:
+
+- A native MetalXR OpenXR runtime library.
+- A Quest PCVR transport layer for video, tracking, input, audio, and timing.
+- A Quest client that pairs with a native MetalXR streamer.
+- SteamVR/OpenComposite compatibility on macOS.
+
+That means this repository can currently make Unity's OpenXR loader run on macOS against an existing runtime such as Meta XR Simulator, but it is not yet the macOS equivalent of Quest Link/Air Link. [Unity's Meta Quest Link documentation](https://docs.unity.cn/Packages/com.unity.xr.meta-openxr%402.1/manual/get-started/link.html) states that Meta Quest Link is Windows-only, so a real Mac version requires implementing both a host OpenXR runtime and a headset streaming client.
+
+## Quick start for Unity on macOS
+
+Check local status:
+
+```sh
+Scripts/metalxr-status.sh
+```
+
+Launch Unity with the default runtime. If Meta XR Simulator is installed, it is selected automatically:
+
+```sh
+Scripts/launch-unity-openxr.sh /path/to/UnityProject
+```
+
+Use another OpenXR runtime manifest:
+
+```sh
+METALXR_RUNTIME_JSON=/path/to/runtime.json Scripts/launch-unity-openxr.sh /path/to/UnityProject
+```
+
+Install a local Quest APK:
+
+```sh
+Scripts/install-quest-apk.sh /path/to/app.apk
+```
+
+The headset must have Developer Mode enabled, USB debugging accepted in-headset, and must appear as `device` in `adb devices -l`.
+
+## Unity project setup
+
+Use Unity's OpenXR package for Standalone/macOS Play Mode and Android/Quest builds. For Meta Quest content, keep the Android build path as the production target and use the macOS OpenXR path for editor simulation or future native runtime work.
+
+For Meta XR Simulator:
+
+1. Install Meta XR Simulator.
+2. Run `Scripts/launch-unity-openxr.sh`.
+3. In Unity, enable OpenXR for the Standalone target.
+4. Enter Play Mode after the simulator has started.
+
+The script sets `XR_RUNTIME_JSON` only for the Unity process it launches. It follows the [OpenXR loader override mechanism](https://registry.khronos.org/OpenXR/specs/1.1/loader.html#overriding-the-default-runtime-usage) and does not overwrite `/usr/local/share/openxr/1/active_runtime.json`.
 
 ## How does it work?
-Pretty much how we explained in the description above! MORE IN DEPTH INFO COMING SOON!
+
+The macOS app is a SwiftUI wrapper around bundled adb platform-tools. The scripts provide a lower-friction development path:
+
+- `Scripts/metalxr-status.sh` prints adb devices, OpenXR runtime manifests, and installed Unity editors.
+- `Scripts/install-quest-apk.sh` installs an APK through adb with device-state checks.
+- `Scripts/launch-unity-openxr.sh` launches Unity with `XR_RUNTIME_JSON` pointing at a runtime manifest.
+
+The next major engineering step is a native OpenXR runtime dylib that Unity can load on macOS. After that, a Quest client and low-latency transport must be implemented.
 
 ## How can I install it?
-You can download the latest disk image from our [Releases](https://github.com/PeaPodDevs/MetalXR) page.
+
+There is no release artifact for this fork yet. Build the macOS app with Xcode:
+
+```sh
+xcodebuild -project MetalXR.xcodeproj -scheme MetalXR -configuration Debug -destination 'platform=macOS' build CODE_SIGNING_ALLOWED=NO
+```
 
 ## What are the requirements?  
 As of now, we only support standalone* Android headsets (Meta Quest, Pico Neo, etc) because of limitations with macOS USB and DisplayPort handling.

@@ -12,13 +12,17 @@ struct HomeView: View {
     var body: some View {
         VStack (
             alignment: .leading,
-            spacing: 10
+            spacing: 12
         ) {
-            Text("Hi.")
+            Text("MetalXR")
                 .font(.title)
                 .fontWeight(.bold)
                 .multilineTextAlignment(.leading)
-            NavigationLink { InitialView() } label: { Text("back to welcome") }
+
+            Text("Quest client installation is complete. Use the scripts in the repository to launch Unity with an OpenXR runtime on macOS.")
+                .foregroundStyle(.secondary)
+
+            NavigationLink { InitialView() } label: { Text("Back") }
                 
         }
         .frame(maxWidth: .infinity, alignment: .leading)
