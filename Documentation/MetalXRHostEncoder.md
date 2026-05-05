@@ -90,4 +90,4 @@ The streamer also emits `frame_source`, `clock_sync`, and `latency` JSON records
 
 ## Next Step
 
-The file-based Unity export bridge should be replaced with a lower-latency IOSurface-backed path or a Metal blit into VideoToolbox-compatible pixel buffers. The Quest client also needs to render decoded color frames directly instead of relying on diagnostic fallback visuals.
+The file-based Unity export bridge should be replaced with a lower-latency IOSurface-backed path or a Metal blit into VideoToolbox-compatible pixel buffers. The remaining stream work is wiring the end-to-end launch sequence and then hardening timing, recovery, and transport behavior.

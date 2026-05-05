@@ -9,7 +9,7 @@ Issue #7 added the first Quest-side client surface inside the Unity OpenXR smoke
 - Build helper: `Assets/Editor/MetalXRQuestClientBuild.cs`
 - Default package id: `com.metalxr.questclient`
 
-At runtime, `MetalXRQuestClientBootstrap` creates a persistent client object. The display component creates an XR camera with generated left and right panels in front of it, keeps a diagnostic fallback texture active until stream frames arrive, and logs with the `MetalXRQuestClient` prefix so entries are easy to retrieve from adb logcat.
+At runtime, `MetalXRQuestClientBootstrap` creates a persistent client object. The display component creates an XR camera with generated left and right panels in front of it, keeps a diagnostic fallback texture active until stream frames arrive, converts MediaCodec YUV output into color RGBA textures when decode succeeds, and logs with the `MetalXRQuestClient` prefix so entries are easy to retrieve from adb logcat.
 
 ## Host handshake
 
@@ -61,7 +61,15 @@ Scripts/run-metalxr-frame-stream.sh
 - `METALXR_HAPTIC_COMMAND_PATH`
 - `METALXR_TIMING_STATE_PATH`
 
-On Quest, the client reads VIDEO_FRAME packets on a background thread, queues encoded access units, and processes decode/display work on the Unity main thread. Android builds attempt MediaCodec H.264 decode first. If MediaCodec is unavailable or has not produced an output buffer yet, the client displays a compressed-payload preview so transport and frame pacing remain visible during development. Display logs include host encoder latency, local client receive-to-display timing, decode time, submit time, and queue depth.
+On Quest, the client reads VIDEO_FRAME packets on a background thread, queues encoded access units, and processes decode/display work on the Unity main thread. Android builds attempt MediaCodec H.264 decode first, read `Image.getPlanes()` YUV_420_888 output, convert it to RGBA, and upload the color result into the per-eye Unity textures. If MediaCodec is unavailable, output images are unavailable, or decoded color samples are near-black, the client displays a compressed-payload preview so transport and frame pacing remain visible during development. Display logs include decoder mode, output format, frame id, eye, host encoder latency, local client receive-to-display timing, decode time, submit time, and queue depth.
+
+To make HMD/casting black-frame regressions visible during device smoke tests, capture and analyze a Quest screenshot:
+
+```sh
+Scripts/probe-quest-client-screenshot.sh
+```
+
+The script uses `adb exec-out screencap -p`, saves the PNG to `METALXR_SCREENSHOT_PATH` or `/tmp/metalxr_quest_stream.png`, and fails when sampled pixels are too dark or have too little color variation.
 
 ## Timing
 
