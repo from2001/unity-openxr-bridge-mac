@@ -15,12 +15,13 @@ Working:
 - Build and probe a macOS VideoToolbox host encoder that converts synthetic stereo frames into H.264 elementary streams with per-frame latency/drop metadata.
 - Build and probe shared host/client protocol packet definitions with loopback handshake, heartbeat, and version-mismatch handling.
 - Build a Quest/Android Unity OpenXR client shell that displays generated stereo diagnostic frames in-headset and attempts the shared HELLO handshake over an adb-reversed host endpoint.
+- Stream synthetic macOS VideoToolbox H.264 stereo frames over the shared TCP protocol to the Quest client, with MediaCodec decode attempted on-device and receive-to-display timing logged from Unity.
 
 Not implemented yet:
 
 - CPU pixel readback, IOSurface export, or VideoToolbox encoding of Unity-submitted Metal textures.
-- A Quest PCVR media transport layer for video, tracking, input, audio, and timing.
-- A native MetalXR streamer that sends encoded Unity frames to the Quest client.
+- A production Quest PCVR media transport layer for tracking, input, audio, clock sync, loss recovery, and adaptive timing.
+- Encoding of real Unity-submitted Metal frames instead of the current synthetic host stream.
 - SteamVR/OpenComposite compatibility on macOS.
 
 That means this repository can currently make Unity's OpenXR loader run on macOS against an existing runtime such as Meta XR Simulator, but it is not yet the macOS equivalent of Quest Link/Air Link. [Unity's Meta Quest Link documentation](https://docs.unity.cn/Packages/com.unity.xr.meta-openxr%402.1/manual/get-started/link.html) states that Meta Quest Link is Windows-only, so a real Mac version requires implementing both a host OpenXR runtime and a headset streaming client.
@@ -45,6 +46,7 @@ Build and probe the macOS host encoder:
 ```sh
 Scripts/build-metalxr-host.sh
 Scripts/probe-metalxr-host-encoder.sh
+Scripts/probe-metalxr-frame-stream.sh
 ```
 
 Build and probe the shared protocol:
@@ -87,6 +89,12 @@ Install and launch the MetalXR Quest client APK:
 Scripts/install-run-quest-client.sh
 ```
 
+Run the host frame streamer over USB after the Quest client is launched:
+
+```sh
+Scripts/run-metalxr-frame-stream.sh
+```
+
 The headset must have Developer Mode enabled, USB debugging accepted in-headset, and must appear as `device` in `adb devices -l`.
 
 ## Unity project setup
@@ -118,13 +126,15 @@ The macOS app is a SwiftUI wrapper around bundled adb platform-tools. The script
 - `Scripts/probe-metalxr-runtime.sh` verifies OpenXR loader/runtime negotiation, the dummy HMD lifecycle, Metal swapchain creation, and projection frame metadata dumps.
 - `Scripts/build-metalxr-host.sh` builds the macOS host utilities.
 - `Scripts/probe-metalxr-host-encoder.sh` verifies continuous VideoToolbox H.264 encoding from a synthetic stereo frame stream.
+- `Scripts/probe-metalxr-frame-stream.sh` verifies TCP HELLO/HELLO_ACK negotiation plus streamed H.264 VIDEO_FRAME packets.
 - `Scripts/build-metalxr-protocol.sh` builds shared host/client protocol utilities.
 - `Scripts/probe-metalxr-protocol.sh` verifies loopback handshake, heartbeat, and version-mismatch handling.
 - `Scripts/build-quest-client-apk.sh` builds the Unity OpenXR smoke project as a Quest APK.
 - `Scripts/install-run-quest-client.sh` installs, launches, configures adb reverse, and prints client logcat entries.
+- `Scripts/run-metalxr-frame-stream.sh` runs the host streamer for USB adb reverse or Wi-Fi transport tests.
 - `Scripts/probe-quest-client-unity.sh` compiles the Unity Quest client scripts through uloop.
 
-The next major engineering step is connecting runtime-owned Metal textures to the host encoder and media transport, then decoding and displaying those frames on the Quest client. After that, tracking, input, haptics, and timing control need to be integrated.
+The next major engineering step is connecting runtime-owned Metal textures to the host streamer, then adding clock sync, adaptive frame pacing, tracking, input, haptics, and timing control.
 
 ## How can I install it?
 

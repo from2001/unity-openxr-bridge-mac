@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace MetalXR.QuestClient
@@ -8,9 +9,10 @@ namespace MetalXR.QuestClient
         private const string LogPrefix = "MetalXRQuestClient";
         private const int EyeLayerLeft = 28;
         private const int EyeLayerRight = 29;
-        private const int TextureWidth = 1024;
-        private const int TextureHeight = 576;
+        private const int TextureWidth = 640;
+        private const int TextureHeight = 360;
         private const float FrameUpdateIntervalSeconds = 1.0f / 12.0f;
+        private const int MaxStreamFramesPerUpdate = 8;
 
         private Texture2D _leftTexture;
         private Texture2D _rightTexture;
@@ -20,8 +22,13 @@ namespace MetalXR.QuestClient
         private Color32[] _leftPixels;
         private Color32[] _rightPixels;
         private MetalXRQuestHandshakeClient _handshakeClient;
+        private MetalXRQuestVideoDecoder _videoDecoder;
         private float _nextFrameTime;
+        private float _lastStreamFrameTime = -10.0f;
         private int _frameIndex;
+        private ulong _displayedEyeFrames;
+        private ulong _displayedLeftEyeFrames;
+        private ulong _displayedRightEyeFrames;
 
         private void Start()
         {
@@ -33,25 +40,27 @@ namespace MetalXR.QuestClient
             UpdateDiagnosticTexture(false, 0);
 
             MetalXRQuestEndpoint endpoint = MetalXRQuestEndpoint.FromCommandLine();
+            _videoDecoder = new MetalXRQuestVideoDecoder(LogClientMessage);
             _handshakeClient = new MetalXRQuestHandshakeClient(endpoint);
             _handshakeClient.Start();
 
-            Debug.Log(LogPrefix + " started; diagnostic stereo frame source active; host=" + endpoint.Host + ":" + endpoint.Port);
+            Debug.Log(LogPrefix + " started; stream client active with diagnostic fallback; host=" + endpoint.Host + ":" + endpoint.Port);
         }
 
         private void Update()
         {
-            if (Time.unscaledTime >= _nextFrameTime)
+            if (_handshakeClient != null)
+            {
+                _handshakeClient.DrainLogs(LogClientMessage);
+                _handshakeClient.DrainFrames(HandleEncodedFrame, MaxStreamFramesPerUpdate);
+            }
+
+            if (Time.unscaledTime - _lastStreamFrameTime > 0.5f && Time.unscaledTime >= _nextFrameTime)
             {
                 _nextFrameTime = Time.unscaledTime + FrameUpdateIntervalSeconds;
                 _frameIndex++;
                 UpdateDiagnosticTexture(true, _frameIndex);
                 UpdateDiagnosticTexture(false, _frameIndex);
-            }
-
-            if (_handshakeClient != null)
-            {
-                _handshakeClient.DrainLogs(LogClientMessage);
             }
         }
 
@@ -61,6 +70,12 @@ namespace MetalXR.QuestClient
             {
                 _handshakeClient.Dispose();
                 _handshakeClient = null;
+            }
+
+            if (_videoDecoder != null)
+            {
+                _videoDecoder.Dispose();
+                _videoDecoder = null;
             }
 
             DestroyUnityObject(_leftMaterial);
@@ -73,6 +88,20 @@ namespace MetalXR.QuestClient
         private static void LogClientMessage(string message)
         {
             Debug.Log(LogPrefix + " " + message);
+        }
+
+        private void HandleEncodedFrame(MetalXRQuestEncodedVideoFrame encodedFrame)
+        {
+            if (_videoDecoder == null)
+            {
+                return;
+            }
+
+            MetalXRQuestDecodedVideoFrame decodedFrame;
+            if (_videoDecoder.TryDecode(encodedFrame, out decodedFrame) && decodedFrame != null)
+            {
+                UpdateStreamTexture(decodedFrame);
+            }
         }
 
         private void CreateDiagnosticRig()
@@ -219,6 +248,82 @@ namespace MetalXR.QuestClient
             texture.Apply(false);
         }
 
+        private void UpdateStreamTexture(MetalXRQuestDecodedVideoFrame frame)
+        {
+            Color32[] pixels = frame.IsLeftEye ? _leftPixels : _rightPixels;
+            Texture2D texture = frame.IsLeftEye ? _leftTexture : _rightTexture;
+            if (pixels == null || texture == null || frame.LumaBytes == null)
+            {
+                return;
+            }
+
+            int sourceWidth = frame.Width > 0 ? frame.Width : 1;
+            int sourceHeight = frame.Height > 0 ? frame.Height : 1;
+            int stride = frame.Stride >= sourceWidth ? frame.Stride : sourceWidth;
+            int requiredBytes = ((sourceHeight - 1) * stride) + sourceWidth;
+            if (frame.LumaBytes.Length < requiredBytes)
+            {
+                return;
+            }
+
+            for (int y = 0; y < TextureHeight; y++)
+            {
+                int sourceY = (y * sourceHeight) / TextureHeight;
+                int sourceRow = sourceY * stride;
+                for (int x = 0; x < TextureWidth; x++)
+                {
+                    int sourceX = (x * sourceWidth) / TextureWidth;
+                    byte luma = frame.LumaBytes[sourceRow + sourceX];
+                    pixels[y * TextureWidth + x] = StreamColor(frame.IsLeftEye, luma);
+                }
+            }
+
+            texture.SetPixels32(pixels);
+            texture.Apply(false);
+            _lastStreamFrameTime = Time.unscaledTime;
+            _displayedEyeFrames++;
+            ulong displayedThisEye;
+            if (frame.IsLeftEye)
+            {
+                _displayedLeftEyeFrames++;
+                displayedThisEye = _displayedLeftEyeFrames;
+            }
+            else
+            {
+                _displayedRightEyeFrames++;
+                displayedThisEye = _displayedRightEyeFrames;
+            }
+
+            if (displayedThisEye <= 4 || (_displayedEyeFrames % 120) == 0)
+            {
+                ulong displayTimeNs = MetalXRQuestProtocol.NowNs();
+                ulong receiveToDisplayUs =
+                    displayTimeNs >= frame.ReceiveTimeNs ?
+                        (displayTimeNs - frame.ReceiveTimeNs) / 1000ul :
+                        0ul;
+                string decoderName = frame.DecodedByMediaCodec ? "MediaCodec" : "compressed-preview";
+                string eyeName = frame.IsLeftEye ? "left" : "right";
+                Debug.Log(
+                    LogPrefix +
+                    " displayed VIDEO_FRAME frame=" + frame.FrameId +
+                    " eye=" + eyeName +
+                    " decoder=" + decoderName +
+                    " host_encoder_us=" + frame.EncoderLatencyUs +
+                    " client_receive_to_display_us=" + receiveToDisplayUs +
+                    " bytes=" + frame.EncodedBytes);
+            }
+        }
+
+        private static Color32 StreamColor(bool leftEye, byte luma)
+        {
+            if (leftEye)
+            {
+                return new Color32((byte)(luma / 3), (byte)((luma * 2) / 3), luma, 255);
+            }
+
+            return new Color32(luma, (byte)((luma * 2) / 3), (byte)(luma / 3), 255);
+        }
+
         private static Color32 DiagnosticColor(bool leftEye, int x, int y, int frameIndex)
         {
             int band = (x * 6) / TextureWidth;
@@ -276,6 +381,384 @@ namespace MetalXR.QuestClient
             }
 
             Destroy(unityObject);
+        }
+    }
+
+    public sealed class MetalXRQuestDecodedVideoFrame
+    {
+        public MetalXRQuestDecodedVideoFrame(
+            MetalXRQuestEncodedVideoFrame source,
+            byte[] lumaBytes,
+            int stride,
+            bool decodedByMediaCodec)
+        {
+            FrameId = source.FrameId;
+            IsLeftEye = source.IsLeftEye;
+            Width = source.Width;
+            Height = source.Height;
+            EncoderLatencyUs = source.EncoderLatencyUs;
+            ReceiveTimeNs = source.ReceiveTimeNs;
+            EncodedBytes = source.EncodedBytes.Length;
+            LumaBytes = lumaBytes;
+            Stride = stride;
+            DecodedByMediaCodec = decodedByMediaCodec;
+        }
+
+        public ulong FrameId { get; }
+        public bool IsLeftEye { get; }
+        public int Width { get; }
+        public int Height { get; }
+        public ulong EncoderLatencyUs { get; }
+        public ulong ReceiveTimeNs { get; }
+        public int EncodedBytes { get; }
+        public byte[] LumaBytes { get; }
+        public int Stride { get; }
+        public bool DecodedByMediaCodec { get; }
+    }
+
+    public sealed class MetalXRQuestVideoDecoder : IDisposable
+    {
+        private readonly MetalXRQuestEyeDecoder _leftDecoder;
+        private readonly MetalXRQuestEyeDecoder _rightDecoder;
+
+        public MetalXRQuestVideoDecoder(Action<string> log)
+        {
+            _leftDecoder = new MetalXRQuestEyeDecoder(true, log);
+            _rightDecoder = new MetalXRQuestEyeDecoder(false, log);
+        }
+
+        public bool TryDecode(MetalXRQuestEncodedVideoFrame frame, out MetalXRQuestDecodedVideoFrame decodedFrame)
+        {
+            decodedFrame = null;
+            if (frame == null)
+            {
+                return false;
+            }
+
+            MetalXRQuestEyeDecoder decoder = frame.IsLeftEye ? _leftDecoder : _rightDecoder;
+            return decoder.TryDecode(frame, out decodedFrame);
+        }
+
+        public void Dispose()
+        {
+            _leftDecoder.Dispose();
+            _rightDecoder.Dispose();
+        }
+    }
+
+    public sealed class MetalXRQuestEyeDecoder : IDisposable
+    {
+        private const int InfoTryAgainLater = -1;
+        private const int InfoOutputFormatChanged = -2;
+        private const long CodecTimeoutUs = 0;
+        private readonly bool _leftEye;
+        private readonly string _eyeName;
+        private readonly Action<string> _log;
+        private readonly Dictionary<long, MetalXRQuestEncodedVideoFrame> _pendingFrames = new Dictionary<long, MetalXRQuestEncodedVideoFrame>();
+        private bool _fallbackLogged;
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+        private AndroidJavaObject _codec;
+        private AndroidJavaObject _bufferInfo;
+        private int _configuredWidth;
+        private int _configuredHeight;
+        private int _outputStride;
+#endif
+
+        public MetalXRQuestEyeDecoder(bool leftEye, Action<string> log)
+        {
+            _leftEye = leftEye;
+            _eyeName = leftEye ? "left" : "right";
+            _log = log;
+        }
+
+        public bool TryDecode(MetalXRQuestEncodedVideoFrame frame, out MetalXRQuestDecodedVideoFrame decodedFrame)
+        {
+            decodedFrame = null;
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (TryDecodeWithMediaCodec(frame, out decodedFrame))
+            {
+                return true;
+            }
+
+            if (_codec != null)
+            {
+                return false;
+            }
+#endif
+
+            decodedFrame = CreateCompressedPreview(frame);
+            if (!_fallbackLogged)
+            {
+                _fallbackLogged = true;
+                Log("using compressed payload preview for " + _eyeName + " eye until MediaCodec output is available");
+            }
+
+            return true;
+        }
+
+        public void Dispose()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            DisposeCodec();
+#endif
+        }
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+        private bool TryDecodeWithMediaCodec(MetalXRQuestEncodedVideoFrame frame, out MetalXRQuestDecodedVideoFrame decodedFrame)
+        {
+            decodedFrame = null;
+            if (!EnsureCodec(frame))
+            {
+                return false;
+            }
+
+            try
+            {
+                QueueInput(frame);
+                return DrainOutput(out decodedFrame);
+            }
+            catch (Exception exception)
+            {
+                Log("MediaCodec failed for " + _eyeName + " eye: " + exception.Message);
+                DisposeCodec();
+                return false;
+            }
+        }
+
+        private bool EnsureCodec(MetalXRQuestEncodedVideoFrame frame)
+        {
+            if (_codec != null && _configuredWidth == frame.Width && _configuredHeight == frame.Height)
+            {
+                return true;
+            }
+
+            DisposeCodec();
+
+            try
+            {
+                using (AndroidJavaClass codecClass = new AndroidJavaClass("android.media.MediaCodec"))
+                using (AndroidJavaClass formatClass = new AndroidJavaClass("android.media.MediaFormat"))
+                {
+                    _codec = codecClass.CallStatic<AndroidJavaObject>("createDecoderByType", "video/avc");
+                    AndroidJavaObject format = formatClass.CallStatic<AndroidJavaObject>(
+                        "createVideoFormat",
+                        "video/avc",
+                        frame.Width,
+                        frame.Height);
+                    format.Call("setInteger", "low-latency", 1);
+                    _codec.Call("configure", format, null, null, 0);
+                    format.Dispose();
+                }
+
+                _codec.Call("start");
+                _bufferInfo = new AndroidJavaObject("android.media.MediaCodec$BufferInfo");
+                _configuredWidth = frame.Width;
+                _configuredHeight = frame.Height;
+                _outputStride = frame.Width;
+                Log("MediaCodec H.264 decoder started for " + _eyeName + " eye " + frame.Width + "x" + frame.Height);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                Log("MediaCodec could not start for " + _eyeName + " eye: " + exception.Message);
+                DisposeCodec();
+                return false;
+            }
+        }
+
+        private void QueueInput(MetalXRQuestEncodedVideoFrame frame)
+        {
+            int inputIndex = _codec.Call<int>("dequeueInputBuffer", CodecTimeoutUs);
+            if (inputIndex < 0)
+            {
+                return;
+            }
+
+            AndroidJavaObject inputBuffer = _codec.Call<AndroidJavaObject>("getInputBuffer", inputIndex);
+            if (inputBuffer == null)
+            {
+                return;
+            }
+
+            int capacity = inputBuffer.Call<int>("capacity");
+            if (frame.EncodedBytes.Length > capacity)
+            {
+                Log("dropping oversized encoded frame for " + _eyeName + " eye bytes=" + frame.EncodedBytes.Length + " capacity=" + capacity);
+                inputBuffer.Dispose();
+                return;
+            }
+
+            sbyte[] signedInput = ToSignedBytes(frame.EncodedBytes);
+            inputBuffer.Call<AndroidJavaObject>("clear");
+            inputBuffer.Call<AndroidJavaObject>("put", signedInput, 0, signedInput.Length);
+            long presentationTimeUs = PresentationTimeUs(frame);
+            _pendingFrames[presentationTimeUs] = frame;
+            _codec.Call("queueInputBuffer", inputIndex, 0, frame.EncodedBytes.Length, presentationTimeUs, 0);
+            inputBuffer.Dispose();
+        }
+
+        private bool DrainOutput(out MetalXRQuestDecodedVideoFrame decodedFrame)
+        {
+            decodedFrame = null;
+            int outputIndex = _codec.Call<int>("dequeueOutputBuffer", _bufferInfo, CodecTimeoutUs);
+            if (outputIndex == InfoTryAgainLater)
+            {
+                return false;
+            }
+
+            if (outputIndex == InfoOutputFormatChanged)
+            {
+                UpdateOutputFormat();
+                return false;
+            }
+
+            if (outputIndex < 0)
+            {
+                return false;
+            }
+
+            int size = _bufferInfo.Get<int>("size");
+            int offset = _bufferInfo.Get<int>("offset");
+            long presentationTimeUs = _bufferInfo.Get<long>("presentationTimeUs");
+            MetalXRQuestEncodedVideoFrame sourceFrame;
+            bool hasSourceFrame = _pendingFrames.TryGetValue(presentationTimeUs, out sourceFrame);
+            if (hasSourceFrame)
+            {
+                _pendingFrames.Remove(presentationTimeUs);
+            }
+
+            byte[] bytes = new byte[size];
+            AndroidJavaObject outputBuffer = _codec.Call<AndroidJavaObject>("getOutputBuffer", outputIndex);
+            if (outputBuffer != null && size > 0)
+            {
+                sbyte[] signedBytes = new sbyte[size];
+                outputBuffer.Call<AndroidJavaObject>("position", offset);
+                outputBuffer.Call<AndroidJavaObject>("limit", offset + size);
+                outputBuffer.Call<AndroidJavaObject>("get", signedBytes, 0, size);
+                Buffer.BlockCopy(signedBytes, 0, bytes, 0, size);
+                outputBuffer.Dispose();
+            }
+
+            _codec.Call("releaseOutputBuffer", outputIndex, false);
+
+            if (!hasSourceFrame)
+            {
+                return false;
+            }
+
+            int stride = _outputStride >= sourceFrame.Width ? _outputStride : sourceFrame.Width;
+            int requiredBytes = ((sourceFrame.Height - 1) * stride) + sourceFrame.Width;
+            if (bytes.Length < requiredBytes)
+            {
+                decodedFrame = CreateCompressedPreview(sourceFrame);
+                return true;
+            }
+
+            decodedFrame = new MetalXRQuestDecodedVideoFrame(sourceFrame, bytes, stride, true);
+            return true;
+        }
+
+        private void UpdateOutputFormat()
+        {
+            AndroidJavaObject outputFormat = _codec.Call<AndroidJavaObject>("getOutputFormat");
+            if (outputFormat == null)
+            {
+                return;
+            }
+
+            _outputStride = GetFormatInt(outputFormat, "stride", _configuredWidth);
+            Log("MediaCodec output format for " + _eyeName + " eye stride=" + _outputStride);
+            outputFormat.Dispose();
+        }
+
+        private static int GetFormatInt(AndroidJavaObject format, string key, int fallback)
+        {
+            bool containsKey = format.Call<bool>("containsKey", key);
+            if (!containsKey)
+            {
+                return fallback;
+            }
+
+            return format.Call<int>("getInteger", key);
+        }
+
+        private void DisposeCodec()
+        {
+            _pendingFrames.Clear();
+
+            if (_codec != null)
+            {
+                try
+                {
+                    _codec.Call("stop");
+                }
+                catch (Exception)
+                {
+                }
+
+                try
+                {
+                    _codec.Call("release");
+                }
+                catch (Exception)
+                {
+                }
+
+                _codec.Dispose();
+                _codec = null;
+            }
+
+            if (_bufferInfo != null)
+            {
+                _bufferInfo.Dispose();
+                _bufferInfo = null;
+            }
+
+            _configuredWidth = 0;
+            _configuredHeight = 0;
+            _outputStride = 0;
+        }
+#endif
+
+        private static long PresentationTimeUs(MetalXRQuestEncodedVideoFrame frame)
+        {
+            long baseTimeUs = (long)(frame.FrameId * 1000ul);
+            return frame.IsLeftEye ? baseTimeUs : baseTimeUs + 1L;
+        }
+
+        private static sbyte[] ToSignedBytes(byte[] bytes)
+        {
+            sbyte[] signedBytes = new sbyte[bytes.Length];
+            Buffer.BlockCopy(bytes, 0, signedBytes, 0, bytes.Length);
+            return signedBytes;
+        }
+
+        private MetalXRQuestDecodedVideoFrame CreateCompressedPreview(MetalXRQuestEncodedVideoFrame frame)
+        {
+            byte[] luma = new byte[frame.Width * frame.Height];
+            byte[] encoded = frame.EncodedBytes;
+            int encodedLength = encoded.Length > 0 ? encoded.Length : 1;
+            for (int y = 0; y < frame.Height; y++)
+            {
+                for (int x = 0; x < frame.Width; x++)
+                {
+                    int sampleIndex = ((x * 31) + (y * 17) + (int)(frame.FrameId * 13ul)) % encodedLength;
+                    byte value = encoded.Length > 0 ? encoded[sampleIndex] : (byte)0;
+                    luma[(y * frame.Width) + x] = (byte)(value ^ (frame.IsLeftEye ? 0x33 : 0x99));
+                }
+            }
+
+            return new MetalXRQuestDecodedVideoFrame(frame, luma, frame.Width, false);
+        }
+
+        private void Log(string message)
+        {
+            if (_log != null)
+            {
+                _log(message);
+            }
         }
     }
 }

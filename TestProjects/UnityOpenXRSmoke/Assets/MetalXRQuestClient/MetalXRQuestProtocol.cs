@@ -13,23 +13,41 @@ namespace MetalXR.QuestClient
         public const ushort PacketHello = 1;
         public const ushort PacketHelloAck = 2;
         public const ushort PacketError = 4;
+        public const ushort PacketVideoFrame = 10;
+        public const uint CodecH264 = 1;
+        public const uint EyeLeft = 0;
+        public const uint EyeRight = 1;
+        public const uint VideoFrameFlagKeyframe = 0x00000001;
 
         private const uint RoleQuestClient = 2;
         private const uint CapabilityH264 = 0x00000001;
         private const uint CapabilityStereoSeparateEyes = 0x00000004;
         private const uint CapabilityLogStream = 0x00000080;
         private const int HelloPayloadSize = 96;
+        private const int VideoFramePayloadSize = 56;
         private const int DeviceNameSize = 64;
 
         public readonly struct PacketHeader
         {
-            public PacketHeader(uint magic, ushort headerSize, ushort type, ushort versionMajor, ushort versionMinor, uint payloadSize)
+            public PacketHeader(
+                uint magic,
+                ushort headerSize,
+                ushort type,
+                ushort versionMajor,
+                ushort versionMinor,
+                uint flags,
+                ulong sequence,
+                ulong timestampNs,
+                uint payloadSize)
             {
                 MagicValue = magic;
                 HeaderSizeValue = headerSize;
                 Type = type;
                 VersionMajorValue = versionMajor;
                 VersionMinorValue = versionMinor;
+                Flags = flags;
+                Sequence = sequence;
+                TimestampNs = timestampNs;
                 PayloadSize = payloadSize;
             }
 
@@ -38,6 +56,9 @@ namespace MetalXR.QuestClient
             public ushort Type { get; }
             public ushort VersionMajorValue { get; }
             public ushort VersionMinorValue { get; }
+            public uint Flags { get; }
+            public ulong Sequence { get; }
+            public ulong TimestampNs { get; }
             public uint PayloadSize { get; }
         }
 
@@ -83,16 +104,70 @@ namespace MetalXR.QuestClient
             ushort type = ReadUInt16(bytes, ref offset);
             ushort versionMajor = ReadUInt16(bytes, ref offset);
             ushort versionMinor = ReadUInt16(bytes, ref offset);
-            offset += 4;
-            offset += 8;
-            offset += 8;
+            uint flags = ReadUInt32(bytes, ref offset);
+            ulong sequence = ReadUInt64(bytes, ref offset);
+            ulong timestampNs = ReadUInt64(bytes, ref offset);
             uint payloadSize = ReadUInt32(bytes, ref offset);
+            offset += 4;
 
-            header = new PacketHeader(magic, headerSize, type, versionMajor, versionMinor, payloadSize);
+            header = new PacketHeader(magic, headerSize, type, versionMajor, versionMinor, flags, sequence, timestampNs, payloadSize);
             return magic == Magic && headerSize == HeaderSize;
         }
 
-        private static ulong NowNs()
+        public static bool TryParseVideoFramePayload(
+            PacketHeader header,
+            byte[] payload,
+            ulong receiveTimeNs,
+            out MetalXRQuestEncodedVideoFrame frame)
+        {
+            frame = null;
+            if (payload == null || payload.Length < VideoFramePayloadSize)
+            {
+                return false;
+            }
+
+            int offset = 0;
+            ulong frameId = ReadUInt64(payload, ref offset);
+            uint eye = ReadUInt32(payload, ref offset);
+            uint codec = ReadUInt32(payload, ref offset);
+            uint width = ReadUInt32(payload, ref offset);
+            uint height = ReadUInt32(payload, ref offset);
+            ulong timestampNs = ReadUInt64(payload, ref offset);
+            ulong predictedDisplayTimeNs = ReadUInt64(payload, ref offset);
+            ulong encoderLatencyUs = ReadUInt64(payload, ref offset);
+            uint payloadBytes = ReadUInt32(payload, ref offset);
+            uint flags = ReadUInt32(payload, ref offset);
+
+            if (codec != CodecH264 || (eye != EyeLeft && eye != EyeRight) || width == 0 || height == 0)
+            {
+                return false;
+            }
+
+            if (payloadBytes == 0 || payloadBytes > payload.Length - VideoFramePayloadSize)
+            {
+                return false;
+            }
+
+            byte[] encodedBytes = new byte[payloadBytes];
+            Array.Copy(payload, VideoFramePayloadSize, encodedBytes, 0, encodedBytes.Length);
+            frame = new MetalXRQuestEncodedVideoFrame(
+                frameId,
+                eye,
+                codec,
+                (int)width,
+                (int)height,
+                timestampNs,
+                predictedDisplayTimeNs,
+                encoderLatencyUs,
+                flags,
+                header.Sequence,
+                header.TimestampNs,
+                receiveTimeNs,
+                encodedBytes);
+            return true;
+        }
+
+        public static ulong NowNs()
         {
             double timestamp = Stopwatch.GetTimestamp();
             double nanoseconds = timestamp * 1000000000.0 / Stopwatch.Frequency;
@@ -144,5 +219,61 @@ namespace MetalXR.QuestClient
             offset += 4;
             return value;
         }
+
+        private static ulong ReadUInt64(byte[] bytes, ref int offset)
+        {
+            ulong low = ReadUInt32(bytes, ref offset);
+            ulong high = ReadUInt32(bytes, ref offset);
+            return low | (high << 32);
+        }
+    }
+
+    public sealed class MetalXRQuestEncodedVideoFrame
+    {
+        public MetalXRQuestEncodedVideoFrame(
+            ulong frameId,
+            uint eye,
+            uint codec,
+            int width,
+            int height,
+            ulong timestampNs,
+            ulong predictedDisplayTimeNs,
+            ulong encoderLatencyUs,
+            uint flags,
+            ulong sequence,
+            ulong packetTimestampNs,
+            ulong receiveTimeNs,
+            byte[] encodedBytes)
+        {
+            FrameId = frameId;
+            Eye = eye;
+            Codec = codec;
+            Width = width;
+            Height = height;
+            TimestampNs = timestampNs;
+            PredictedDisplayTimeNs = predictedDisplayTimeNs;
+            EncoderLatencyUs = encoderLatencyUs;
+            Flags = flags;
+            Sequence = sequence;
+            PacketTimestampNs = packetTimestampNs;
+            ReceiveTimeNs = receiveTimeNs;
+            EncodedBytes = encodedBytes;
+        }
+
+        public ulong FrameId { get; }
+        public uint Eye { get; }
+        public uint Codec { get; }
+        public int Width { get; }
+        public int Height { get; }
+        public ulong TimestampNs { get; }
+        public ulong PredictedDisplayTimeNs { get; }
+        public ulong EncoderLatencyUs { get; }
+        public uint Flags { get; }
+        public ulong Sequence { get; }
+        public ulong PacketTimestampNs { get; }
+        public ulong ReceiveTimeNs { get; }
+        public byte[] EncodedBytes { get; }
+        public bool IsLeftEye { get { return Eye == MetalXRQuestProtocol.EyeLeft; } }
+        public bool IsKeyframe { get { return (Flags & MetalXRQuestProtocol.VideoFrameFlagKeyframe) != 0; } }
     }
 }
