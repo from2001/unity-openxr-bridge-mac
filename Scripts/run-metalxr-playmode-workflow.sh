@@ -22,6 +22,8 @@ Environment:
   METALXR_FRAME_EXPORT_DIR             Shared frame export directory. Defaults to TMPDIR/metalxr_frame_export.
   METALXR_FRAME_EXPORT_MODE            readback or fixture. Defaults to fixture for smoke reliability.
   METALXR_SWAPCHAIN_STORAGE_MODE       shared, managed, or private. Defaults to shared for Unity export.
+  METALXR_VIEW_WIDTH                   Runtime eye width. Defaults to 640 for Quest debug streaming.
+  METALXR_VIEW_HEIGHT                  Runtime eye height. Defaults to 360 for Quest debug streaming.
   METALXR_FRAME_DUMP_DIR               Runtime frame dump directory. Defaults to TMPDIR/metalxr_unity_frames.
   METALXR_RUNTIME_LOG                  Runtime log path. Defaults to TMPDIR/metalxr_unity_runtime.log.
   METALXR_UNITY_LAUNCH_LOG             Unity launch log path. Defaults to TMPDIR/metalxr_unity_launch.log.
@@ -50,6 +52,8 @@ tmp_root="${TMPDIR:-/tmp}"
 frame_export_dir="${METALXR_FRAME_EXPORT_DIR:-$tmp_root/metalxr_frame_export}"
 frame_export_mode="${METALXR_FRAME_EXPORT_MODE:-fixture}"
 swapchain_storage_mode="${METALXR_SWAPCHAIN_STORAGE_MODE:-shared}"
+view_width="${METALXR_VIEW_WIDTH:-640}"
+view_height="${METALXR_VIEW_HEIGHT:-360}"
 frame_dump_dir="${METALXR_FRAME_DUMP_DIR:-$tmp_root/metalxr_unity_frames}"
 runtime_log="${METALXR_RUNTIME_LOG:-$tmp_root/metalxr_unity_runtime.log}"
 unity_log="${METALXR_UNITY_LAUNCH_LOG:-$tmp_root/metalxr_unity_launch.log}"
@@ -194,6 +198,7 @@ MetalXR frame dumps: $frame_dump_dir
 MetalXR frame exports: $frame_export_dir
 MetalXR frame export mode: $frame_export_mode
 MetalXR swapchain storage mode: $swapchain_storage_mode
+MetalXR view size: ${view_width}x${view_height}
 MetalXR tracking state: ${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}
 MetalXR haptic commands: ${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}
 MetalXR timing state: ${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}
@@ -216,6 +221,8 @@ EOF
     METALXR_FRAME_EXPORT_DIR="$frame_export_dir" \
     METALXR_FRAME_EXPORT_MODE="$frame_export_mode" \
     METALXR_SWAPCHAIN_STORAGE_MODE="$swapchain_storage_mode" \
+    METALXR_VIEW_WIDTH="$view_width" \
+    METALXR_VIEW_HEIGHT="$view_height" \
     METALXR_START_ULOOP_SERVER=1 \
     METALXR_TRACKING_STATE_PATH="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}" \
     METALXR_HAPTIC_COMMAND_PATH="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}" \
@@ -265,6 +272,8 @@ EOF
   METALXR_FRAME_EXPORT_DIR="$frame_export_dir" \
   METALXR_FRAME_EXPORT_MODE="$frame_export_mode" \
   METALXR_SWAPCHAIN_STORAGE_MODE="$swapchain_storage_mode" \
+  METALXR_VIEW_WIDTH="$view_width" \
+  METALXR_VIEW_HEIGHT="$view_height" \
   METALXR_TRACKING_STATE_PATH="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}" \
   METALXR_HAPTIC_COMMAND_PATH="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}" \
   METALXR_TIMING_STATE_PATH="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}" \
