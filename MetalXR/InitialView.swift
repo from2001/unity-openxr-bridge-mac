@@ -5,81 +5,61 @@
 //  Created by Darien Johnson on 5/2/23.
 //
 
-import SwiftUI
+import AppKit
 import Foundation
+import SwiftUI
 import UniformTypeIdentifiers
 
 @MainActor
 struct InitialView: View {
     private let utils = Utilities()
-    private let packageName = "dev.peapods.MetalXR"
+    private let packageName = "com.metalxr.questclient"
 
     @State private var showFailureAlert = false
     @State private var operationIsActive = false
-    @State private var isInstalled = false
-    @State private var isDeviceConnected = false
+    @State private var showAPKImporter = false
     @State private var failureAlertMessage = String()
     @State private var connectedDeviceSummary = "No devices connected"
-    @State private var showAPKImporter = false
-    
+    @State private var developerStatus: DeveloperStatus?
+    @State private var unityProcess: Process?
+    @State private var streamProcess: Process?
+    @State private var diagnosticsURL: URL?
+    @State private var lastActionMessage = "Ready"
+
     var body: some View {
-        
         NavigationStack {
-            VStack {
-                Text("MetalXR")
-                    .font(.title)
-                    .fontWeight(.bold)
-                    .padding(.bottom, 10)
-                    .task {
-                        await runStartupChecks()
-                    }
-                    .task {
-                        await beginScanningForDevices()
-                    }
-                    .task(utils.createAllDirectories)
-                
-                HStack {
-                    if isDeviceConnected && isInstalled {
-                        NavigationLink { HomeView() } label: { Text("Open MetalXR") }
-                    } else {
-                        Button(action: { showAPKImporter = true }) {
-                            Text(isDeviceConnected ? operationIsActive ? "Installing APK" : "Install APK..." : "No devices connected")
-                        }
-                        .alert(isPresented: $showFailureAlert) {
-                            Alert(
-                                title: Text("MetalXR can't continue."),
-                                message: Text("Something went wrong while we were getting things ready for you:\n\n" + failureAlertMessage)
-                            )
-                        }
-                        .disabled(!isDeviceConnected || operationIsActive)
-
-                        Button(action: { downloadAndInstallAPK() }) {
-                            Text("Download Legacy Client")
-                        }
-                        .disabled(!isDeviceConnected || operationIsActive)
-
-                        if operationIsActive {
-                            ProgressView()
-                                .padding(.leading, 5)
-                                .scaleEffect(0.5)
-                        }
-                    }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    header
+                    statusGrid
+                    workflowControls
+                    troubleshooting
+                    diagnostics
                 }
-
-                Text(connectedDeviceSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 6)
+                .frame(maxWidth: 860, alignment: .leading)
+                .padding()
             }
-            .padding()
-        }
-        .fileImporter(
-            isPresented: $showAPKImporter,
-            allowedContentTypes: [.item],
-            allowsMultipleSelection: false
-        ) { result in
-            Task {
-                await handleAPKImport(result)
+            .task {
+                await runStartupChecks()
+            }
+            .task {
+                await beginScanningForDevices()
+            }
+            .task(utils.createAllDirectories)
+            .fileImporter(
+                isPresented: $showAPKImporter,
+                allowedContentTypes: [.item],
+                allowsMultipleSelection: false
+            ) { result in
+                Task {
+                    await handleAPKImport(result)
+                }
+            }
+            .alert(isPresented: $showFailureAlert) {
+                Alert(
+                    title: Text("MetalXR can't continue."),
+                    message: Text(failureAlertMessage)
+                )
             }
         }
 #if DEBUG
@@ -88,106 +68,204 @@ struct InitialView: View {
         .navigationTitle("MetalXR")
 #endif
     }
-    
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("MetalXR")
+                    .font(.title)
+                    .fontWeight(.bold)
+                Spacer()
+                Button("Refresh") {
+                    Task { await refreshDeviceState() }
+                }
+                .disabled(operationIsActive)
+            }
+
+            Text(connectedDeviceSummary)
+                .foregroundStyle(.secondary)
+            Text(lastActionMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var statusGrid: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], alignment: .leading, spacing: 12) {
+            StatusTile(title: "Quest", value: questStatusText, detail: questDetailText, isReady: developerStatus?.readyDevice != nil)
+            StatusTile(title: "Quest Client", value: installedText, detail: packageName, isReady: developerStatus?.questClientInstalled == true)
+            StatusTile(title: "Runtime", value: runtimeStatusText, detail: "MetalXR OpenXR runtime", isReady: runtimeIsReady)
+            StatusTile(title: "Protocol", value: protocolStatusText, detail: "Host/client packet version", isReady: protocolIsReady)
+            StatusTile(title: "Host Streamer", value: streamerStatusText, detail: "VideoToolbox stream host", isReady: developerStatus?.hostStreamerExists == true)
+            StatusTile(title: "Unity", value: unityStatusText, detail: "UnityOpenXRSmoke project", isReady: !(developerStatus?.unityEditors.isEmpty ?? true))
+            StatusTile(title: "Stream", value: streamStatusText, detail: "adb reverse TCP 47000", isReady: streamProcess?.isRunning == true)
+        }
+    }
+
+    private var workflowControls: some View {
+        SectionBox(title: "Workflow") {
+            HStack(spacing: 10) {
+                Button("Install Built APK") {
+                    Task { await installDefaultQuestClient() }
+                }
+                .disabled(operationIsActive || developerStatus?.readyDevice == nil || developerStatus?.questAPKExists != true)
+
+                Button("Install APK...") {
+                    showAPKImporter = true
+                }
+                .disabled(operationIsActive || developerStatus?.readyDevice == nil)
+
+                Button("Launch Unity") {
+                    launchUnity()
+                }
+                .disabled(operationIsActive || unityProcess?.isRunning == true || !runtimeIsReady)
+
+                Button(streamProcess?.isRunning == true ? "Stop Stream" : "Start Stream") {
+                    if streamProcess?.isRunning == true {
+                        stopStream()
+                    } else {
+                        startStream()
+                    }
+                }
+                .disabled(operationIsActive || developerStatus?.hostStreamerExists != true || developerStatus?.readyDevice == nil)
+
+                if operationIsActive {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private var troubleshooting: some View {
+        SectionBox(title: "Troubleshooting") {
+            let messages = developerStatus?.missingMessages ?? ["Status has not been refreshed yet."]
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(messages, id: \.self) { message in
+                    Text(message)
+                        .font(.callout)
+                }
+            }
+        }
+    }
+
+    private var diagnostics: some View {
+        SectionBox(title: "Diagnostics") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Button("Export Diagnostics") {
+                        exportDiagnostics()
+                    }
+                    .disabled(operationIsActive)
+
+                    if let diagnosticsURL {
+                        Button("Reveal") {
+                            NSWorkspace.shared.activateFileViewerSelecting([diagnosticsURL])
+                        }
+                    }
+                }
+                .buttonStyle(.bordered)
+
+                Text("Includes status output, Unity launch environment, runtime log, streamer log, and MetalXR Quest logcat excerpts.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var questStatusText: String {
+        guard let status = developerStatus else {
+            return "Checking"
+        }
+        if status.readyDevice != nil {
+            return "Connected"
+        }
+        if status.unauthorizedDevice != nil {
+            return "Unauthorized"
+        }
+        return "Missing"
+    }
+
+    private var questDetailText: String {
+        guard let status = developerStatus else {
+            return "adb scan pending"
+        }
+        if let readyDevice = status.readyDevice {
+            return readyDevice.serial
+        }
+        if let unauthorizedDevice = status.unauthorizedDevice {
+            return unauthorizedDevice.serial
+        }
+        return "Connect Quest with USB debugging enabled"
+    }
+
+    private var installedText: String {
+        developerStatus?.questClientInstalled == true ? "Installed" : "Missing"
+    }
+
+    private var runtimeStatusText: String {
+        runtimeIsReady ? "Built" : "Missing"
+    }
+
+    private var streamerStatusText: String {
+        developerStatus?.hostStreamerExists == true ? "Built" : "Missing"
+    }
+
+    private var protocolStatusText: String {
+        if developerStatus?.protocolMismatchDetected == true {
+            return "Mismatch"
+        }
+        return developerStatus?.protocolProbeExists == true ? "Ready" : "Missing"
+    }
+
+    private var unityStatusText: String {
+        if unityProcess?.isRunning == true {
+            return "Launching"
+        }
+        return (developerStatus?.unityEditors.isEmpty ?? true) ? "Missing" : "Available"
+    }
+
+    private var streamStatusText: String {
+        streamProcess?.isRunning == true ? "Running" : "Stopped"
+    }
+
+    private var runtimeIsReady: Bool {
+        developerStatus?.runtimeManifestExists == true && developerStatus?.runtimeDylibExists == true
+    }
+
+    private var protocolIsReady: Bool {
+        developerStatus?.protocolProbeExists == true && developerStatus?.protocolMismatchDetected != true
+    }
+
     func runStartupChecks() async {
         await refreshDeviceState()
     }
 
-    func checkForInstalledApp() async {
-        guard isDeviceConnected else {
-            isInstalled = false
-            return
-        }
-
-        let installed = await Task.detached(priority: .utility) {
-            utils.isPackageInstalled(packageName: packageName)
-        }.value
-        isInstalled = installed
-        print(isInstalled ? "[Installer] MetalXR is already installed on device." :
-                            "[Installer] MetalXR is not installed on device.")
-    }
-    
     func beginScanningForDevices() async {
         while !Task.isCancelled {
             await refreshDeviceState()
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
     }
 
     func refreshDeviceState() async {
-        let devices = await Task.detached(priority: .utility) {
-            utils.listADBDevices()
+        let status = await Task.detached(priority: .utility) {
+            utils.collectDeveloperStatus(packageName: packageName)
         }.value
+        developerStatus = status
 
-        let readyDevices = devices.filter { $0.state == "device" }
-        isDeviceConnected = !readyDevices.isEmpty
-
-        if let firstDevice = readyDevices.first {
-            connectedDeviceSummary = "Connected: \(firstDevice.serial)"
-        } else if let firstDevice = devices.first {
+        if let readyDevice = status.readyDevice {
+            connectedDeviceSummary = "Connected: \(readyDevice.serial)"
+        } else if let firstDevice = status.devices.first {
             connectedDeviceSummary = "Device \(firstDevice.serial) is \(firstDevice.state)"
         } else {
             connectedDeviceSummary = "No devices connected"
         }
-
-        await checkForInstalledApp()
-    }
-    
-    func downloadAndInstallAPK() {
-        Task {
-            await downloadAndInstallDefaultAPK()
-        }
     }
 
-    func downloadAndInstallDefaultAPK() async {
-        let connected = await Task.detached(priority: .utility) {
-            utils.isConnectedToNetwork()
-        }.value
-
-        guard connected else {
-            showFailureAlert = true
-            failureAlertMessage = "MetalXR requires an internet connection to download the legacy client APK. You can still install a local APK."
-            return
-        }
-
-        guard let packageURL = utils.appDataFolder?.appending(path: "metalxr.apk") else {
-            showFailureAlert = true
-            failureAlertMessage = "MetalXR could not resolve its application support folder."
-            return
-        }
-
-        operationIsActive = true
-        defer { operationIsActive = false }
-
-#if DEBUG
-        let downloadURL = URL(string: "https://github.com/PeaPodDevs/MetalXRClient/releases/download/latest/dev.peapods.MetalXR.apk")
-#else
-        let downloadURL = URL(string: "https://github.com/PeaPodDevs/MetalXRClient/releases/download/" + utils.version + "/dev.peapods.MetalXR.apk")
-#endif
-
-        guard let downloadURL else {
-            showFailureAlert = true
-            failureAlertMessage = "MetalXR could not create the client APK download URL."
-            return
-        }
-
-        do {
-            if !FileManager.default.fileExists(atPath: packageURL.path) {
-                let (temporaryURL, response) = try await URLSession.shared.download(from: downloadURL)
-                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
-                    throw URLError(.badServerResponse)
-                }
-                try? FileManager.default.removeItem(at: packageURL)
-                try FileManager.default.moveItem(at: temporaryURL, to: packageURL)
-            }
-        } catch {
-            print("[Downloader] MetalXR failed to download: \(error.localizedDescription)")
-            showFailureAlert = true
-            failureAlertMessage = error.localizedDescription
-            return
-        }
-
-        await installAPK(at: packageURL)
+    func installDefaultQuestClient() async {
+        await installAPK(at: utils.defaultQuestClientAPKURL)
     }
 
     func handleAPKImport(_ result: Result<[URL], Error>) async {
@@ -207,6 +285,12 @@ struct InitialView: View {
         operationIsActive = true
         defer { operationIsActive = false }
 
+        guard FileManager.default.fileExists(atPath: apkURL.path) else {
+            showFailureAlert = true
+            failureAlertMessage = "APK file does not exist: \(apkURL.path)"
+            return
+        }
+
         let didStartAccess = apkURL.startAccessingSecurityScopedResource()
         defer {
             if didStartAccess {
@@ -219,13 +303,133 @@ struct InitialView: View {
         }.value
 
         if result.succeeded && result.output.contains("Success") {
-            print("[Installer] MetalXR was installed.")
-            isInstalled = true
+            lastActionMessage = "Quest client installed."
+            await refreshDeviceState()
         } else {
-            print("[Installer] MetalXR failed to install, posting ADB output: " + result.output)
             showFailureAlert = true
             failureAlertMessage = result.output.isEmpty ? "adb install failed with exit code \(result.exitCode)." : result.output
         }
+    }
+
+    func launchUnity() {
+        guard let logURL = utils.unityLaunchLogURL else {
+            showFailureAlert = true
+            failureAlertMessage = "MetalXR could not resolve the Unity launch log path."
+            return
+        }
+
+        do {
+            unityProcess = try utils.startRepositoryScript(
+                "Scripts/launch-unity-openxr.sh",
+                arguments: [utils.unitySmokeProjectURL.path],
+                environment: [:],
+                logURL: logURL
+            )
+            lastActionMessage = "Unity launch started. Log: \(logURL.path)"
+        } catch {
+            showFailureAlert = true
+            failureAlertMessage = error.localizedDescription
+        }
+    }
+
+    func startStream() {
+        guard let logURL = utils.streamerLogURL else {
+            showFailureAlert = true
+            failureAlertMessage = "MetalXR could not resolve the streamer log path."
+            return
+        }
+
+        do {
+            streamProcess = try utils.startRepositoryScript(
+                "Scripts/run-metalxr-frame-stream.sh",
+                arguments: [],
+                environment: ["METALXR_TRANSPORT": "usb"],
+                logURL: logURL
+            )
+            lastActionMessage = "Host streamer started. Log: \(logURL.path)"
+        } catch {
+            showFailureAlert = true
+            failureAlertMessage = error.localizedDescription
+        }
+    }
+
+    func stopStream() {
+        streamProcess?.terminate()
+        streamProcess = nil
+        lastActionMessage = "Host streamer stopped."
+    }
+
+    func exportDiagnostics() {
+        operationIsActive = true
+        Task {
+            let result = await Task.detached(priority: .utility) {
+                utils.createDiagnosticsBundle(
+                    packageName: packageName,
+                    unityLaunchLogURL: utils.unityLaunchLogURL,
+                    streamerLogURL: utils.streamerLogURL
+                )
+            }.value
+
+            operationIsActive = false
+            switch result {
+            case .success(let url):
+                diagnosticsURL = url
+                lastActionMessage = "Diagnostics exported: \(url.path)"
+            case .failure(let error):
+                showFailureAlert = true
+                failureAlertMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+private struct StatusTile: View {
+    let title: String
+    let value: String
+    let detail: String
+    let isReady: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Circle()
+                    .fill(isReady ? Color.green : Color.orange)
+                    .frame(width: 8, height: 8)
+                Text(value)
+                    .font(.headline)
+            }
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct SectionBox<Content: View>: View {
+    let title: String
+    let content: Content
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline)
+            content
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

@@ -27,6 +27,61 @@ struct ADBDevice: Identifiable, Equatable, Sendable {
     }
 }
 
+struct DeveloperStatus: Sendable {
+    let adbPath: String?
+    let devices: [ADBDevice]
+    let questClientInstalled: Bool
+    let runtimeManifestExists: Bool
+    let runtimeDylibExists: Bool
+    let hostStreamerExists: Bool
+    let protocolProbeExists: Bool
+    let protocolMismatchDetected: Bool
+    let questAPKExists: Bool
+    let unityEditors: [String]
+
+    var readyDevice: ADBDevice? {
+        devices.first { $0.state == "device" }
+    }
+
+    var unauthorizedDevice: ADBDevice? {
+        devices.first { $0.state == "unauthorized" }
+    }
+
+    var missingMessages: [String] {
+        var messages = [String]()
+        if adbPath == nil {
+            messages.append("Bundled adb is missing.")
+        }
+        if unauthorizedDevice != nil {
+            messages.append("Quest is connected but unauthorized. Accept USB debugging in the headset.")
+        } else if readyDevice == nil {
+            messages.append("No authorized Quest/Android device is connected.")
+        }
+        if !questClientInstalled {
+            messages.append("Quest client package is not installed.")
+        }
+        if !runtimeManifestExists || !runtimeDylibExists {
+            messages.append("MetalXR runtime is not built. Run Scripts/build-metalxr-runtime.sh.")
+        }
+        if !hostStreamerExists {
+            messages.append("MetalXR host streamer is not built. Run Scripts/build-metalxr-host.sh.")
+        }
+        if !protocolProbeExists {
+            messages.append("MetalXR protocol probe is not built. Run Scripts/build-metalxr-protocol.sh.")
+        }
+        if protocolMismatchDetected {
+            messages.append("A protocol version mismatch was found in recent streamer logs. Rebuild and reinstall the Quest client APK.")
+        }
+        if !questAPKExists {
+            messages.append("Quest client APK was not found. Run Scripts/build-quest-client-apk.sh.")
+        }
+        if unityEditors.isEmpty {
+            messages.append("Unity Hub editor installation was not found under /Applications/Unity/Hub/Editor.")
+        }
+        return messages
+    }
+}
+
 final class Utilities: NSObject, @unchecked Sendable {
     
 #if DEBUG
@@ -42,6 +97,7 @@ final class Utilities: NSObject, @unchecked Sendable {
     public let appDataFolder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.appending(path: "MetalXR")
     public let appPlatformFolder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.appending(path: "MetalXR/platform-tools")
     public let appLogFolder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.appending(path: "MetalXR/logs")
+    public let repositoryRootURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
     
     // MARK: Downloader functions
     
@@ -85,6 +141,26 @@ final class Utilities: NSObject, @unchecked Sendable {
 
     var adbExecutableURL: URL? {
         Bundle.main.resourceURL?.appending(path: "adb-lib/adb")
+    }
+
+    var defaultQuestClientAPKURL: URL {
+        repositoryRootURL.appending(path: "TestProjects/UnityOpenXRSmoke/Builds/MetalXRQuestClient.apk")
+    }
+
+    var unitySmokeProjectURL: URL {
+        repositoryRootURL.appending(path: "TestProjects/UnityOpenXRSmoke")
+    }
+
+    var runtimeLogURL: URL {
+        URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "metalxr_unity_runtime.log")
+    }
+
+    var streamerLogURL: URL? {
+        appLogFolder?.appending(path: "metalxr_host_streamer.log")
+    }
+
+    var unityLaunchLogURL: URL? {
+        appLogFolder?.appending(path: "metalxr_unity_launch.log")
     }
     
     func launchADBServer() {
@@ -158,6 +234,47 @@ final class Utilities: NSObject, @unchecked Sendable {
         let result = runADBCommand(arguments: ["shell", "pm", "path", packageName], shouldPrintOutput: true)
         return result.succeeded && result.output.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("package:")
     }
+
+    func collectDeveloperStatus(packageName: String) -> DeveloperStatus {
+        let devices = listADBDevices()
+        return DeveloperStatus(
+            adbPath: adbExecutableURL?.path,
+            devices: devices,
+            questClientInstalled: devices.contains { $0.state == "device" } && isPackageInstalled(packageName: packageName),
+            runtimeManifestExists: FileManager.default.fileExists(atPath: repositoryRootURL.appending(path: "Runtime/MetalXRRuntime/metalxr_runtime.json").path),
+            runtimeDylibExists: FileManager.default.fileExists(atPath: repositoryRootURL.appending(path: "Runtime/MetalXRRuntime/build/libmetalxr_runtime.dylib").path),
+            hostStreamerExists: FileManager.default.fileExists(atPath: repositoryRootURL.appending(path: "Runtime/MetalXRHost/build/metalxr_host_streamer").path),
+            protocolProbeExists: FileManager.default.fileExists(atPath: repositoryRootURL.appending(path: "Runtime/MetalXRProtocol/build/metalxr_protocol_loopback").path),
+            protocolMismatchDetected: recentStreamerLogContainsProtocolMismatch(),
+            questAPKExists: FileManager.default.fileExists(atPath: defaultQuestClientAPKURL.path),
+            unityEditors: installedUnityEditors()
+        )
+    }
+
+    func recentStreamerLogContainsProtocolMismatch() -> Bool {
+        guard let streamerLogURL else {
+            return false
+        }
+        guard let contents = try? String(contentsOf: streamerLogURL, encoding: .utf8) else {
+            return false
+        }
+        return contents.contains("VERSION_MISMATCH") || contents.contains("Protocol major version mismatch")
+    }
+
+    func installedUnityEditors() -> [String] {
+        let root = URL(fileURLWithPath: "/Applications/Unity/Hub/Editor")
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else {
+            return []
+        }
+
+        var editors = [String]()
+        for case let url as URL in enumerator {
+            if url.lastPathComponent == "Unity.app" {
+                editors.append(url.path)
+            }
+        }
+        return editors.sorted()
+    }
     
     // MARK: Generic command functions
     
@@ -220,6 +337,91 @@ final class Utilities: NSObject, @unchecked Sendable {
         }
 
         return CommandResult(output: output, exitCode: task.terminationStatus)
+    }
+
+    func runRepositoryScript(_ scriptPath: String, arguments: [String], shouldPrintOutput: Bool) -> CommandResult {
+        let scriptURL = repositoryRootURL.appending(path: scriptPath)
+        return runProcess(
+            executableURL: scriptURL,
+            arguments: arguments,
+            currentDirectoryURL: repositoryRootURL,
+            shouldPrintOutput: shouldPrintOutput
+        )
+    }
+
+    func startRepositoryScript(_ scriptPath: String, arguments: [String], environment: [String: String], logURL: URL) throws -> Process {
+        try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        let logHandle = try FileHandle(forWritingTo: logURL)
+        let process = Process()
+        process.executableURL = repositoryRootURL.appending(path: scriptPath)
+        process.arguments = arguments
+        process.currentDirectoryURL = repositoryRootURL
+        process.standardOutput = logHandle
+        process.standardError = logHandle
+        var mergedEnvironment = ProcessInfo.processInfo.environment
+        for (key, value) in environment {
+            mergedEnvironment[key] = value
+        }
+        process.environment = mergedEnvironment
+        process.terminationHandler = { _ in
+            try? logHandle.close()
+        }
+        try process.run()
+        return process
+    }
+
+    func createDiagnosticsBundle(packageName: String, unityLaunchLogURL: URL?, streamerLogURL: URL?) -> Result<URL, Error> {
+        do {
+            guard let appLogFolder else {
+                return .failure(URLError(.cannotCreateFile))
+            }
+
+            let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            let bundleURL = appLogFolder.appending(path: "diagnostics-\(timestamp)")
+            try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+
+            let status = runRepositoryScript("Scripts/metalxr-status.sh", arguments: [], shouldPrintOutput: false)
+            try status.output.write(to: bundleURL.appending(path: "status.txt"), atomically: true, encoding: .utf8)
+
+            let launchEnvironment = [
+                "Repository: \(repositoryRootURL.path)",
+                "Unity project: \(unitySmokeProjectURL.path)",
+                "XR_RUNTIME_JSON: \(repositoryRootURL.appending(path: "Runtime/MetalXRRuntime/metalxr_runtime.json").path)",
+                "METALXR_RUNTIME_LOG: \(runtimeLogURL.path)",
+                "METALXR_TRACKING_STATE_PATH: /tmp/metalxr_tracking_state.txt",
+                "METALXR_HAPTIC_COMMAND_PATH: /tmp/metalxr_haptic_command.txt",
+                "METALXR_TIMING_STATE_PATH: /tmp/metalxr_timing_state.txt"
+            ].joined(separator: "\n")
+            try launchEnvironment.write(to: bundleURL.appending(path: "unity-launch-environment.txt"), atomically: true, encoding: .utf8)
+
+            copyIfExists(runtimeLogURL, to: bundleURL.appending(path: "metalxr-runtime.log"))
+            if let unityLaunchLogURL {
+                copyIfExists(unityLaunchLogURL, to: bundleURL.appending(path: "unity-launch.log"))
+            }
+            if let streamerLogURL {
+                copyIfExists(streamerLogURL, to: bundleURL.appending(path: "host-streamer.log"))
+            }
+
+            let logcat = runADBCommand(arguments: ["logcat", "-d", "Unity:D", "*:S"], shouldPrintOutput: false)
+            let filteredLogcat = logcat.output
+                .split(whereSeparator: \.isNewline)
+                .filter { $0.contains("MetalXRQuestClient") || $0.contains(packageName) }
+                .joined(separator: "\n")
+            try filteredLogcat.write(to: bundleURL.appending(path: "quest-logcat.txt"), atomically: true, encoding: .utf8)
+
+            return .success(bundleURL)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func copyIfExists(_ sourceURL: URL, to destinationURL: URL) {
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            return
+        }
+        try? FileManager.default.removeItem(at: destinationURL)
+        try? FileManager.default.copyItem(at: sourceURL, to: destinationURL)
     }
     
     // MARK: App setup functions

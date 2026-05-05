@@ -8,6 +8,7 @@ Working:
 
 - Detect an authorized Quest/Android headset through the bundled `adb`.
 - Install a local APK onto the headset from the macOS app or from `Scripts/install-quest-apk.sh`.
+- Use the macOS SwiftUI app as a developer dashboard for Quest connection, Quest client install state, runtime build state, Unity launch, host streaming, and diagnostics export.
 - Launch Unity with `XR_RUNTIME_JSON` set to an installed macOS OpenXR runtime, without changing system-wide OpenXR runtime registration.
 - Use Meta XR Simulator as the default macOS OpenXR runtime when it is installed at `/Applications/MetaXRSimulator.app`.
 - Build and probe a native MetalXR OpenXR runtime that can create an instance, report a dummy stereo HMD system, create a session, emit lifecycle events, create reference spaces, and run a deterministic frame loop.
@@ -125,7 +126,7 @@ When the MetalXR runtime is selected, the script also sets:
 
 ## How does it work?
 
-The macOS app is a SwiftUI wrapper around bundled adb platform-tools. The scripts provide a lower-friction development path:
+The macOS app is a SwiftUI dashboard around bundled adb platform-tools and the repository scripts. It can install the built Quest client APK, launch Unity through the MetalXR runtime script, start or stop the USB host streamer, and export a diagnostics folder containing status output, launch environment, runtime logs, streamer logs, and Quest logcat excerpts. The scripts remain available for terminal-first workflows:
 
 - `Scripts/metalxr-status.sh` prints adb devices, OpenXR runtime manifests, and installed Unity editors.
 - `Scripts/install-quest-apk.sh` installs an APK through adb with device-state checks.
