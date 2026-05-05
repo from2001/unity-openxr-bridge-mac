@@ -73,6 +73,11 @@ typedef enum MetalXRControllerButtonFlags {
     METALXR_CONTROLLER_BUTTON_THUMBSTICK = 0x00000008u
 } MetalXRControllerButtonFlags;
 
+typedef enum MetalXRTimingFlags {
+    METALXR_TIMING_FLAG_CLOCK_SYNC = 0x00000001u,
+    METALXR_TIMING_FLAG_FRAME_DISPLAY = 0x00000002u
+} MetalXRTimingFlags;
+
 typedef enum MetalXRErrorCode {
     METALXR_ERROR_NONE = 0,
     METALXR_ERROR_VERSION_MISMATCH = 1,
@@ -177,6 +182,11 @@ typedef struct MetalXRTimingSamplePayload {
     uint64_t encodeEndTimeNs;
     uint64_t clientReceiveTimeNs;
     uint64_t clientDisplayTimeNs;
+    uint64_t clientDecodeStartTimeNs;
+    uint64_t clientDecodeEndTimeNs;
+    uint64_t clientCompositorSubmitTimeNs;
+    uint32_t queueDepth;
+    uint32_t flags;
 } MetalXRTimingSamplePayload;
 
 typedef struct MetalXRLogPayload {

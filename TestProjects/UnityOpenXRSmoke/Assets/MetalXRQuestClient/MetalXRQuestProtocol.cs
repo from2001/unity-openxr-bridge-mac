@@ -17,10 +17,13 @@ namespace MetalXR.QuestClient
         public const ushort PacketPoseSample = 20;
         public const ushort PacketControllerInput = 21;
         public const ushort PacketHapticCommand = 22;
+        public const ushort PacketTimingSample = 30;
         public const uint CodecH264 = 1;
         public const uint EyeLeft = 0;
         public const uint EyeRight = 1;
         public const uint VideoFrameFlagKeyframe = 0x00000001;
+        public const uint TimingFlagClockSync = 0x00000001;
+        public const uint TimingFlagFrameDisplay = 0x00000002;
         public const uint TrackingOrientationValid = 0x00000001;
         public const uint TrackingPositionValid = 0x00000002;
         public const uint TrackingOrientationTracked = 0x00000004;
@@ -44,6 +47,7 @@ namespace MetalXR.QuestClient
         private const int PoseSamplePayloadSize = 60;
         private const int ControllerInputPayloadSize = 104;
         private const int HapticCommandPayloadSize = 32;
+        private const int TimingSamplePayloadSize = 88;
         private const int DeviceNameSize = 64;
 
         public readonly struct PacketHeader
@@ -171,6 +175,27 @@ namespace MetalXR.QuestClient
             return packet;
         }
 
+        public static byte[] CreateTimingSamplePacket(
+            ulong sequence,
+            MetalXRQuestTimingSample sample)
+        {
+            byte[] packet = CreatePacketHeader(PacketTimingSample, sequence, TimingSamplePayloadSize);
+            int offset = HeaderSize;
+            WriteUInt64(packet, ref offset, sample.FrameId);
+            WriteUInt64(packet, ref offset, sample.HostCaptureTimeNs);
+            WriteUInt64(packet, ref offset, sample.PredictedDisplayTimeNs);
+            WriteUInt64(packet, ref offset, sample.EncodeStartTimeNs);
+            WriteUInt64(packet, ref offset, sample.EncodeEndTimeNs);
+            WriteUInt64(packet, ref offset, sample.ClientReceiveTimeNs);
+            WriteUInt64(packet, ref offset, sample.ClientDisplayTimeNs);
+            WriteUInt64(packet, ref offset, sample.ClientDecodeStartTimeNs);
+            WriteUInt64(packet, ref offset, sample.ClientDecodeEndTimeNs);
+            WriteUInt64(packet, ref offset, sample.ClientCompositorSubmitTimeNs);
+            WriteUInt32(packet, ref offset, sample.QueueDepth);
+            WriteUInt32(packet, ref offset, sample.Flags);
+            return packet;
+        }
+
         public static bool TryParseHeader(byte[] bytes, out PacketHeader header)
         {
             header = default;
@@ -269,6 +294,44 @@ namespace MetalXR.QuestClient
             }
 
             command = new MetalXRQuestHapticCommand(commandId, timestampNs, hand, amplitude, frequencyHz, durationUs);
+            return true;
+        }
+
+        public static bool TryParseTimingSamplePayload(byte[] payload, out MetalXRQuestTimingSample sample)
+        {
+            sample = null;
+            if (payload == null || payload.Length < TimingSamplePayloadSize)
+            {
+                return false;
+            }
+
+            int offset = 0;
+            ulong frameId = ReadUInt64(payload, ref offset);
+            ulong hostCaptureTimeNs = ReadUInt64(payload, ref offset);
+            ulong predictedDisplayTimeNs = ReadUInt64(payload, ref offset);
+            ulong encodeStartTimeNs = ReadUInt64(payload, ref offset);
+            ulong encodeEndTimeNs = ReadUInt64(payload, ref offset);
+            ulong clientReceiveTimeNs = ReadUInt64(payload, ref offset);
+            ulong clientDisplayTimeNs = ReadUInt64(payload, ref offset);
+            ulong clientDecodeStartTimeNs = ReadUInt64(payload, ref offset);
+            ulong clientDecodeEndTimeNs = ReadUInt64(payload, ref offset);
+            ulong clientCompositorSubmitTimeNs = ReadUInt64(payload, ref offset);
+            uint queueDepth = ReadUInt32(payload, ref offset);
+            uint flags = ReadUInt32(payload, ref offset);
+
+            sample = new MetalXRQuestTimingSample(
+                frameId,
+                hostCaptureTimeNs,
+                predictedDisplayTimeNs,
+                encodeStartTimeNs,
+                encodeEndTimeNs,
+                clientReceiveTimeNs,
+                clientDisplayTimeNs,
+                clientDecodeStartTimeNs,
+                clientDecodeEndTimeNs,
+                clientCompositorSubmitTimeNs,
+                queueDepth,
+                flags);
             return true;
         }
 
@@ -447,5 +510,50 @@ namespace MetalXR.QuestClient
         public float FrequencyHz { get; }
         public uint DurationUs { get; }
         public bool IsLeftHand { get { return Hand == MetalXRQuestProtocol.ControllerHandLeft; } }
+    }
+
+    public sealed class MetalXRQuestTimingSample
+    {
+        public MetalXRQuestTimingSample(
+            ulong frameId,
+            ulong hostCaptureTimeNs,
+            ulong predictedDisplayTimeNs,
+            ulong encodeStartTimeNs,
+            ulong encodeEndTimeNs,
+            ulong clientReceiveTimeNs,
+            ulong clientDisplayTimeNs,
+            ulong clientDecodeStartTimeNs,
+            ulong clientDecodeEndTimeNs,
+            ulong clientCompositorSubmitTimeNs,
+            uint queueDepth,
+            uint flags)
+        {
+            FrameId = frameId;
+            HostCaptureTimeNs = hostCaptureTimeNs;
+            PredictedDisplayTimeNs = predictedDisplayTimeNs;
+            EncodeStartTimeNs = encodeStartTimeNs;
+            EncodeEndTimeNs = encodeEndTimeNs;
+            ClientReceiveTimeNs = clientReceiveTimeNs;
+            ClientDisplayTimeNs = clientDisplayTimeNs;
+            ClientDecodeStartTimeNs = clientDecodeStartTimeNs;
+            ClientDecodeEndTimeNs = clientDecodeEndTimeNs;
+            ClientCompositorSubmitTimeNs = clientCompositorSubmitTimeNs;
+            QueueDepth = queueDepth;
+            Flags = flags;
+        }
+
+        public ulong FrameId { get; }
+        public ulong HostCaptureTimeNs { get; }
+        public ulong PredictedDisplayTimeNs { get; }
+        public ulong EncodeStartTimeNs { get; }
+        public ulong EncodeEndTimeNs { get; }
+        public ulong ClientReceiveTimeNs { get; }
+        public ulong ClientDisplayTimeNs { get; }
+        public ulong ClientDecodeStartTimeNs { get; }
+        public ulong ClientDecodeEndTimeNs { get; }
+        public ulong ClientCompositorSubmitTimeNs { get; }
+        public uint QueueDepth { get; }
+        public uint Flags { get; }
+        public bool IsClockSync { get { return (Flags & MetalXRQuestProtocol.TimingFlagClockSync) != 0; } }
     }
 }

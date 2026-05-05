@@ -51,11 +51,21 @@ Scripts/run-metalxr-frame-stream.sh
 - `METALXR_STREAM_FPS`
 - `METALXR_STREAM_BITRATE`
 - `METALXR_STREAM_FRAMES`
+- `METALXR_STREAM_QUEUE_DEPTH`
+- `METALXR_PREDICTION_OFFSET_MS`
+- `METALXR_CLOCK_SYNC_INTERVAL_MS`
 - `METALXR_TRANSPORT=usb|wifi`
 - `METALXR_TRACKING_STATE_PATH`
 - `METALXR_HAPTIC_COMMAND_PATH`
+- `METALXR_TIMING_STATE_PATH`
 
-On Quest, the client reads VIDEO_FRAME packets on a background thread, queues encoded access units, and processes decode/display work on the Unity main thread. Android builds attempt MediaCodec H.264 decode first. If MediaCodec is unavailable or has not produced an output buffer yet, the client displays a compressed-payload preview so transport and frame pacing remain visible during development. Display logs include host encoder latency and local client receive-to-display timing.
+On Quest, the client reads VIDEO_FRAME packets on a background thread, queues encoded access units, and processes decode/display work on the Unity main thread. Android builds attempt MediaCodec H.264 decode first. If MediaCodec is unavailable or has not produced an output buffer yet, the client displays a compressed-payload preview so transport and frame pacing remain visible during development. Display logs include host encoder latency, local client receive-to-display timing, decode time, submit time, and queue depth.
+
+## Timing
+
+The host sends `METALXR_PACKET_TIMING_SAMPLE` clock-sync probes and the Quest client replies immediately from the stream thread. After a frame is decoded and submitted to the eye texture, the Quest client sends a frame timing sample with receive, decode, display, and queue-depth timestamps.
+
+The host logs latency JSON records with encode, network, decode, compositor-submit, total latency, prediction error, queue depth, and measured display period. It also writes `METALXR_TIMING_STATE_PATH`; the native runtime reads that file so `xrWaitFrame` predictions can follow measured Quest display timing instead of a fixed local guess.
 
 ## Tracking, Controllers, And Haptics
 
@@ -68,7 +78,7 @@ The macOS host streamer drains those packets on the stream socket and atomically
 
 Haptics flow in the opposite direction. The runtime writes the latest command to `METALXR_HAPTIC_COMMAND_PATH` from `xrApplyHapticFeedback`; the host streamer sends it as `METALXR_PACKET_HAPTIC_COMMAND`; the Quest client applies it with Unity XR `SendHapticImpulse` on the main thread.
 
-This is a development bridge for USB smoke tests. It does not yet provide clock-synchronized prediction, datagram delivery, or production reconnect policy.
+This is a development bridge for USB smoke tests. It does not yet provide datagram delivery or production reconnect policy.
 
 ## Build
 

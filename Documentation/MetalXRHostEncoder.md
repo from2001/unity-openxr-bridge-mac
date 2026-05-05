@@ -48,7 +48,7 @@ The stream probe exercises the TCP transport path:
 Scripts/probe-metalxr-frame-stream.sh
 ```
 
-It starts `metalxr_host_streamer`, performs the Quest HELLO/HELLO_ACK exchange, receives finite `METALXR_PACKET_VIDEO_FRAME` packets, verifies left/right eye counts, and checks that each packet carries H.264 bytes after the fixed video-frame metadata.
+It starts `metalxr_host_streamer`, performs the Quest HELLO/HELLO_ACK exchange, responds to timing sync probes, receives finite `METALXR_PACKET_VIDEO_FRAME` packets, verifies left/right eye counts, and checks that each packet carries H.264 bytes after the fixed video-frame metadata. The probe also verifies clock-sync and latency JSON records.
 
 For a headset session, launch the Quest client APK and then run:
 
@@ -68,13 +68,15 @@ Each encoded frame emits one JSONL record:
 
 At shutdown, each eye emits a summary record with submitted frames, encoded frames, dropped frames, output bytes, average latency, and max latency.
 
+The streamer also emits `clock_sync` and `latency` JSON records. Latency records break frame timing into encode, network, decode, compositor-submit, total, prediction error, queue depth, and measured frame period.
+
 ## Current Limitations
 
 - The input is synthetic `CVPixelBuffer` data, not a Unity-rendered Metal texture.
 - The encoder uses one H.264 session per eye. A future transport can either keep separate eye streams or add a stereo packing step.
 - There is no HEVC path yet.
 - There is no GPU synchronization, Metal blit, IOSurface export, or CPU readback from the OpenXR swapchain yet.
-- The stream path is TCP-only for now. USB adb reverse and Wi-Fi are both usable for evaluation, but adaptive bitrate, packet loss handling, and clock sync are still future work.
+- The stream path is TCP-only for now. USB adb reverse and Wi-Fi are both usable for evaluation, but adaptive bitrate, packet loss handling, and production-grade clock sync are still future work.
 
 ## Next Step
 

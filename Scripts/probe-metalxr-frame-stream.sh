@@ -29,6 +29,7 @@ rm -f "$log_file"
   --width 160 \
   --height 90 \
   --bitrate 800000 \
+  --queue-depth 32 \
   --no-realtime >"$log_file" 2>&1 &
 streamer_pid="$!"
 
@@ -53,11 +54,15 @@ target_eye_frames = frames * 2
 HEADER = struct.Struct("<IHHHHIQQII")
 HELLO = struct.Struct("<IIIIIIII64s")
 VIDEO = struct.Struct("<QIIIIQQQII")
+TIMING = struct.Struct("<QQQQQQQQQQII")
 MAGIC = 0x4D585250
 HEADER_SIZE = 40
 PACKET_HELLO = 1
 PACKET_HELLO_ACK = 2
 PACKET_VIDEO_FRAME = 10
+PACKET_TIMING_SAMPLE = 30
+TIMING_FLAG_CLOCK_SYNC = 0x00000001
+TIMING_FLAG_FRAME_DISPLAY = 0x00000002
 ROLE_QUEST_CLIENT = 2
 CAP_H264 = 0x00000001
 CAP_STEREO_SEPARATE_EYES = 0x00000004
@@ -74,6 +79,16 @@ def recv_exact(sock, size):
         chunks.append(data)
         remaining -= len(data)
     return b"".join(chunks)
+
+
+sequence = 2
+
+
+def send_packet(sock, packet_type, payload):
+    global sequence
+    header = HEADER.pack(MAGIC, HEADER_SIZE, packet_type, 0, 1, 0, sequence, time.monotonic_ns(), len(payload), 0)
+    sequence += 1
+    sock.sendall(header + payload)
 
 
 deadline = time.time() + 5.0
@@ -101,8 +116,7 @@ hello_payload = HELLO.pack(
     0,
     b"MetalXR Probe Quest Client".ljust(64, b"\0"),
 )
-hello_header = HEADER.pack(MAGIC, HEADER_SIZE, PACKET_HELLO, 0, 1, 0, 1, time.monotonic_ns(), len(hello_payload), 0)
-sock.sendall(hello_header + hello_payload)
+send_packet(sock, PACKET_HELLO, hello_payload)
 
 ack_header = HEADER.unpack(recv_exact(sock, HEADER_SIZE))
 if ack_header[0] != MAGIC or ack_header[2] != PACKET_HELLO_ACK:
@@ -118,6 +132,29 @@ while eye_counts[0] + eye_counts[1] < target_eye_frames:
     if header[0] != MAGIC:
         raise RuntimeError(f"bad magic 0x{header[0]:08x}")
     payload = recv_exact(sock, header[8])
+    receive_ns = time.monotonic_ns()
+    if header[2] == PACKET_TIMING_SAMPLE:
+        if len(payload) != TIMING.size:
+            raise RuntimeError("bad TIMING_SAMPLE payload")
+        timing = TIMING.unpack(payload)
+        if timing[11] & TIMING_FLAG_CLOCK_SYNC:
+            now_ns = time.monotonic_ns()
+            response = TIMING.pack(
+                timing[0],
+                timing[1],
+                timing[2],
+                timing[3],
+                timing[4],
+                now_ns,
+                now_ns,
+                0,
+                0,
+                now_ns,
+                0,
+                TIMING_FLAG_CLOCK_SYNC,
+            )
+            send_packet(sock, PACKET_TIMING_SAMPLE, response)
+        continue
     if header[2] != PACKET_VIDEO_FRAME:
         continue
     if len(payload) < VIDEO.size:
@@ -135,6 +172,26 @@ while eye_counts[0] + eye_counts[1] < target_eye_frames:
     payload_bytes += encoded_size
     if flags & 1:
         keyframes += 1
+    encode_end_ns = header[7]
+    encode_start_ns = encode_end_ns - (encoder_latency_us * 1000) if encode_end_ns >= encoder_latency_us * 1000 else 0
+    decode_start_ns = receive_ns
+    decode_end_ns = decode_start_ns + 100000
+    display_ns = decode_end_ns + 100000
+    display_timing = TIMING.pack(
+        frame_id,
+        timestamp_ns,
+        predicted_ns,
+        encode_start_ns,
+        encode_end_ns,
+        receive_ns,
+        display_ns,
+        decode_start_ns,
+        decode_end_ns,
+        display_ns,
+        0,
+        TIMING_FLAG_FRAME_DISPLAY,
+    )
+    send_packet(sock, PACKET_TIMING_SAMPLE, display_timing)
     if eye_counts[0] + eye_counts[1] <= 4:
         print(
             f"received frame={frame_id} eye={eye} bytes={encoded_size} "
@@ -154,5 +211,17 @@ if grep -q '"event":"drop"' "$log_file"; then
   exit 1
 fi
 
+if ! grep -q '"event":"clock_sync"' "$log_file"; then
+  echo "Streamer did not report clock sync." >&2
+  cat "$log_file" >&2
+  exit 1
+fi
+
+if ! grep -q '"event":"latency"' "$log_file"; then
+  echo "Streamer did not report latency samples." >&2
+  cat "$log_file" >&2
+  exit 1
+fi
+
 echo "Host frame streamer log: $log_file"
-sed -n '1,12p' "$log_file"
+sed -n '1,16p' "$log_file"

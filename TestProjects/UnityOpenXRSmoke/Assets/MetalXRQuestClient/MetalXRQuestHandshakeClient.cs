@@ -33,6 +33,8 @@ namespace MetalXR.QuestClient
             _endpoint = endpoint;
         }
 
+        public int QueuedFrameCount { get { return _frames.Count; } }
+
         public void Start()
         {
             lock (_lifecycleLock)
@@ -163,6 +165,16 @@ namespace MetalXR.QuestClient
                 aimOrientation,
                 gripPosition,
                 gripOrientation));
+        }
+
+        public void EnqueueTimingSample(MetalXRQuestTimingSample sample)
+        {
+            if (sample == null)
+            {
+                return;
+            }
+
+            EnqueueOutgoingPacket(MetalXRQuestProtocol.CreateTimingSamplePacket(NextSequence(), sample));
         }
 
         public void Dispose()
@@ -320,6 +332,18 @@ namespace MetalXR.QuestClient
                         _logs.Enqueue("dropped malformed HAPTIC_COMMAND packet bytes=" + header.PayloadSize);
                     }
                 }
+                else if (header.Type == MetalXRQuestProtocol.PacketTimingSample)
+                {
+                    MetalXRQuestTimingSample sample;
+                    if (MetalXRQuestProtocol.TryParseTimingSamplePayload(payload, out sample))
+                    {
+                        HandleTimingSample(sample);
+                    }
+                    else
+                    {
+                        _logs.Enqueue("dropped malformed TIMING_SAMPLE packet bytes=" + header.PayloadSize);
+                    }
+                }
 
                 FlushOutgoingPackets(stream);
             }
@@ -347,6 +371,29 @@ namespace MetalXR.QuestClient
                     " bytes=" + frame.EncodedBytes.Length +
                     " keyframe=" + frame.IsKeyframe);
             }
+        }
+
+        private void HandleTimingSample(MetalXRQuestTimingSample sample)
+        {
+            if (!sample.IsClockSync)
+            {
+                return;
+            }
+
+            ulong nowNs = MetalXRQuestProtocol.NowNs();
+            EnqueueTimingSample(new MetalXRQuestTimingSample(
+                sample.FrameId,
+                sample.HostCaptureTimeNs,
+                sample.PredictedDisplayTimeNs,
+                sample.EncodeStartTimeNs,
+                sample.EncodeEndTimeNs,
+                nowNs,
+                nowNs,
+                0,
+                0,
+                nowNs,
+                (uint)QueuedFrameCount,
+                MetalXRQuestProtocol.TimingFlagClockSync));
         }
 
         private void EnqueueHaptic(MetalXRQuestHapticCommand command)

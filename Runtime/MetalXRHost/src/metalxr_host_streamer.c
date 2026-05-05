@@ -34,8 +34,12 @@ typedef struct StreamerOptions {
     int frames;
     int bitrate;
     int realtime;
+    int queueDepth;
+    int clockSyncIntervalMs;
+    int64_t predictionOffsetNs;
     char trackingStatePath[1024];
     char hapticCommandPath[1024];
+    char timingStatePath[1024];
 } StreamerOptions;
 
 typedef struct ByteBuffer {
@@ -53,6 +57,28 @@ typedef struct EncoderStats {
     uint64_t maxLatencyUs;
 } EncoderStats;
 
+typedef struct HostTimingState {
+    int hasClockSync;
+    int64_t clockOffsetNs;
+    uint64_t clockRttNs;
+    uint64_t lastClockSyncSendNs;
+    uint64_t measuredFramePeriodNs;
+    uint64_t lastDisplayHostNs;
+    uint64_t lastFrameId;
+    uint64_t timingSamples;
+    int64_t predictionOffsetNs;
+    uint64_t totalLatencySamples;
+    uint64_t totalLatencyUs;
+    uint64_t maxLatencyUs;
+    uint64_t lastEncodeUs;
+    uint64_t lastNetworkUs;
+    uint64_t lastDecodeUs;
+    uint64_t lastCompositorUs;
+    uint64_t lastTotalUs;
+    int64_t lastPredictionErrorUs;
+    uint32_t lastQueueDepth;
+} HostTimingState;
+
 typedef struct StreamSession {
     int clientFd;
     uint64_t sequence;
@@ -60,7 +86,9 @@ typedef struct StreamSession {
     pthread_mutex_t sendLock;
     char trackingStatePath[1024];
     char hapticCommandPath[1024];
+    char timingStatePath[1024];
     uint64_t lastHapticCommandId;
+    HostTimingState timing;
 } StreamSession;
 
 typedef struct HostPoseState {
@@ -102,6 +130,10 @@ typedef struct EncoderContext {
     VTCompressionSessionRef session;
     StreamSession* stream;
     EncoderStats stats;
+    pthread_mutex_t queueLock;
+    int queueLockInitialized;
+    uint32_t pendingFrames;
+    uint32_t maxQueueDepth;
 } EncoderContext;
 
 typedef struct FrameRefcon {
@@ -118,6 +150,9 @@ static uint64_t host_time_ns(void)
 {
     return metalxr_protocol_now_ns();
 }
+
+static int reserve_encoder_queue_slot(EncoderContext* context, uint64_t frameId);
+static void release_encoder_queue_slot(EncoderContext* context);
 
 static void sleep_until_ns(uint64_t targetNs)
 {
@@ -142,7 +177,8 @@ static void print_usage(const char* argv0)
     fprintf(stderr,
             "Usage: %s [--bind-host HOST] [--port N] [--frames N] [--fps N] "
             "[--width N] [--height N] [--bitrate BPS] [--tracking-state-path PATH] "
-            "[--haptic-command-path PATH] [--no-realtime]\n\n"
+            "[--haptic-command-path PATH] [--timing-state-path PATH] [--queue-depth N] "
+            "[--prediction-offset-ms N] [--clock-sync-interval-ms N] [--no-realtime]\n\n"
             "frames=0 streams until the client disconnects. The default bind host is 127.0.0.1,\n"
             "which is suitable for adb reverse. Use --bind-host 0.0.0.0 for Wi-Fi tests.\n",
             argv0);
@@ -172,8 +208,12 @@ static StreamerOptions parse_options(int argc, char** argv)
     options.frames = 0;
     options.bitrate = 8000000;
     options.realtime = 1;
+    options.queueDepth = 3;
+    options.clockSyncIntervalMs = 500;
+    options.predictionOffsetNs = 0;
     snprintf(options.trackingStatePath, sizeof(options.trackingStatePath), "%s", "/tmp/metalxr_tracking_state.txt");
     snprintf(options.hapticCommandPath, sizeof(options.hapticCommandPath), "%s", "/tmp/metalxr_haptic_command.txt");
+    snprintf(options.timingStatePath, sizeof(options.timingStatePath), "%s", "/tmp/metalxr_timing_state.txt");
 
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
@@ -198,6 +238,14 @@ static StreamerOptions parse_options(int argc, char** argv)
             snprintf(options.trackingStatePath, sizeof(options.trackingStatePath), "%s", argv[++i]);
         } else if (strcmp(arg, "--haptic-command-path") == 0 && i + 1 < argc) {
             snprintf(options.hapticCommandPath, sizeof(options.hapticCommandPath), "%s", argv[++i]);
+        } else if (strcmp(arg, "--timing-state-path") == 0 && i + 1 < argc) {
+            snprintf(options.timingStatePath, sizeof(options.timingStatePath), "%s", argv[++i]);
+        } else if (strcmp(arg, "--queue-depth") == 0 && i + 1 < argc) {
+            options.queueDepth = parse_int_arg(argv[++i], "queue depth", 1, 64);
+        } else if (strcmp(arg, "--prediction-offset-ms") == 0 && i + 1 < argc) {
+            options.predictionOffsetNs = (int64_t)parse_int_arg(argv[++i], "prediction offset ms", -500, 500) * 1000000;
+        } else if (strcmp(arg, "--clock-sync-interval-ms") == 0 && i + 1 < argc) {
+            options.clockSyncIntervalMs = parse_int_arg(argv[++i], "clock sync interval ms", 50, 60000);
         } else if (strcmp(arg, "--no-realtime") == 0) {
             options.realtime = 0;
         } else {
@@ -432,6 +480,7 @@ static void compression_output_callback(
         status != noErr || sampleBuffer == NULL || !CMSampleBufferDataIsReady(sampleBuffer)) {
         if (context != NULL) {
             ++context->stats.droppedFrames;
+            release_encoder_queue_slot(context);
         }
         if (frame != NULL) {
             fprintf(stderr,
@@ -454,6 +503,7 @@ static void compression_output_callback(
         CMFormatDescriptionRef formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer);
         if (formatDescription != NULL && !append_h264_parameter_sets(&encoded, formatDescription)) {
             ++context->stats.droppedFrames;
+            release_encoder_queue_slot(context);
             free_buffer(&encoded);
             free(frame);
             return;
@@ -462,6 +512,7 @@ static void compression_output_callback(
 
     if (!append_sample_buffer_annex_b(&encoded, sampleBuffer) || encoded.size == 0) {
         ++context->stats.droppedFrames;
+        release_encoder_queue_slot(context);
         free_buffer(&encoded);
         free(frame);
         return;
@@ -469,6 +520,7 @@ static void compression_output_callback(
 
     if (!stream_video_frame(context->stream, frame, &encoded, latencyUs, flags)) {
         ++context->stats.droppedFrames;
+        release_encoder_queue_slot(context);
         free_buffer(&encoded);
         free(frame);
         return;
@@ -496,6 +548,7 @@ static void compression_output_callback(
         fflush(stdout);
     }
 
+    release_encoder_queue_slot(context);
     free_buffer(&encoded);
     free(frame);
 }
@@ -549,6 +602,9 @@ static int create_encoder(EncoderContext* context, const StreamerOptions* option
     context->height = options->height;
     context->fps = options->fps;
     context->stream = stream;
+    context->maxQueueDepth = (uint32_t)options->queueDepth;
+    pthread_mutex_init(&context->queueLock, NULL);
+    context->queueLockInitialized = 1;
 
     OSStatus status = VTCompressionSessionCreate(
         kCFAllocatorDefault,
@@ -612,6 +668,10 @@ static int encode_eye_frame(
     uint64_t captureTimeNs,
     uint64_t predictedDisplayTimeNs)
 {
+    if (!reserve_encoder_queue_slot(context, frameId)) {
+        return 1;
+    }
+
     CVPixelBufferRef pixelBuffer =
         create_synthetic_pixel_buffer(context->width, context->height, frameId, context->eyeIndex);
     if (pixelBuffer == NULL) {
@@ -619,12 +679,14 @@ static int encode_eye_frame(
                 context->eyeName,
                 frameId);
         ++context->stats.droppedFrames;
+        release_encoder_queue_slot(context);
         return 0;
     }
 
     FrameRefcon* frame = (FrameRefcon*)calloc(1, sizeof(*frame));
     if (frame == NULL) {
         CVPixelBufferRelease(pixelBuffer);
+        release_encoder_queue_slot(context);
         return 0;
     }
 
@@ -652,9 +714,10 @@ static int encode_eye_frame(
         fprintf(stderr, "VTCompressionSessionEncodeFrame failed for %s frame %" PRIu64 ": %d\n",
                 context->eyeName,
                 frameId,
-                (int)status);
+        (int)status);
         ++context->stats.droppedFrames;
         free(frame);
+        release_encoder_queue_slot(context);
         return 0;
     }
 
@@ -669,6 +732,10 @@ static void destroy_encoder(EncoderContext* context)
         VTCompressionSessionInvalidate(context->session);
         CFRelease(context->session);
         context->session = NULL;
+    }
+    if (context->queueLockInitialized) {
+        pthread_mutex_destroy(&context->queueLock);
+        context->queueLockInitialized = 0;
     }
 }
 
@@ -690,6 +757,146 @@ static void write_summary(const EncoderContext* context)
            context->stats.totalBytes,
            averageLatency,
            context->stats.maxLatencyUs);
+}
+
+static uint64_t add_signed_ns(uint64_t value, int64_t offsetNs)
+{
+    if (offsetNs >= 0) {
+        return value + (uint64_t)offsetNs;
+    }
+
+    const uint64_t magnitude = (uint64_t)(-offsetNs);
+    return value > magnitude ? value - magnitude : 0;
+}
+
+static uint64_t elapsed_us(uint64_t newerNs, uint64_t olderNs)
+{
+    return newerNs >= olderNs ? (newerNs - olderNs) / 1000ull : 0;
+}
+
+static int64_t signed_elapsed_us(uint64_t newerNs, uint64_t olderNs)
+{
+    if (newerNs >= olderNs) {
+        return (int64_t)((newerNs - olderNs) / 1000ull);
+    }
+
+    return -(int64_t)((olderNs - newerNs) / 1000ull);
+}
+
+static uint64_t host_time_from_client_time(const HostTimingState* timing, uint64_t clientTimeNs)
+{
+    if (timing == NULL || !timing->hasClockSync || clientTimeNs == 0) {
+        return 0;
+    }
+
+    const int64_t hostTimeNs = (int64_t)clientTimeNs - timing->clockOffsetNs;
+    return hostTimeNs > 0 ? (uint64_t)hostTimeNs : 0;
+}
+
+static HostTimingState make_default_timing_state(const StreamerOptions* options)
+{
+    HostTimingState timing;
+    memset(&timing, 0, sizeof(timing));
+    timing.measuredFramePeriodNs = 1000000000ull / (uint64_t)options->fps;
+    timing.predictionOffsetNs = options->predictionOffsetNs;
+    timing.lastFrameId = UINT64_MAX;
+    return timing;
+}
+
+static uint64_t next_predicted_display_time_ns(
+    const HostTimingState* timing,
+    uint64_t captureTimeNs,
+    uint64_t fallbackFramePeriodNs)
+{
+    const uint64_t periodNs =
+        timing != NULL && timing->measuredFramePeriodNs > 0 ?
+            timing->measuredFramePeriodNs :
+            fallbackFramePeriodNs;
+
+    if (timing != NULL && timing->lastDisplayHostNs > 0 &&
+        captureTimeNs >= timing->lastDisplayHostNs &&
+        captureTimeNs - timing->lastDisplayHostNs < 2000000000ull) {
+        uint64_t predictedNs = timing->lastDisplayHostNs;
+        while (predictedNs <= captureTimeNs) {
+            predictedNs += periodNs;
+        }
+        return add_signed_ns(predictedNs, timing->predictionOffsetNs);
+    }
+
+    return add_signed_ns(captureTimeNs + periodNs, timing != NULL ? timing->predictionOffsetNs : 0);
+}
+
+static void write_timing_state_file(const StreamSession* session)
+{
+    if (session == NULL || session->timingStatePath[0] == '\0') {
+        return;
+    }
+
+    char tempPath[1200];
+    snprintf(tempPath, sizeof(tempPath), "%s.tmp", session->timingStatePath);
+    FILE* output = fopen(tempPath, "w");
+    if (output == NULL) {
+        return;
+    }
+
+    const HostTimingState* timing = &session->timing;
+    const uint64_t averageLatencyUs =
+        timing->totalLatencySamples > 0 ?
+            timing->totalLatencyUs / timing->totalLatencySamples :
+            0;
+    fprintf(output,
+            "timing %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRIu64 " %" PRIu64
+            " %" PRIu64 " %" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %u\n",
+            timing->timingSamples,
+            host_time_ns(),
+            timing->clockOffsetNs,
+            timing->clockRttNs,
+            timing->measuredFramePeriodNs,
+            timing->lastDisplayHostNs,
+            timing->predictionOffsetNs,
+            averageLatencyUs,
+            timing->maxLatencyUs,
+            timing->lastEncodeUs,
+            timing->lastNetworkUs,
+            timing->lastDecodeUs,
+            timing->lastCompositorUs,
+            timing->lastTotalUs,
+            timing->lastPredictionErrorUs,
+            timing->lastQueueDepth);
+    fclose(output);
+    (void)rename(tempPath, session->timingStatePath);
+}
+
+static int reserve_encoder_queue_slot(EncoderContext* context, uint64_t frameId)
+{
+    pthread_mutex_lock(&context->queueLock);
+    if (context->pendingFrames >= context->maxQueueDepth) {
+        const uint32_t pending = context->pendingFrames;
+        pthread_mutex_unlock(&context->queueLock);
+        ++context->stats.droppedFrames;
+        fprintf(stderr,
+                "{\"event\":\"drop\",\"reason\":\"queue_depth\",\"frame\":%" PRIu64
+                ",\"eye\":%d,\"pending\":%u,\"limit\":%u}\n",
+                frameId,
+                context->eyeIndex,
+                pending,
+                context->maxQueueDepth);
+        return 0;
+    }
+
+    ++context->pendingFrames;
+    pthread_mutex_unlock(&context->queueLock);
+    return 1;
+}
+
+static void release_encoder_queue_slot(EncoderContext* context)
+{
+    pthread_mutex_lock(&context->queueLock);
+    if (context->pendingFrames > 0) {
+        --context->pendingFrames;
+    }
+    pthread_mutex_unlock(&context->queueLock);
 }
 
 static HostInputState make_default_input_state(void)
@@ -840,6 +1047,149 @@ static void handle_controller_input(
     write_tracking_state_file(session, state);
 }
 
+static int send_timing_sample(StreamSession* session, const MetalXRTimingSamplePayload* sample)
+{
+    pthread_mutex_lock(&session->sendLock);
+    MetalXRPacketHeader header = metalxr_make_header(
+        METALXR_PACKET_TIMING_SAMPLE,
+        session->sequence++,
+        metalxr_protocol_now_ns(),
+        sizeof(*sample));
+    const int sent = metalxr_protocol_send_packet(session->clientFd, &header, sample);
+    if (!sent) {
+        session->failed = 1;
+    }
+    pthread_mutex_unlock(&session->sendLock);
+    return sent;
+}
+
+static void send_clock_sync_if_due(StreamSession* session, uint64_t intervalNs)
+{
+    const uint64_t nowNs = host_time_ns();
+    if (session == NULL || session->failed ||
+        (session->timing.lastClockSyncSendNs != 0 &&
+         nowNs - session->timing.lastClockSyncSendNs < intervalNs)) {
+        return;
+    }
+
+    MetalXRTimingSamplePayload sample;
+    memset(&sample, 0, sizeof(sample));
+    sample.frameId = UINT64_MAX;
+    sample.hostCaptureTimeNs = nowNs;
+    sample.flags = METALXR_TIMING_FLAG_CLOCK_SYNC;
+    if (send_timing_sample(session, &sample)) {
+        session->timing.lastClockSyncSendNs = nowNs;
+    }
+}
+
+static void update_measured_frame_period(HostTimingState* timing, uint64_t frameId, uint64_t displayHostNs)
+{
+    if (timing == NULL || displayHostNs == 0 || frameId == timing->lastFrameId) {
+        return;
+    }
+
+    if (timing->lastFrameId != UINT64_MAX && frameId > timing->lastFrameId &&
+        displayHostNs > timing->lastDisplayHostNs) {
+        const uint64_t frameDelta = frameId - timing->lastFrameId;
+        const uint64_t measuredNs = (displayHostNs - timing->lastDisplayHostNs) / frameDelta;
+        if (measuredNs > 1000000ull && measuredNs < 1000000000ull) {
+            if (timing->measuredFramePeriodNs == 0) {
+                timing->measuredFramePeriodNs = measuredNs;
+            } else {
+                timing->measuredFramePeriodNs =
+                    ((timing->measuredFramePeriodNs * 7ull) + measuredNs) / 8ull;
+            }
+        }
+    }
+
+    timing->lastFrameId = frameId;
+    timing->lastDisplayHostNs = displayHostNs;
+}
+
+static void handle_timing_sample(
+    StreamSession* session,
+    const MetalXRTimingSamplePayload* sample,
+    uint64_t hostReceiveTimeNs)
+{
+    HostTimingState* timing = &session->timing;
+
+    if ((sample->flags & METALXR_TIMING_FLAG_CLOCK_SYNC) != 0) {
+        if (sample->hostCaptureTimeNs != 0 && hostReceiveTimeNs >= sample->hostCaptureTimeNs &&
+            sample->clientReceiveTimeNs != 0) {
+            const uint64_t rttNs = hostReceiveTimeNs - sample->hostCaptureTimeNs;
+            const uint64_t midpointNs = sample->hostCaptureTimeNs + (rttNs / 2ull);
+            const int64_t offsetNs = (int64_t)sample->clientReceiveTimeNs - (int64_t)midpointNs;
+            timing->clockOffsetNs = timing->hasClockSync ?
+                ((timing->clockOffsetNs * 7) + offsetNs) / 8 :
+                offsetNs;
+            timing->clockRttNs = rttNs;
+            timing->hasClockSync = 1;
+            ++timing->timingSamples;
+
+            if (timing->timingSamples <= 3 || (timing->timingSamples % 120) == 0) {
+                printf("{\"event\":\"clock_sync\",\"offset_ns\":%" PRId64
+                       ",\"rtt_us\":%" PRIu64 ",\"queue_depth\":%u}\n",
+                       timing->clockOffsetNs,
+                       timing->clockRttNs / 1000ull,
+                       sample->queueDepth);
+                fflush(stdout);
+            }
+
+            write_timing_state_file(session);
+        }
+        return;
+    }
+
+    if ((sample->flags & METALXR_TIMING_FLAG_FRAME_DISPLAY) == 0) {
+        return;
+    }
+
+    const uint64_t clientDisplayNs =
+        sample->clientCompositorSubmitTimeNs != 0 ?
+            sample->clientCompositorSubmitTimeNs :
+            sample->clientDisplayTimeNs;
+    const uint64_t displayHostNs = host_time_from_client_time(timing, clientDisplayNs);
+    const uint64_t receiveHostNs = host_time_from_client_time(timing, sample->clientReceiveTimeNs);
+
+    ++timing->timingSamples;
+    update_measured_frame_period(timing, sample->frameId, displayHostNs);
+    timing->lastEncodeUs = elapsed_us(sample->encodeEndTimeNs, sample->encodeStartTimeNs);
+    timing->lastNetworkUs = elapsed_us(receiveHostNs, sample->encodeEndTimeNs);
+    timing->lastDecodeUs = elapsed_us(sample->clientDecodeEndTimeNs, sample->clientDecodeStartTimeNs);
+    timing->lastCompositorUs = elapsed_us(clientDisplayNs, sample->clientDecodeEndTimeNs);
+    timing->lastTotalUs = elapsed_us(displayHostNs, sample->hostCaptureTimeNs);
+    timing->lastPredictionErrorUs = signed_elapsed_us(displayHostNs, sample->predictedDisplayTimeNs);
+    timing->lastQueueDepth = sample->queueDepth;
+
+    if (timing->lastTotalUs > 0) {
+        ++timing->totalLatencySamples;
+        timing->totalLatencyUs += timing->lastTotalUs;
+        if (timing->lastTotalUs > timing->maxLatencyUs) {
+            timing->maxLatencyUs = timing->lastTotalUs;
+        }
+    }
+
+    if (timing->totalLatencySamples <= 8 || (timing->totalLatencySamples % 120) == 0) {
+        printf("{\"event\":\"latency\",\"frame\":%" PRIu64
+               ",\"encode_us\":%" PRIu64 ",\"network_us\":%" PRIu64
+               ",\"decode_us\":%" PRIu64 ",\"compositor_us\":%" PRIu64
+               ",\"total_us\":%" PRIu64 ",\"prediction_error_us\":%" PRId64
+               ",\"queue_depth\":%u,\"period_ns\":%" PRIu64 "}\n",
+               sample->frameId,
+               timing->lastEncodeUs,
+               timing->lastNetworkUs,
+               timing->lastDecodeUs,
+               timing->lastCompositorUs,
+               timing->lastTotalUs,
+               timing->lastPredictionErrorUs,
+               timing->lastQueueDepth,
+               timing->measuredFramePeriodNs);
+        fflush(stdout);
+    }
+
+    write_timing_state_file(session);
+}
+
 static void drain_client_input_packets(StreamSession* session, HostInputState* state)
 {
     while (!session->failed && socket_has_data(session->clientFd)) {
@@ -860,6 +1210,11 @@ static void drain_client_input_packets(StreamSession* session, HostInputState* s
             MetalXRControllerInputPayload input;
             memcpy(&input, payload, sizeof(input));
             handle_controller_input(session, state, &input);
+        } else if (header.type == METALXR_PACKET_TIMING_SAMPLE &&
+                   header.payloadSize == sizeof(MetalXRTimingSamplePayload)) {
+            MetalXRTimingSamplePayload sample;
+            memcpy(&sample, payload, sizeof(sample));
+            handle_timing_sample(session, &sample, host_time_ns());
         }
     }
 }
@@ -1059,6 +1414,9 @@ static int send_hello_ack(int fd, StreamSession* session, const StreamerOptions*
     ack.role = METALXR_ROLE_HOST;
     ack.capabilities = METALXR_CAPABILITY_H264 |
                        METALXR_CAPABILITY_STEREO_SEPARATE_EYES |
+                       METALXR_CAPABILITY_POSE_INPUT |
+                       METALXR_CAPABILITY_CONTROLLER_INPUT |
+                       METALXR_CAPABILITY_HAPTICS |
                        METALXR_CAPABILITY_LOG_STREAM;
     ack.maxVideoWidth = (uint32_t)options->width;
     ack.maxVideoHeight = (uint32_t)options->height;
@@ -1089,17 +1447,28 @@ static int stream_client(int clientFd, const StreamerOptions* options)
     stream.sequence = firstSequence + 1;
     snprintf(stream.trackingStatePath, sizeof(stream.trackingStatePath), "%s", options->trackingStatePath);
     snprintf(stream.hapticCommandPath, sizeof(stream.hapticCommandPath), "%s", options->hapticCommandPath);
+    snprintf(stream.timingStatePath, sizeof(stream.timingStatePath), "%s", options->timingStatePath);
+    stream.timing = make_default_timing_state(options);
     pthread_mutex_init(&stream.sendLock, NULL);
     HostInputState inputState = make_default_input_state();
     write_tracking_state_file(&stream, &inputState);
+    write_timing_state_file(&stream);
 
     if (!send_hello_ack(clientFd, &stream, options)) {
         pthread_mutex_destroy(&stream.sendLock);
         return 0;
     }
 
-    EncoderContext left = { "left", 0, 0, 0, 0, NULL, &stream, { 0 } };
-    EncoderContext right = { "right", 1, 0, 0, 0, NULL, &stream, { 0 } };
+    EncoderContext left;
+    EncoderContext right;
+    memset(&left, 0, sizeof(left));
+    memset(&right, 0, sizeof(right));
+    left.eyeName = "left";
+    left.eyeIndex = 0;
+    left.stream = &stream;
+    right.eyeName = "right";
+    right.eyeIndex = 1;
+    right.stream = &stream;
     int ok = 1;
 
     if (!create_encoder(&left, options, &stream) ||
@@ -1109,12 +1478,15 @@ static int stream_client(int clientFd, const StreamerOptions* options)
 
     const uint64_t startNs = host_time_ns();
     const uint64_t framePeriodNs = 1000000000ull / (uint64_t)options->fps;
+    const uint64_t clockSyncIntervalNs = (uint64_t)options->clockSyncIntervalMs * 1000000ull;
     for (int frame = 0; ok && !stream.failed && (options->frames == 0 || frame < options->frames); ++frame) {
         drain_client_input_packets(&stream, &inputState);
         poll_haptic_command_file(&stream);
+        send_clock_sync_if_due(&stream, clockSyncIntervalNs);
 
         const uint64_t captureTimeNs = host_time_ns();
-        const uint64_t predictedDisplayTimeNs = captureTimeNs + framePeriodNs;
+        const uint64_t predictedDisplayTimeNs =
+            next_predicted_display_time_ns(&stream.timing, captureTimeNs, framePeriodNs);
 
         if (!encode_eye_frame(&left, (uint64_t)frame, captureTimeNs, predictedDisplayTimeNs) ||
             !encode_eye_frame(&right, (uint64_t)frame, captureTimeNs, predictedDisplayTimeNs)) {
@@ -1156,7 +1528,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d tracking=%s haptics=%s\n",
+    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d prediction_offset_ns=%" PRId64 " tracking=%s haptics=%s timing=%s\n",
            options.bindHost,
            options.port,
            options.width,
@@ -1164,8 +1536,11 @@ int main(int argc, char** argv)
            options.fps,
            options.bitrate,
            options.frames,
+           options.queueDepth,
+           options.predictionOffsetNs,
            options.trackingStatePath,
-           options.hapticCommandPath);
+           options.hapticCommandPath,
+           options.timingStatePath);
     fflush(stdout);
 
     int exitCode = 0;

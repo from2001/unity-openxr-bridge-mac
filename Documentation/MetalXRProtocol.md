@@ -75,7 +75,12 @@ payloadBytes of H.264 Annex B data
 
 `flags & 0x1` marks keyframes. Keyframe packets include SPS/PPS parameter sets before the access unit so the Quest-side decoder can recover after reconnects.
 
-`METALXR_PACKET_TIMING_SAMPLE` separates timing telemetry from media payloads and includes host capture, predicted display, encode start/end, client receive, and client display timestamps. All timing fields are monotonic nanoseconds in the sender's local clock domain unless a later clock-sync packet defines a shared mapping.
+`METALXR_PACKET_TIMING_SAMPLE` separates timing telemetry from media payloads. It is used in two directions:
+
+- Host-to-Quest clock sync probes use `METALXR_TIMING_FLAG_CLOCK_SYNC`, `frameId = UINT64_MAX`, and `hostCaptureTimeNs` as the host send time.
+- Quest-to-host frame samples use `METALXR_TIMING_FLAG_FRAME_DISPLAY` and include host capture, predicted display, host encode start/end, Quest receive/display, Quest decode start/end, compositor submit time, and queue depth.
+
+The host estimates Quest-to-host clock offset from clock sync replies, converts Quest display timestamps into the host clock domain, logs encode/network/decode/compositor/total latency, and writes measured display timing to `METALXR_TIMING_STATE_PATH` for the runtime.
 
 ## Pose, Controller, And Haptic Packets
 
@@ -134,6 +139,6 @@ The probe verifies:
 
 - The loopback uses an in-process socket pair, not adb or Wi-Fi.
 - Packet structs are fixed-layout C structs with matching Unity C# packing helpers; generated bindings are still needed.
-- There is no clock synchronization packet yet; timing fields are explicit but remain in local monotonic clock domains.
+- Clock sync is a lightweight development probe over TCP timing samples, not a production-quality timebase protocol.
 - TCP media transport is a development path. Datagram transport, adaptive pacing, and retransmission policy are not defined yet.
-- Tracking and haptics use state-file handoff between the host streamer and runtime while the real host/runtime integration is still being built.
+- Tracking, timing, and haptics use state-file handoff between the host streamer and runtime while the real host/runtime integration is still being built.

@@ -12,7 +12,7 @@
 static const XrVersion kSupportedApiVersion = XR_MAKE_VERSION(1, 0, 0);
 static const XrVersion kRuntimeVersion = XR_MAKE_VERSION(0, 3, 0);
 static const XrSystemId kDummySystemId = 1;
-static const XrDuration kFramePeriodNs = 11111111;
+static const XrDuration kDefaultFramePeriodNs = 11111111;
 static const uint32_t kRecommendedEyeWidth = 1832;
 static const uint32_t kRecommendedEyeHeight = 1920;
 
@@ -451,6 +451,122 @@ static const char* metalxr_haptic_command_path(void)
     return path != NULL && path[0] != '\0' ? path : "/tmp/metalxr_haptic_command.txt";
 }
 
+static const char* metalxr_timing_state_path(void)
+{
+    const char* path = getenv("METALXR_TIMING_STATE_PATH");
+    return path != NULL && path[0] != '\0' ? path : "/tmp/metalxr_timing_state.txt";
+}
+
+static int metalxr_env_int(const char* name, int fallback, int minValue, int maxValue)
+{
+    const char* value = getenv(name);
+    if (value == NULL || value[0] == '\0') {
+        return fallback;
+    }
+
+    char* end = NULL;
+    const long parsed = strtol(value, &end, 10);
+    if (end == value || end == NULL || *end != '\0' || parsed < minValue || parsed > maxValue) {
+        return fallback;
+    }
+
+    return (int)parsed;
+}
+
+static uint32_t metalxr_runtime_eye_width(void)
+{
+    return (uint32_t)metalxr_env_int("METALXR_VIEW_WIDTH", (int)kRecommendedEyeWidth, 16, 8192);
+}
+
+static uint32_t metalxr_runtime_eye_height(void)
+{
+    return (uint32_t)metalxr_env_int("METALXR_VIEW_HEIGHT", (int)kRecommendedEyeHeight, 16, 8192);
+}
+
+static XrDuration metalxr_configured_frame_period_ns(void)
+{
+    int refreshHz = metalxr_env_int("METALXR_REFRESH_RATE", 0, 1, 240);
+    if (refreshHz == 0) {
+        refreshHz = metalxr_env_int("METALXR_RUNTIME_REFRESH_HZ", 0, 1, 240);
+    }
+
+    return refreshHz > 0 ? (XrDuration)(1000000000ll / refreshHz) : kDefaultFramePeriodNs;
+}
+
+static int metalxr_has_env(const char* name)
+{
+    const char* value = getenv(name);
+    return value != NULL && value[0] != '\0';
+}
+
+static int64_t metalxr_prediction_offset_ns(int64_t fallbackNs)
+{
+    if (!metalxr_has_env("METALXR_PREDICTION_OFFSET_MS")) {
+        return fallbackNs;
+    }
+
+    return (int64_t)metalxr_env_int("METALXR_PREDICTION_OFFSET_MS", 0, -500, 500) * 1000000ll;
+}
+
+typedef struct MetalXrRuntimeTimingState {
+    int loaded;
+    uint64_t sampleId;
+    uint64_t hostTimestampNs;
+    int64_t clockOffsetNs;
+    uint64_t clockRttNs;
+    uint64_t measuredFramePeriodNs;
+    uint64_t lastDisplayHostNs;
+    int64_t predictionOffsetNs;
+} MetalXrRuntimeTimingState;
+
+static MetalXrRuntimeTimingState metalxr_load_runtime_timing_state(void)
+{
+    MetalXrRuntimeTimingState state;
+    memset(&state, 0, sizeof(state));
+    state.measuredFramePeriodNs = (uint64_t)metalxr_configured_frame_period_ns();
+
+    FILE* input = fopen(metalxr_timing_state_path(), "r");
+    if (input == NULL) {
+        state.predictionOffsetNs = metalxr_prediction_offset_ns(0);
+        return state;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), input) != NULL) {
+        if (strncmp(line, "timing ", 7) == 0) {
+            const int scanned = sscanf(line,
+                                       "timing %" SCNu64 " %" SCNu64 " %" SCNd64
+                                       " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNd64,
+                                       &state.sampleId,
+                                       &state.hostTimestampNs,
+                                       &state.clockOffsetNs,
+                                       &state.clockRttNs,
+                                       &state.measuredFramePeriodNs,
+                                       &state.lastDisplayHostNs,
+                                       &state.predictionOffsetNs);
+            state.loaded = scanned >= 7;
+            break;
+        }
+    }
+
+    fclose(input);
+    if (state.measuredFramePeriodNs == 0) {
+        state.measuredFramePeriodNs = (uint64_t)metalxr_configured_frame_period_ns();
+    }
+    state.predictionOffsetNs = metalxr_prediction_offset_ns(state.predictionOffsetNs);
+    return state;
+}
+
+static XrTime metalxr_add_signed_time_ns(uint64_t value, int64_t offsetNs)
+{
+    if (offsetNs >= 0) {
+        return (XrTime)(value + (uint64_t)offsetNs);
+    }
+
+    const uint64_t magnitude = (uint64_t)(-offsetNs);
+    return (XrTime)(value > magnitude ? value - magnitude : 0);
+}
+
 static MetalXrTrackingState metalxr_default_tracking_state(void)
 {
     MetalXrTrackingState state;
@@ -724,10 +840,12 @@ static XrResult metalxr_fill_view_configuration_views(
 
     for (uint32_t i = 0; i < kViewCount; ++i) {
         views[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
-        views[i].recommendedImageRectWidth = kRecommendedEyeWidth;
-        views[i].maxImageRectWidth = kRecommendedEyeWidth;
-        views[i].recommendedImageRectHeight = kRecommendedEyeHeight;
-        views[i].maxImageRectHeight = kRecommendedEyeHeight;
+        const uint32_t width = metalxr_runtime_eye_width();
+        const uint32_t height = metalxr_runtime_eye_height();
+        views[i].recommendedImageRectWidth = width;
+        views[i].maxImageRectWidth = width;
+        views[i].recommendedImageRectHeight = height;
+        views[i].maxImageRectHeight = height;
         views[i].recommendedSwapchainSampleCount = 1;
         views[i].maxSwapchainSampleCount = 1;
     }
@@ -1300,8 +1418,8 @@ static XrResult XRAPI_CALL metalxr_xrGetSystemProperties(
     properties->systemId = kDummySystemId;
     properties->vendorId = 0x4d5852;
     metalxr_copy_string(properties->systemName, sizeof(properties->systemName), "MetalXR Dummy Stereo HMD");
-    properties->graphicsProperties.maxSwapchainImageHeight = kRecommendedEyeHeight;
-    properties->graphicsProperties.maxSwapchainImageWidth = kRecommendedEyeWidth;
+    properties->graphicsProperties.maxSwapchainImageHeight = metalxr_runtime_eye_height();
+    properties->graphicsProperties.maxSwapchainImageWidth = metalxr_runtime_eye_width();
     properties->graphicsProperties.maxLayerCount = 16;
     properties->trackingProperties.orientationTracking = XR_TRUE;
     properties->trackingProperties.positionTracking = XR_TRUE;
@@ -1513,7 +1631,7 @@ static XrResult XRAPI_CALL metalxr_xrCreateSession(
     created->state = XR_SESSION_STATE_IDLE;
     created->metalCommandQueue = commandQueue;
     created->metalDevice = metalxr_retain_objc(metalDevice);
-    created->nextFrameTime = metalxr_now_ns() + kFramePeriodNs;
+    created->nextFrameTime = metalxr_now_ns() + metalxr_configured_frame_period_ns();
     instance->session = created;
     *session = created;
 
@@ -1563,7 +1681,7 @@ static XrResult XRAPI_CALL metalxr_xrBeginSession(
     }
 
     session->running = XR_TRUE;
-    session->nextFrameTime = metalxr_now_ns() + kFramePeriodNs;
+    session->nextFrameTime = metalxr_now_ns() + metalxr_configured_frame_period_ns();
     metalxr_queue_session_state(session, XR_SESSION_STATE_SYNCHRONIZED);
     metalxr_queue_session_state(session, XR_SESSION_STATE_VISIBLE);
     metalxr_queue_session_state(session, XR_SESSION_STATE_FOCUSED);
@@ -2381,22 +2499,43 @@ static XrResult XRAPI_CALL metalxr_xrWaitFrame(
     }
 
     const XrTime now = metalxr_now_ns();
-    if (session->nextFrameTime <= now) {
-        session->nextFrameTime = now + kFramePeriodNs;
+    const MetalXrRuntimeTimingState timing = metalxr_load_runtime_timing_state();
+    const XrDuration framePeriodNs =
+        timing.measuredFramePeriodNs > 0 ?
+            (XrDuration)timing.measuredFramePeriodNs :
+            metalxr_configured_frame_period_ns();
+
+    XrTime predictedDisplayTime = 0;
+    if (timing.loaded && timing.lastDisplayHostNs > 0 &&
+        (uint64_t)now >= timing.lastDisplayHostNs &&
+        (uint64_t)now - timing.lastDisplayHostNs < 2000000000ull) {
+        uint64_t nextDisplayNs = timing.lastDisplayHostNs;
+        while (nextDisplayNs <= (uint64_t)now) {
+            nextDisplayNs += (uint64_t)framePeriodNs;
+        }
+        predictedDisplayTime = metalxr_add_signed_time_ns(nextDisplayNs, timing.predictionOffsetNs);
+        session->nextFrameTime = predictedDisplayTime + framePeriodNs;
+    } else {
+        if (session->nextFrameTime <= now) {
+            session->nextFrameTime = metalxr_add_signed_time_ns((uint64_t)now + (uint64_t)framePeriodNs,
+                                                                timing.predictionOffsetNs);
+        }
+        predictedDisplayTime = session->nextFrameTime;
+        session->nextFrameTime += framePeriodNs;
     }
 
     frameState->type = XR_TYPE_FRAME_STATE;
-    frameState->predictedDisplayTime = session->nextFrameTime;
-    frameState->predictedDisplayPeriod = kFramePeriodNs;
+    frameState->predictedDisplayTime = predictedDisplayTime;
+    frameState->predictedDisplayPeriod = framePeriodNs;
     frameState->shouldRender = XR_TRUE;
-
-    session->nextFrameTime += kFramePeriodNs;
     ++session->frameIndex;
 
     if (session->frameIndex <= 5 || (session->frameIndex % 300) == 0) {
-        metalxr_log("xrWaitFrame frame=%" PRIu64 " predicted=%" PRId64,
+        metalxr_log("xrWaitFrame frame=%" PRIu64 " predicted=%" PRId64 " period=%" PRId64 " timing=%s",
                     session->frameIndex,
-                    frameState->predictedDisplayTime);
+                    frameState->predictedDisplayTime,
+                    frameState->predictedDisplayPeriod,
+                    timing.loaded ? "quest" : "local");
     }
 
     return XR_SUCCESS;
