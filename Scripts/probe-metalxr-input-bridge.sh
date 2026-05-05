@@ -11,6 +11,7 @@ probe_binary="${TMPDIR:-/tmp}/metalxr_input_bridge_probe"
 tracking_state="${TMPDIR:-/tmp}/metalxr_tracking_state_probe.txt"
 haptic_command="${TMPDIR:-/tmp}/metalxr_haptic_command_probe.txt"
 timing_state="${TMPDIR:-/tmp}/metalxr_timing_state_probe.txt"
+runtime_log="${TMPDIR:-/tmp}/metalxr_input_bridge_runtime.log"
 
 if [[ ! -f "$runtime_dylib" ]]; then
   "$repo_root/Scripts/build-metalxr-runtime.sh"
@@ -23,6 +24,7 @@ controller 1 9 1200 15 2 0.2 0.9 0.5 0.25 0.2 1.2 -0.6 0 0 0 1 0.25 1.1 -0.55 0 
 STATE
 rm -f "$haptic_command"
 rm -f "$timing_state"
+rm -f "$runtime_log"
 
 cat > "$probe_source" <<'PROBE'
 #include "MetalXRRuntime/openxr_minimal.h"
@@ -31,6 +33,7 @@ cat > "$probe_source" <<'PROBE'
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 typedef XrResult (*PFN_xrNegotiateLoaderRuntimeInterface)(
@@ -82,7 +85,11 @@ static unsigned long long monotonic_ns(void)
 
 int main(int argc, char** argv)
 {
-    if (argc != 2) {
+    if (argc < 2 || argc > 3) {
+        return 2;
+    }
+    const int expectStale = argc == 3 && strcmp(argv[2], "--expect-stale") == 0;
+    if (argc == 3 && !expectStale) {
         return 2;
     }
 
@@ -221,7 +228,7 @@ int main(int argc, char** argv)
     xrBeginSession(session, &beginInfo);
 
     const char* timingPath = getenv("METALXR_TIMING_STATE_PATH");
-    if (timingPath != NULL && timingPath[0] != '\0') {
+    if (!expectStale && timingPath != NULL && timingPath[0] != '\0') {
         unsigned long long nowNs = monotonic_ns();
         FILE* timing = fopen(timingPath, "w");
         if (timing != NULL) {
@@ -252,14 +259,22 @@ int main(int argc, char** argv)
     uint32_t viewCount = 0;
     xrLocateViews(session, &locateInfo, &viewState, 2, &viewCount, views);
     printf("views left=%f right=%f flags=0x%llx\n", views[0].pose.position.x, views[1].pose.position.x, (unsigned long long)viewState.viewStateFlags);
-    if (!near(views[0].pose.position.x, 1.218f) || !near(views[1].pose.position.x, 1.282f)) {
+    if (expectStale) {
+        if (viewState.viewStateFlags != 0) {
+            return 1;
+        }
+    } else if (!near(views[0].pose.position.x, 1.218f) || !near(views[1].pose.position.x, 1.282f)) {
         return 1;
     }
 
     XrActionStateGetInfo stateInfo = { XR_TYPE_ACTION_STATE_GET_INFO, NULL, primary, leftHand };
     XrActionStateBoolean booleanState = { 0 };
     xrGetActionStateBoolean(session, &stateInfo, &booleanState);
-    if (booleanState.currentState != XR_TRUE) {
+    if (expectStale) {
+        if (booleanState.currentState != XR_FALSE || booleanState.isActive != XR_FALSE) {
+            return 1;
+        }
+    } else if (booleanState.currentState != XR_TRUE || booleanState.isActive != XR_TRUE) {
         return 1;
     }
 
@@ -267,21 +282,33 @@ int main(int argc, char** argv)
     stateInfo.subactionPath = rightHand;
     XrActionStateFloat floatState = { 0 };
     xrGetActionStateFloat(session, &stateInfo, &floatState);
-    if (!near(floatState.currentState, 0.2f)) {
+    if (expectStale) {
+        if (!near(floatState.currentState, 0.0f) || floatState.isActive != XR_FALSE) {
+            return 1;
+        }
+    } else if (!near(floatState.currentState, 0.2f) || floatState.isActive != XR_TRUE) {
         return 1;
     }
 
     stateInfo.action = thumbstick;
     XrActionStateVector2f vectorState = { 0 };
     xrGetActionStateVector2f(session, &stateInfo, &vectorState);
-    if (!near(vectorState.currentState.x, 0.5f) || !near(vectorState.currentState.y, 0.25f)) {
+    if (expectStale) {
+        if (!near(vectorState.currentState.x, 0.0f) ||
+            !near(vectorState.currentState.y, 0.0f) ||
+            vectorState.isActive != XR_FALSE) {
+            return 1;
+        }
+    } else if (!near(vectorState.currentState.x, 0.5f) ||
+               !near(vectorState.currentState.y, 0.25f) ||
+               vectorState.isActive != XR_TRUE) {
         return 1;
     }
 
     stateInfo.action = aimPose;
     XrActionStatePose poseState = { 0 };
     xrGetActionStatePose(session, &stateInfo, &poseState);
-    if (poseState.isActive != XR_TRUE) {
+    if (poseState.isActive != (expectStale ? XR_FALSE : XR_TRUE)) {
         return 1;
     }
 
@@ -291,7 +318,11 @@ int main(int argc, char** argv)
     XrSpaceLocation location = { XR_TYPE_SPACE_LOCATION, NULL, 0, { {0, 0, 0, 1}, {0, 0, 0} } };
     xrLocateSpace(aimSpace, localSpace, 0, &location);
     printf("leftAim x=%f y=%f z=%f\n", location.pose.position.x, location.pose.position.y, location.pose.position.z);
-    if (!near(location.pose.position.x, -0.2f)) {
+    if (expectStale) {
+        if (location.locationFlags != 0) {
+            return 1;
+        }
+    } else if (!near(location.pose.position.x, -0.2f)) {
         return 1;
     }
 
@@ -316,7 +347,31 @@ clang -std=c11 -Wall -Wextra -Werror \
 METALXR_TRACKING_STATE_PATH="$tracking_state" \
 METALXR_HAPTIC_COMMAND_PATH="$haptic_command" \
 METALXR_TIMING_STATE_PATH="$timing_state" \
+METALXR_TRACKING_STALE_TIMEOUT_MS=60000 \
+METALXR_RUNTIME_LOG="$runtime_log" \
   "$probe_binary" "$runtime_dylib"
+
+touch -t 200001010000 "$tracking_state"
+cat >"$timing_state" <<'STATE'
+timing 1 1 0 1000000 16666666 1 3000000 0 0 0 0 0 0 0 0
+STATE
+METALXR_TRACKING_STATE_PATH="$tracking_state" \
+METALXR_HAPTIC_COMMAND_PATH="$haptic_command" \
+METALXR_TIMING_STATE_PATH="$timing_state" \
+METALXR_TRACKING_STALE_TIMEOUT_MS=1 \
+METALXR_RUNTIME_LOG="$runtime_log" \
+  "$probe_binary" "$runtime_dylib" --expect-stale
+
+if ! grep -q 'tracking state stale' "$runtime_log"; then
+  echo "Expected runtime log to report stale tracking." >&2
+  cat "$runtime_log" >&2
+  exit 1
+fi
+if ! grep -q 'timing=stale' "$runtime_log"; then
+  echo "Expected runtime log to report stale timing." >&2
+  cat "$runtime_log" >&2
+  exit 1
+fi
 
 if [[ ! -s "$haptic_command" ]]; then
   echo "Expected haptic command file was not written: $haptic_command" >&2
@@ -327,3 +382,5 @@ echo "Tracking state: $tracking_state"
 cat "$tracking_state"
 echo "Haptic command: $haptic_command"
 cat "$haptic_command"
+echo "Runtime log: $runtime_log"
+grep -E 'tracking state stale|timing=(quest|stale)' "$runtime_log"

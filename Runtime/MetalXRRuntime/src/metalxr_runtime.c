@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 static const XrVersion kSupportedApiVersion = XR_MAKE_VERSION(1, 0, 0);
@@ -258,6 +259,16 @@ static XrTime metalxr_now_ns(void)
     }
 
     return ((XrTime)now.tv_sec * 1000000000) + (XrTime)now.tv_nsec;
+}
+
+static uint64_t metalxr_realtime_ns(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        return 0;
+    }
+
+    return ((uint64_t)now.tv_sec * 1000000000ull) + (uint64_t)now.tv_nsec;
 }
 
 static int api_versions_overlap(XrVersion minVersion, XrVersion maxVersion, XrVersion supportedVersion)
@@ -612,6 +623,85 @@ static MetalXrTrackingState metalxr_default_tracking_state(void)
     return state;
 }
 
+static uint64_t metalxr_stat_mtime_ns(const struct stat* metadata)
+{
+    if (metadata == NULL) {
+        return 0;
+    }
+
+#if defined(__APPLE__)
+    return ((uint64_t)metadata->st_mtimespec.tv_sec * 1000000000ull) +
+           (uint64_t)metadata->st_mtimespec.tv_nsec;
+#else
+    return ((uint64_t)metadata->st_mtim.tv_sec * 1000000000ull) +
+           (uint64_t)metadata->st_mtim.tv_nsec;
+#endif
+}
+
+static void metalxr_mark_tracking_state_stale(MetalXrTrackingState* state)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    state->hmdTrackingFlags = 0;
+    for (size_t hand = 0; hand < 2; ++hand) {
+        MetalXrControllerState* controller = &state->controllers[hand];
+        controller->trackingFlags = 0;
+        controller->buttons = 0;
+        controller->trigger = 0.0f;
+        controller->grip = 0.0f;
+        controller->thumbstick.x = 0.0f;
+        controller->thumbstick.y = 0.0f;
+    }
+}
+
+static void metalxr_log_stale_tracking(uint64_t ageMs, int timeoutMs, const MetalXrTrackingState* state)
+{
+    static pthread_mutex_t logLock = PTHREAD_MUTEX_INITIALIZER;
+    static XrTime lastLogNs = 0;
+    int shouldLog = 0;
+    const XrTime nowNs = metalxr_now_ns();
+
+    pthread_mutex_lock(&logLock);
+    if (lastLogNs == 0 || nowNs == 0 || nowNs - lastLogNs >= 1000000000ll) {
+        lastLogNs = nowNs;
+        shouldLog = 1;
+    }
+    pthread_mutex_unlock(&logLock);
+
+    if (shouldLog) {
+        metalxr_log("tracking state stale age_ms=%" PRIu64 " timeout_ms=%d hmd_sample=%" PRIu64,
+                    ageMs,
+                    timeoutMs,
+                    state != NULL ? state->hmdSampleId : 0);
+    }
+}
+
+static void metalxr_apply_tracking_stale_policy(
+    MetalXrTrackingState* state,
+    const struct stat* metadata)
+{
+    const int timeoutMs = metalxr_env_int("METALXR_TRACKING_STALE_TIMEOUT_MS", 1000, 0, 60000);
+    if (state == NULL || metadata == NULL || timeoutMs == 0) {
+        return;
+    }
+
+    const uint64_t modifiedNs = metalxr_stat_mtime_ns(metadata);
+    const uint64_t nowNs = metalxr_realtime_ns();
+    if (modifiedNs == 0 || nowNs == 0 || nowNs <= modifiedNs) {
+        return;
+    }
+
+    const uint64_t ageMs = (nowNs - modifiedNs) / 1000000ull;
+    if (ageMs <= (uint64_t)timeoutMs) {
+        return;
+    }
+
+    metalxr_log_stale_tracking(ageMs, timeoutMs, state);
+    metalxr_mark_tracking_state_stale(state);
+}
+
 static XrSpaceLocationFlags metalxr_openxr_location_flags(uint32_t trackingFlags)
 {
     XrSpaceLocationFlags flags = 0;
@@ -637,7 +727,10 @@ static int metalxr_load_tracking_state(MetalXrTrackingState* state)
     }
 
     *state = metalxr_default_tracking_state();
-    FILE* input = fopen(metalxr_tracking_state_path(), "r");
+    const char* trackingStatePath = metalxr_tracking_state_path();
+    struct stat metadata;
+    const int hasMetadata = stat(trackingStatePath, &metadata) == 0;
+    FILE* input = fopen(trackingStatePath, "r");
     if (input == NULL) {
         return 0;
     }
@@ -696,6 +789,7 @@ static int metalxr_load_tracking_state(MetalXrTrackingState* state)
     }
 
     fclose(input);
+    metalxr_apply_tracking_stale_policy(state, hasMetadata ? &metadata : NULL);
     return 1;
 }
 
@@ -2585,9 +2679,14 @@ static XrResult XRAPI_CALL metalxr_xrWaitFrame(
             metalxr_configured_frame_period_ns();
 
     XrTime predictedDisplayTime = 0;
-    if (timing.loaded && timing.lastDisplayHostNs > 0 &&
-        (uint64_t)now >= timing.lastDisplayHostNs &&
-        (uint64_t)now - timing.lastDisplayHostNs < 2000000000ull) {
+    const int timingFresh = timing.loaded && timing.lastDisplayHostNs > 0 &&
+                            (uint64_t)now >= timing.lastDisplayHostNs &&
+                            (uint64_t)now - timing.lastDisplayHostNs < 2000000000ull;
+    const uint64_t timingAgeMs =
+        timing.loaded && timing.lastDisplayHostNs > 0 && (uint64_t)now >= timing.lastDisplayHostNs ?
+            ((uint64_t)now - timing.lastDisplayHostNs) / 1000000ull :
+            0;
+    if (timingFresh) {
         uint64_t nextDisplayNs = timing.lastDisplayHostNs;
         while (nextDisplayNs <= (uint64_t)now) {
             nextDisplayNs += (uint64_t)framePeriodNs;
@@ -2610,11 +2709,14 @@ static XrResult XRAPI_CALL metalxr_xrWaitFrame(
     ++session->frameIndex;
 
     if (session->frameIndex <= 5 || (session->frameIndex % 300) == 0) {
-        metalxr_log("xrWaitFrame frame=%" PRIu64 " predicted=%" PRId64 " period=%" PRId64 " timing=%s",
+        const char* timingSource = timingFresh ? "quest" : (timing.loaded ? "stale" : "local");
+        metalxr_log("xrWaitFrame frame=%" PRIu64 " predicted=%" PRId64
+                    " period=%" PRId64 " timing=%s timing_age_ms=%" PRIu64,
                     session->frameIndex,
                     frameState->predictedDisplayTime,
                     frameState->predictedDisplayPeriod,
-                    timing.loaded ? "quest" : "local");
+                    timingSource,
+                    timingAgeMs);
     }
 
     return XR_SUCCESS;

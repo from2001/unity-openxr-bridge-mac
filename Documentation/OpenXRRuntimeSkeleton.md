@@ -98,12 +98,15 @@ The development input bridge uses a text state file so the host streamer and nat
 - `METALXR_TRACKING_STATE_PATH=/tmp/metalxr_tracking_state.txt`
 - `METALXR_HAPTIC_COMMAND_PATH=/tmp/metalxr_haptic_command.txt`
 - `METALXR_TIMING_STATE_PATH=/tmp/metalxr_timing_state.txt`
+- `METALXR_TRACKING_STALE_TIMEOUT_MS=1000`
 
 `xrLocateViews` reads the latest HMD pose and offsets the left and right eye views by a fixed 64 mm IPD. Action-space locations read the controller aim or grip pose based on the action name. Boolean, float, and vector action states map to Oculus Touch-style primary/secondary/menu/thumbstick buttons, trigger, grip, and thumbstick axes.
 
+Tracking samples remain timestamped with Quest sample ids and timestamps. If the state file stops updating past `METALXR_TRACKING_STALE_TIMEOUT_MS`, the runtime logs the stale age, preserves the last pose for continuity, and clears OpenXR tracking/action flags and controller inputs so consumers can distinguish stale data from live tracking.
+
 `xrApplyHapticFeedback` writes the latest vibration request to the haptic command file. The host streamer polls that file and forwards the command to the Quest client.
 
-This path is intentionally narrow. It is enough for Unity Play Mode smoke tests, but it does not replace production action binding coverage, synchronized prediction, richer interaction profiles, or a robust lost-tracking/reconnect policy.
+This path is intentionally narrow. It is enough for Unity Play Mode smoke tests, but it does not replace production action binding coverage, richer interaction profiles, or a direct synchronized runtime/host bridge.
 
 `xrWaitFrame` reads measured Quest timing from `METALXR_TIMING_STATE_PATH` when it is fresh. The runtime uses the measured display period and latest Quest display time to predict the next frame; otherwise it falls back to local timing. `METALXR_VIEW_WIDTH`, `METALXR_VIEW_HEIGHT`, `METALXR_REFRESH_RATE`, and `METALXR_PREDICTION_OFFSET_MS` can tune the runtime before launch without rebuilding.
 

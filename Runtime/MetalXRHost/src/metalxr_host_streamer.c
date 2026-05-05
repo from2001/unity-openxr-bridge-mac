@@ -43,6 +43,7 @@ typedef struct StreamerOptions {
     int bitrate;
     int realtime;
     int queueDepth;
+    int reconnectAttempts;
     FrameSourceMode frameSource;
     char frameExportDir[1024];
     int clockSyncIntervalMs;
@@ -217,7 +218,8 @@ static void print_usage(const char* argv0)
             "[--width N] [--height N] [--bitrate BPS] [--tracking-state-path PATH] "
             "[--haptic-command-path PATH] [--timing-state-path PATH] [--queue-depth N] "
             "[--frame-source synthetic|unity-export] [--frame-export-dir PATH] "
-            "[--prediction-offset-ms N] [--clock-sync-interval-ms N] [--no-realtime]\n\n"
+            "[--prediction-offset-ms N] [--clock-sync-interval-ms N] "
+            "[--reconnect-attempts N] [--no-realtime]\n\n"
             "frames=0 streams until the client disconnects. The default bind host is 127.0.0.1,\n"
             "which is suitable for adb reverse. Use --bind-host 0.0.0.0 for Wi-Fi tests.\n",
             argv0);
@@ -248,6 +250,7 @@ static StreamerOptions parse_options(int argc, char** argv)
     options.bitrate = 8000000;
     options.realtime = 1;
     options.queueDepth = 3;
+    options.reconnectAttempts = 0;
     options.frameSource = FRAME_SOURCE_SYNTHETIC;
     options.frameExportDir[0] = '\0';
     options.clockSyncIntervalMs = 500;
@@ -283,6 +286,8 @@ static StreamerOptions parse_options(int argc, char** argv)
             snprintf(options.timingStatePath, sizeof(options.timingStatePath), "%s", argv[++i]);
         } else if (strcmp(arg, "--queue-depth") == 0 && i + 1 < argc) {
             options.queueDepth = parse_int_arg(argv[++i], "queue depth", 1, 64);
+        } else if (strcmp(arg, "--reconnect-attempts") == 0 && i + 1 < argc) {
+            options.reconnectAttempts = parse_int_arg(argv[++i], "reconnect attempts", 0, 1000);
         } else if (strcmp(arg, "--frame-source") == 0 && i + 1 < argc) {
             const char* source = argv[++i];
             if (strcmp(source, "synthetic") == 0) {
@@ -2135,7 +2140,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d source=%s export_dir=%s prediction_offset_ns=%" PRId64 " tracking=%s haptics=%s timing=%s\n",
+    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d reconnect_attempts=%d source=%s export_dir=%s prediction_offset_ns=%" PRId64 " tracking=%s haptics=%s timing=%s\n",
            options.bindHost,
            options.port,
            options.width,
@@ -2144,6 +2149,7 @@ int main(int argc, char** argv)
            options.bitrate,
            options.frames,
            options.queueDepth,
+           options.reconnectAttempts,
            frame_source_name(options.frameSource),
            options.frameExportDir[0] != '\0' ? options.frameExportDir : "-",
            options.predictionOffsetNs,
@@ -2153,6 +2159,7 @@ int main(int argc, char** argv)
     fflush(stdout);
 
     int exitCode = 0;
+    int reconnectsUsed = 0;
     for (;;) {
         struct sockaddr_storage address;
         socklen_t addressLength = sizeof(address);
@@ -2178,14 +2185,41 @@ int main(int argc, char** argv)
         close(clientFd);
 
         if (!ok) {
-            fprintf(stderr, "Quest stream client disconnected before the stream completed\n");
-            exitCode = 1;
+            const int canReconnect = options.frames == 0 || reconnectsUsed < options.reconnectAttempts;
+            fprintf(stderr,
+                    "{\"event\":\"client_disconnect\",\"reconnects_used\":%d,"
+                    "\"reconnect_attempts\":%d,\"recovering\":%s}\n",
+                    reconnectsUsed,
+                    options.reconnectAttempts,
+                    canReconnect ? "true" : "false");
+            if (!canReconnect) {
+                fprintf(stderr, "Quest stream client disconnected before the stream completed\n");
+                exitCode = 1;
+                break;
+            }
+
+            if (options.frames > 0) {
+                ++reconnectsUsed;
+            }
+            printf("{\"event\":\"reconnect_wait\",\"reconnects_used\":%d,"
+                   "\"reconnect_attempts\":%d,\"frames\":%d}\n",
+                   reconnectsUsed,
+                   options.reconnectAttempts,
+                   options.frames);
+            printf("Waiting for Quest stream reconnect...\n");
+            fflush(stdout);
+            continue;
         }
 
         if (options.frames > 0) {
             break;
         }
 
+        printf("{\"event\":\"reconnect_wait\",\"reconnects_used\":%d,"
+               "\"reconnect_attempts\":%d,\"frames\":%d}\n",
+               reconnectsUsed,
+               options.reconnectAttempts,
+               options.frames);
         printf("Waiting for Quest stream reconnect...\n");
         fflush(stdout);
     }
