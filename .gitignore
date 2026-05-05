@@ -3,3 +3,4 @@ xcshareddata/
 MetalXR.xcodeproj/project.xcworkspace/xcuserdata/
 MetalXR.xcodeproj/xcuserdata/
 Runtime/MetalXRRuntime/build/
+Runtime/MetalXRHost/build/

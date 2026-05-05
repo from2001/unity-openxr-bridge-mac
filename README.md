@@ -12,10 +12,11 @@ Working:
 - Use Meta XR Simulator as the default macOS OpenXR runtime when it is installed at `/Applications/MetaXRSimulator.app`.
 - Build and probe a native MetalXR OpenXR runtime that can create an instance, report a dummy stereo HMD system, create a session, emit lifecycle events, create reference spaces, and run a deterministic frame loop.
 - Create runtime-owned Metal swapchain textures for Unity OpenXR Play Mode, accept stereo projection layers, and dump per-frame metadata proving which textures were submitted.
+- Build and probe a macOS VideoToolbox host encoder that converts synthetic stereo frames into H.264 elementary streams with per-frame latency/drop metadata.
 
 Not implemented yet:
 
-- CPU pixel readback, IOSurface export, or VideoToolbox encoding of the submitted Metal textures.
+- CPU pixel readback, IOSurface export, or VideoToolbox encoding of Unity-submitted Metal textures.
 - A Quest PCVR transport layer for video, tracking, input, audio, and timing.
 - A Quest client that pairs with a native MetalXR streamer.
 - SteamVR/OpenComposite compatibility on macOS.
@@ -35,6 +36,13 @@ Build and probe the native MetalXR runtime:
 ```sh
 Scripts/build-metalxr-runtime.sh
 Scripts/probe-metalxr-runtime.sh
+```
+
+Build and probe the macOS host encoder:
+
+```sh
+Scripts/build-metalxr-host.sh
+Scripts/probe-metalxr-host-encoder.sh
 ```
 
 Launch Unity with the default runtime. If Meta XR Simulator is installed, it is selected automatically:
@@ -86,8 +94,10 @@ The macOS app is a SwiftUI wrapper around bundled adb platform-tools. The script
 - `Scripts/launch-unity-openxr.sh` launches Unity with `XR_RUNTIME_JSON` pointing at a runtime manifest.
 - `Scripts/build-metalxr-runtime.sh` builds the native runtime.
 - `Scripts/probe-metalxr-runtime.sh` verifies OpenXR loader/runtime negotiation, the dummy HMD lifecycle, Metal swapchain creation, and projection frame metadata dumps.
+- `Scripts/build-metalxr-host.sh` builds the macOS host utilities.
+- `Scripts/probe-metalxr-host-encoder.sh` verifies continuous VideoToolbox H.264 encoding from a synthetic stereo frame stream.
 
-The next major engineering step is turning the submitted Metal textures into encoded frames, likely through a blit/readback or IOSurface-backed path suitable for VideoToolbox. After that, a Quest client and low-latency transport must be implemented.
+The next major engineering step is defining the shared transport protocol and session handshake, then connecting the runtime-owned Metal textures to the host encoder through a blit/readback or IOSurface-backed path. After that, a Quest client and low-latency transport must be implemented.
 
 ## How can I install it?
 

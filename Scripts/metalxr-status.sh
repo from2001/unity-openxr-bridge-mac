@@ -47,6 +47,11 @@ if [[ -f "$repo_root/Runtime/MetalXRRuntime/build/libmetalxr_runtime.dylib" ]]; 
 else
   echo "MetalXR runtime dylib: not built"
 fi
+if [[ -x "$repo_root/Runtime/MetalXRHost/build/metalxr_host_encoder" ]]; then
+  echo "MetalXR host encoder: $repo_root/Runtime/MetalXRHost/build/metalxr_host_encoder"
+else
+  echo "MetalXR host encoder: not built"
+fi
 print_runtime "User active runtime" "${HOME}/.config/openxr/1/active_runtime.json"
 print_runtime "System active runtime" "/usr/local/share/openxr/1/active_runtime.json"
 print_runtime "Meta XR Simulator" "/Applications/MetaXRSimulator.app/Contents/Resources/MetaXRSimulator/meta_openxr_simulator.json"
