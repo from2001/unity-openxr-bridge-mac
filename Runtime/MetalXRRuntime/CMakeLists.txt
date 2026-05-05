@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(MetalXRRuntimeSkeleton LANGUAGES C)
+project(MetalXRRuntime LANGUAGES C)
 
 add_library(metalxr_runtime SHARED
     src/metalxr_runtime.c
