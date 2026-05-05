@@ -1,6 +1,6 @@
-# MetalXR | OpenXR experiments on macOS
+# Unity OpenXR Mac Bridge
 
-MetalXR is a work-in-progress macOS helper for OpenXR development. The original repository described a full OpenXR/OpenComposite runtime for macOS, but the checked-in code only contained a SwiftUI app and a bundled Android platform-tools/adb folder. This fork now makes the existing app runnable as a Quest APK installer and adds scripts for launching Unity with a macOS OpenXR runtime manifest.
+Unity OpenXR Mac Bridge is an experimental macOS bridge for running Unity Editor Play Mode on an OpenXR headset.
 
 ## Current status
 
