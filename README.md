@@ -28,11 +28,20 @@ Check local status:
 Scripts/metalxr-status.sh
 ```
 
+Build and probe the native MetalXR runtime skeleton:
+
+```sh
+Scripts/build-metalxr-runtime.sh
+Scripts/probe-metalxr-runtime.sh
+```
+
 Launch Unity with the default runtime. If Meta XR Simulator is installed, it is selected automatically:
 
 ```sh
 Scripts/launch-unity-openxr.sh /path/to/UnityProject
 ```
+
+If the MetalXR runtime skeleton has been built, the launch script prefers `Runtime/MetalXRRuntime/metalxr_runtime.json`. Otherwise it falls back to Meta XR Simulator when present.
 
 Use another OpenXR runtime manifest:
 
@@ -68,8 +77,10 @@ The macOS app is a SwiftUI wrapper around bundled adb platform-tools. The script
 - `Scripts/metalxr-status.sh` prints adb devices, OpenXR runtime manifests, and installed Unity editors.
 - `Scripts/install-quest-apk.sh` installs an APK through adb with device-state checks.
 - `Scripts/launch-unity-openxr.sh` launches Unity with `XR_RUNTIME_JSON` pointing at a runtime manifest.
+- `Scripts/build-metalxr-runtime.sh` builds the native runtime skeleton.
+- `Scripts/probe-metalxr-runtime.sh` verifies OpenXR loader/runtime negotiation for the skeleton runtime.
 
-The next major engineering step is a native OpenXR runtime dylib that Unity can load on macOS. After that, a Quest client and low-latency transport must be implemented.
+The next major engineering step is expanding the native runtime skeleton into enough OpenXR lifecycle behavior for Unity Play Mode to create a dummy HMD session. After that, a Quest client and low-latency transport must be implemented.
 
 ## How can I install it?
 
