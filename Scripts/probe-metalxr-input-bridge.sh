@@ -260,7 +260,16 @@ int main(int argc, char** argv)
     xrLocateViews(session, &locateInfo, &viewState, 2, &viewCount, views);
     printf("views left=%f right=%f flags=0x%llx\n", views[0].pose.position.x, views[1].pose.position.x, (unsigned long long)viewState.viewStateFlags);
     if (expectStale) {
-        if (viewState.viewStateFlags != 0) {
+        XrSpaceLocationFlags requiredViewFlags =
+            XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+            XR_SPACE_LOCATION_POSITION_VALID_BIT;
+        XrSpaceLocationFlags trackedViewFlags =
+            XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
+            XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+        if ((viewState.viewStateFlags & requiredViewFlags) != requiredViewFlags ||
+            (viewState.viewStateFlags & trackedViewFlags) != 0 ||
+            !near(views[0].pose.position.x, 1.218f) ||
+            !near(views[1].pose.position.x, 1.282f)) {
             return 1;
         }
     } else if (!near(views[0].pose.position.x, 1.218f) || !near(views[1].pose.position.x, 1.282f)) {

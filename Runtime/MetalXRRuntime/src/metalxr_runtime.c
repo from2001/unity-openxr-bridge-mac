@@ -720,6 +720,32 @@ static XrSpaceLocationFlags metalxr_openxr_location_flags(uint32_t trackingFlags
     return flags;
 }
 
+static uint32_t metalxr_renderable_hmd_flags(void)
+{
+    return (uint32_t)(XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+                      XR_SPACE_LOCATION_POSITION_VALID_BIT);
+}
+
+static void metalxr_make_hmd_pose_renderable(MetalXrTrackingState* state)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    const uint32_t requiredFlags = metalxr_renderable_hmd_flags();
+    if ((state->hmdTrackingFlags & requiredFlags) == requiredFlags) {
+        return;
+    }
+
+    if (state->hmdPose.orientation.x == 0.0f &&
+        state->hmdPose.orientation.y == 0.0f &&
+        state->hmdPose.orientation.z == 0.0f &&
+        state->hmdPose.orientation.w == 0.0f) {
+        state->hmdPose = metalxr_identity_pose();
+    }
+    state->hmdTrackingFlags |= requiredFlags;
+}
+
 static int metalxr_load_tracking_state(MetalXrTrackingState* state)
 {
     if (state == NULL) {
@@ -2022,6 +2048,7 @@ static XrResult XRAPI_CALL metalxr_xrLocateSpace(
             controller->gripPose :
             controller->aimPose;
     } else if (space->type == XR_REFERENCE_SPACE_TYPE_VIEW) {
+        metalxr_make_hmd_pose_renderable(&tracking);
         location->locationFlags = metalxr_openxr_location_flags(tracking.hmdTrackingFlags);
         location->pose = tracking.hmdPose;
     } else {
@@ -3468,6 +3495,7 @@ static XrResult XRAPI_CALL metalxr_xrLocateViews(
     viewState->type = XR_TYPE_VIEW_STATE;
     MetalXrTrackingState tracking;
     (void)metalxr_load_tracking_state(&tracking);
+    metalxr_make_hmd_pose_renderable(&tracking);
     viewState->viewStateFlags = metalxr_openxr_location_flags(tracking.hmdTrackingFlags);
 
     if (viewCapacityInput == 0) {
