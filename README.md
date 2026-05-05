@@ -13,11 +13,12 @@ Working:
 - Build and probe a native MetalXR OpenXR runtime that can create an instance, report a dummy stereo HMD system, create a session, emit lifecycle events, create reference spaces, and run a deterministic frame loop.
 - Create runtime-owned Metal swapchain textures for Unity OpenXR Play Mode, accept stereo projection layers, and dump per-frame metadata proving which textures were submitted.
 - Build and probe a macOS VideoToolbox host encoder that converts synthetic stereo frames into H.264 elementary streams with per-frame latency/drop metadata.
+- Build and probe shared host/client protocol packet definitions with loopback handshake, heartbeat, and version-mismatch handling.
 
 Not implemented yet:
 
 - CPU pixel readback, IOSurface export, or VideoToolbox encoding of Unity-submitted Metal textures.
-- A Quest PCVR transport layer for video, tracking, input, audio, and timing.
+- A Quest PCVR media transport layer for video, tracking, input, audio, and timing.
 - A Quest client that pairs with a native MetalXR streamer.
 - SteamVR/OpenComposite compatibility on macOS.
 
@@ -43,6 +44,13 @@ Build and probe the macOS host encoder:
 ```sh
 Scripts/build-metalxr-host.sh
 Scripts/probe-metalxr-host-encoder.sh
+```
+
+Build and probe the shared protocol:
+
+```sh
+Scripts/build-metalxr-protocol.sh
+Scripts/probe-metalxr-protocol.sh
 ```
 
 Launch Unity with the default runtime. If Meta XR Simulator is installed, it is selected automatically:
@@ -96,8 +104,10 @@ The macOS app is a SwiftUI wrapper around bundled adb platform-tools. The script
 - `Scripts/probe-metalxr-runtime.sh` verifies OpenXR loader/runtime negotiation, the dummy HMD lifecycle, Metal swapchain creation, and projection frame metadata dumps.
 - `Scripts/build-metalxr-host.sh` builds the macOS host utilities.
 - `Scripts/probe-metalxr-host-encoder.sh` verifies continuous VideoToolbox H.264 encoding from a synthetic stereo frame stream.
+- `Scripts/build-metalxr-protocol.sh` builds shared host/client protocol utilities.
+- `Scripts/probe-metalxr-protocol.sh` verifies loopback handshake, heartbeat, and version-mismatch handling.
 
-The next major engineering step is defining the shared transport protocol and session handshake, then connecting the runtime-owned Metal textures to the host encoder through a blit/readback or IOSurface-backed path. After that, a Quest client and low-latency transport must be implemented.
+The next major engineering step is building the Quest OpenXR client shell and then connecting the runtime-owned Metal textures to the host encoder and media transport. After that, decode/display timing, tracking, input, and haptics need to be integrated.
 
 ## How can I install it?
 
