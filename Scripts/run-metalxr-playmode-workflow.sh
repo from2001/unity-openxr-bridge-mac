@@ -80,17 +80,57 @@ unity_pid=""
 streamer_pid=""
 workflow_complete=0
 
+run_cleanup_command_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+
+  "$@" >/dev/null 2>&1 &
+  local cleanup_pid="$!"
+  for _ in $(seq 1 "$timeout_seconds"); do
+    if ! kill -0 "$cleanup_pid" >/dev/null 2>&1; then
+      wait "$cleanup_pid" >/dev/null 2>&1 || true
+      return
+    fi
+    sleep 1
+  done
+
+  kill "$cleanup_pid" >/dev/null 2>&1 || true
+  wait "$cleanup_pid" >/dev/null 2>&1 || true
+}
+
+terminate_pid_with_timeout() {
+  local pid="$1"
+  local timeout_seconds="$2"
+
+  if [[ -z "$pid" ]] || ! kill -0 "$pid" >/dev/null 2>&1; then
+    return
+  fi
+
+  kill "$pid" >/dev/null 2>&1 || true
+  for _ in $(seq 1 "$timeout_seconds"); do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      wait "$pid" >/dev/null 2>&1 || true
+      return
+    fi
+    sleep 1
+  done
+
+  pkill -TERM -P "$pid" >/dev/null 2>&1 || true
+  kill "$pid" >/dev/null 2>&1 || true
+  sleep 1
+  pkill -KILL -P "$pid" >/dev/null 2>&1 || true
+  kill -KILL "$pid" >/dev/null 2>&1 || true
+  wait "$pid" >/dev/null 2>&1 || true
+}
+
 cleanup() {
   if [[ "$keep_running" == "1" && "$workflow_complete" == "1" ]]; then
     return
   fi
-  if [[ -n "$streamer_pid" ]] && kill -0 "$streamer_pid" >/dev/null 2>&1; then
-    kill "$streamer_pid" >/dev/null 2>&1 || true
-    wait "$streamer_pid" >/dev/null 2>&1 || true
-  fi
+  terminate_pid_with_timeout "$streamer_pid" 5
   if command -v uloop >/dev/null 2>&1; then
-    uloop control-play-mode --project-path "$project_path" --action Stop >/dev/null 2>&1 || true
-    uloop launch --quit "$project_path" >/dev/null 2>&1 || true
+    run_cleanup_command_with_timeout 10 uloop control-play-mode --project-path "$project_path" --action Stop
+    run_cleanup_command_with_timeout 10 uloop launch --quit "$project_path"
   fi
   if [[ -n "$unity_pid" ]] && kill -0 "$unity_pid" >/dev/null 2>&1; then
     for _ in $(seq 1 30); do
@@ -100,10 +140,7 @@ cleanup() {
       sleep 1
     done
   fi
-  if [[ -n "$unity_pid" ]] && kill -0 "$unity_pid" >/dev/null 2>&1; then
-    kill "$unity_pid" >/dev/null 2>&1 || true
-    wait "$unity_pid" >/dev/null 2>&1 || true
-  fi
+  terminate_pid_with_timeout "$unity_pid" 5
 }
 trap cleanup EXIT
 

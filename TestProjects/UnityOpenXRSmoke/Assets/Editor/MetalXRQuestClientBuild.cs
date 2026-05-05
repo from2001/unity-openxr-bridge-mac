@@ -144,8 +144,8 @@ public static class MetalXRQuestClientBuild
 
         EnableRequiredFeature(openXrSettings.GetFeature<MetaQuestFeature>(), "Meta Quest Support");
         EnableRequiredFeature(openXrSettings.GetFeature<HandInteractionProfile>(), "Hand Interaction Profile");
-        SetOptionalFeature(openXrSettings.GetFeature<OculusTouchControllerProfile>(), false);
-        SetOptionalFeature(openXrSettings.GetFeature<MetaQuestTouchPlusControllerProfile>(), false);
+        EnableRequiredFeature(openXrSettings.GetFeature<OculusTouchControllerProfile>(), "Oculus Touch Controller Profile");
+        EnableRequiredFeature(openXrSettings.GetFeature<MetaQuestTouchPlusControllerProfile>(), "Meta Quest Touch Plus Controller Profile");
 
         EditorUtility.SetDirty(openXrSettings);
         AssetDatabase.SaveAssets();
@@ -159,17 +159,6 @@ public static class MetalXRQuestClientBuild
         }
 
         feature.enabled = true;
-        EditorUtility.SetDirty(feature);
-    }
-
-    private static void SetOptionalFeature(UnityEngine.XR.OpenXR.Features.OpenXRFeature feature, bool enabled)
-    {
-        if (feature == null)
-        {
-            return;
-        }
-
-        feature.enabled = enabled;
         EditorUtility.SetDirty(feature);
     }
 

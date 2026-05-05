@@ -485,6 +485,24 @@ namespace MetalXR.QuestClient
         public bool IsKeyframe { get { return (Flags & MetalXRQuestProtocol.VideoFrameFlagKeyframe) != 0; } }
     }
 
+    public sealed class MetalXRQuestEncodedStereoFrameSet
+    {
+        public MetalXRQuestEncodedStereoFrameSet(
+            ulong frameId,
+            MetalXRQuestEncodedVideoFrame left,
+            MetalXRQuestEncodedVideoFrame right)
+        {
+            FrameId = frameId;
+            Left = left;
+            Right = right;
+        }
+
+        public ulong FrameId { get; }
+        public MetalXRQuestEncodedVideoFrame Left { get; }
+        public MetalXRQuestEncodedVideoFrame Right { get; }
+        public bool IsComplete { get { return Left != null && Right != null; } }
+    }
+
     public sealed class MetalXRQuestHapticCommand
     {
         public MetalXRQuestHapticCommand(
