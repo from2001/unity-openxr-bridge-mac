@@ -4,7 +4,7 @@ This document tracks the native runtime milestones for issue #2 through issue #4
 
 ## Purpose
 
-The runtime proves that the OpenXR loader can discover and load a MetalXR runtime on macOS, exercise enough core OpenXR lifecycle behavior for Unity Play Mode initialization, and accept Unity-rendered stereo frames through runtime-owned Metal swapchain textures. It intentionally does not implement tracking, input, CPU pixel readback, encoding, transport, or Quest display yet.
+The runtime proves that the OpenXR loader can discover and load a MetalXR runtime on macOS, exercise enough core OpenXR lifecycle behavior for Unity Play Mode initialization, accept Unity-rendered stereo frames through runtime-owned Metal swapchain textures, and expose a first tracking/action/haptic bridge for Quest smoke tests. It intentionally does not implement CPU pixel readback, production encoding, production transport, or Quest display yet.
 
 The current runtime:
 
@@ -46,9 +46,28 @@ The current runtime:
   - `xrBeginFrame`
   - `xrEndFrame`
   - `xrLocateViews`
+- Implements minimal action and haptic calls for:
+  - `xrStringToPath`
+  - `xrPathToString`
+  - `xrCreateActionSet`
+  - `xrDestroyActionSet`
+  - `xrCreateAction`
+  - `xrDestroyAction`
+  - `xrSuggestInteractionProfileBindings`
+  - `xrAttachSessionActionSets`
+  - `xrSyncActions`
+  - `xrGetActionStateBoolean`
+  - `xrGetActionStateFloat`
+  - `xrGetActionStateVector2f`
+  - `xrGetActionStatePose`
+  - `xrCreateActionSpace`
+  - `xrApplyHapticFeedback`
+  - `xrStopHapticFeedback`
 - Reports a dummy stereo HMD with two fixed 1832 x 1920 views and opaque environment blending.
 - Creates `MTLTexture` objects through `MTLTextureDescriptor` and returns them via `XrSwapchainImageMetalKHR`.
 - Parses submitted `XrCompositionLayerProjection` layers in `xrEndFrame`.
+- Reads HMD and controller state from `METALXR_TRACKING_STATE_PATH` for view poses, action spaces, and action states.
+- Writes haptic commands to `METALXR_HAPTIC_COMMAND_PATH`.
 - Emits lifecycle logs for instance/session creation, session state transitions, swapchain ownership, and sampled frame-loop calls.
 
 ## macOS Graphics Path
@@ -71,6 +90,19 @@ Tradeoffs and limitations:
 - The runtime does not read pixels back to CPU memory yet.
 - The runtime does not allocate IOSurface-backed textures yet, so there is no cross-process share handle or VideoToolbox encode path.
 - Synchronization is minimal and only models the OpenXR acquire/wait/release call order. Real GPU fences must be added before encoding or streaming.
+
+## Tracking, Actions, And Haptics
+
+The development input bridge uses a text state file so the host streamer and native runtime can be validated before they share a direct in-process or IPC transport. By default:
+
+- `METALXR_TRACKING_STATE_PATH=/tmp/metalxr_tracking_state.txt`
+- `METALXR_HAPTIC_COMMAND_PATH=/tmp/metalxr_haptic_command.txt`
+
+`xrLocateViews` reads the latest HMD pose and offsets the left and right eye views by a fixed 64 mm IPD. Action-space locations read the controller aim or grip pose based on the action name. Boolean, float, and vector action states map to Oculus Touch-style primary/secondary/menu/thumbstick buttons, trigger, grip, and thumbstick axes.
+
+`xrApplyHapticFeedback` writes the latest vibration request to the haptic command file. The host streamer polls that file and forwards the command to the Quest client.
+
+This path is intentionally narrow. It is enough for Unity Play Mode smoke tests, but it does not replace production action binding coverage, synchronized prediction, richer interaction profiles, or a robust lost-tracking/reconnect policy.
 
 ## Build
 
@@ -100,6 +132,14 @@ The probe uses `dlopen`, calls `xrNegotiateLoaderRuntimeInterface`, creates an i
 
 The probe also sets `METALXR_FRAME_DUMP_DIR` and fails unless `frame_000001.txt` is written with projection frame metadata.
 
+Input bridge coverage is in:
+
+```sh
+Scripts/probe-metalxr-input-bridge.sh
+```
+
+That probe writes a tracking-state fixture, verifies `xrLocateViews`, boolean/float/vector/pose action reads, action-space location, and haptic command output.
+
 ## Unity Launch
 
 After the runtime is built, this script will prefer the MetalXR runtime manifest over Meta XR Simulator:
@@ -116,4 +156,4 @@ METALXR_RUNTIME_JSON=/absolute/path/to/runtime.json Scripts/launch-unity-openxr.
 
 ## Next Step
 
-Issue #5 adds a standalone host encoder for synthetic stereo frames. The remaining integration work is connecting runtime-owned Metal textures to that encoder through a Metal blit into VideoToolbox-compatible pixel buffers or by changing swapchain allocation to IOSurface-backed textures that can be handed to the encoder with lower copy overhead.
+The remaining graphics integration work is connecting runtime-owned Metal textures to the host encoder through a Metal blit into VideoToolbox-compatible pixel buffers or by changing swapchain allocation to IOSurface-backed textures that can be handed to the encoder with lower copy overhead. The remaining input integration work is replacing the state-file bridge with synchronized transport and broader OpenXR interaction-profile support.

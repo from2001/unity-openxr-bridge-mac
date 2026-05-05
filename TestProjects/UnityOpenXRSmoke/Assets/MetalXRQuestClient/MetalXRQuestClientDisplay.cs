@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.XR;
 
 namespace MetalXR.QuestClient
 {
@@ -12,7 +13,9 @@ namespace MetalXR.QuestClient
         private const int TextureWidth = 640;
         private const int TextureHeight = 360;
         private const float FrameUpdateIntervalSeconds = 1.0f / 12.0f;
+        private const float InputSampleIntervalSeconds = 1.0f / 30.0f;
         private const int MaxStreamFramesPerUpdate = 8;
+        private const int MaxHapticCommandsPerUpdate = 4;
 
         private Texture2D _leftTexture;
         private Texture2D _rightTexture;
@@ -24,8 +27,11 @@ namespace MetalXR.QuestClient
         private MetalXRQuestHandshakeClient _handshakeClient;
         private MetalXRQuestVideoDecoder _videoDecoder;
         private float _nextFrameTime;
+        private float _nextInputSampleTime;
         private float _lastStreamFrameTime = -10.0f;
         private int _frameIndex;
+        private ulong _inputSampleId;
+        private ulong _loggedInputSamples;
         private ulong _displayedEyeFrames;
         private ulong _displayedLeftEyeFrames;
         private ulong _displayedRightEyeFrames;
@@ -53,6 +59,8 @@ namespace MetalXR.QuestClient
             {
                 _handshakeClient.DrainLogs(LogClientMessage);
                 _handshakeClient.DrainFrames(HandleEncodedFrame, MaxStreamFramesPerUpdate);
+                _handshakeClient.DrainHapticCommands(HandleHapticCommand, MaxHapticCommandsPerUpdate);
+                EnqueueTrackingSamples();
             }
 
             if (Time.unscaledTime - _lastStreamFrameTime > 0.5f && Time.unscaledTime >= _nextFrameTime)
@@ -101,6 +109,193 @@ namespace MetalXR.QuestClient
             if (_videoDecoder.TryDecode(encodedFrame, out decodedFrame) && decodedFrame != null)
             {
                 UpdateStreamTexture(decodedFrame);
+            }
+        }
+
+        private void HandleHapticCommand(MetalXRQuestHapticCommand command)
+        {
+            XRNode node = command.IsLeftHand ? XRNode.LeftHand : XRNode.RightHand;
+            InputDevice device = InputDevices.GetDeviceAtXRNode(node);
+            if (!device.isValid)
+            {
+                return;
+            }
+
+            float amplitude = Mathf.Clamp01(command.Amplitude);
+            float durationSeconds = Mathf.Max(0.0f, command.DurationUs / 1000000.0f);
+            device.SendHapticImpulse(0u, amplitude, durationSeconds);
+        }
+
+        private void EnqueueTrackingSamples()
+        {
+            if (Time.unscaledTime < _nextInputSampleTime || _handshakeClient == null)
+            {
+                return;
+            }
+
+            _nextInputSampleTime = Time.unscaledTime + InputSampleIntervalSeconds;
+            _inputSampleId++;
+            ulong timestampNs = MetalXRQuestProtocol.NowNs();
+            SendHeadPose(_inputSampleId, timestampNs);
+            SendControllerInput(_inputSampleId, timestampNs, true);
+            SendControllerInput(_inputSampleId, timestampNs, false);
+        }
+
+        private void SendHeadPose(ulong sampleId, ulong timestampNs)
+        {
+            InputDevice head = InputDevices.GetDeviceAtXRNode(XRNode.Head);
+            Vector3 position;
+            Quaternion rotation;
+            uint trackingFlags = ReadPose(head, out position, out rotation);
+            _handshakeClient.EnqueuePoseSample(
+                sampleId,
+                timestampNs,
+                timestampNs,
+                VectorToArray(position),
+                QuaternionToArray(rotation),
+                trackingFlags);
+            LogInputSample("hmd", sampleId, trackingFlags);
+        }
+
+        private void SendControllerInput(ulong sampleId, ulong timestampNs, bool leftHand)
+        {
+            XRNode node = leftHand ? XRNode.LeftHand : XRNode.RightHand;
+            InputDevice device = InputDevices.GetDeviceAtXRNode(node);
+            Vector3 position;
+            Quaternion rotation;
+            uint trackingFlags = ReadPose(device, out position, out rotation);
+
+            float trigger = ReadFloatFeature(device, CommonUsages.trigger);
+            float grip = ReadFloatFeature(device, CommonUsages.grip);
+            Vector2 thumbstick = ReadVector2Feature(device, CommonUsages.primary2DAxis);
+            uint buttons = ReadButtonFlags(device);
+            uint hand = leftHand ? MetalXRQuestProtocol.ControllerHandLeft : MetalXRQuestProtocol.ControllerHandRight;
+
+            _handshakeClient.EnqueueControllerInput(
+                sampleId,
+                timestampNs,
+                hand,
+                buttons,
+                trigger,
+                grip,
+                new[] { thumbstick.x, thumbstick.y },
+                trackingFlags,
+                VectorToArray(position),
+                QuaternionToArray(rotation),
+                VectorToArray(position),
+                QuaternionToArray(rotation));
+
+            LogInputSample(leftHand ? "left-controller" : "right-controller", sampleId, trackingFlags);
+        }
+
+        private static uint ReadPose(InputDevice device, out Vector3 position, out Quaternion rotation)
+        {
+            position = Vector3.zero;
+            rotation = Quaternion.identity;
+            if (!device.isValid)
+            {
+                return 0;
+            }
+
+            uint flags = 0;
+            bool isTracked;
+            if (device.TryGetFeatureValue(CommonUsages.isTracked, out isTracked) && isTracked)
+            {
+                flags |= MetalXRQuestProtocol.TrackingOrientationTracked | MetalXRQuestProtocol.TrackingPositionTracked;
+            }
+
+            Vector3 readPosition;
+            if (device.TryGetFeatureValue(CommonUsages.devicePosition, out readPosition))
+            {
+                position = readPosition;
+                flags |= MetalXRQuestProtocol.TrackingPositionValid;
+            }
+
+            Quaternion readRotation;
+            if (device.TryGetFeatureValue(CommonUsages.deviceRotation, out readRotation))
+            {
+                rotation = readRotation;
+                flags |= MetalXRQuestProtocol.TrackingOrientationValid;
+            }
+
+            return flags;
+        }
+
+        private static float ReadFloatFeature(InputDevice device, InputFeatureUsage<float> usage)
+        {
+            if (!device.isValid)
+            {
+                return 0.0f;
+            }
+
+            float value;
+            return device.TryGetFeatureValue(usage, out value) ? value : 0.0f;
+        }
+
+        private static Vector2 ReadVector2Feature(InputDevice device, InputFeatureUsage<Vector2> usage)
+        {
+            if (!device.isValid)
+            {
+                return Vector2.zero;
+            }
+
+            Vector2 value;
+            return device.TryGetFeatureValue(usage, out value) ? value : Vector2.zero;
+        }
+
+        private static uint ReadButtonFlags(InputDevice device)
+        {
+            if (!device.isValid)
+            {
+                return 0;
+            }
+
+            uint buttons = 0;
+            if (ReadButtonFeature(device, CommonUsages.primaryButton))
+            {
+                buttons |= MetalXRQuestProtocol.ControllerButtonPrimary;
+            }
+
+            if (ReadButtonFeature(device, CommonUsages.secondaryButton))
+            {
+                buttons |= MetalXRQuestProtocol.ControllerButtonSecondary;
+            }
+
+            if (ReadButtonFeature(device, CommonUsages.menuButton))
+            {
+                buttons |= MetalXRQuestProtocol.ControllerButtonMenu;
+            }
+
+            if (ReadButtonFeature(device, CommonUsages.primary2DAxisClick))
+            {
+                buttons |= MetalXRQuestProtocol.ControllerButtonThumbstick;
+            }
+
+            return buttons;
+        }
+
+        private static bool ReadButtonFeature(InputDevice device, InputFeatureUsage<bool> usage)
+        {
+            bool value;
+            return device.TryGetFeatureValue(usage, out value) && value;
+        }
+
+        private static float[] VectorToArray(Vector3 value)
+        {
+            return new[] { value.x, value.y, value.z };
+        }
+
+        private static float[] QuaternionToArray(Quaternion value)
+        {
+            return new[] { value.x, value.y, value.z, value.w };
+        }
+
+        private void LogInputSample(string source, ulong sampleId, uint trackingFlags)
+        {
+            _loggedInputSamples++;
+            if (_loggedInputSamples <= 6 || (_loggedInputSamples % 300) == 0)
+            {
+                Debug.Log(LogPrefix + " sent input sample source=" + source + " id=" + sampleId + " flags=0x" + trackingFlags.ToString("x8"));
             }
         }
 

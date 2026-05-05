@@ -54,6 +54,25 @@ typedef enum MetalXREye {
     METALXR_EYE_RIGHT = 1
 } MetalXREye;
 
+typedef enum MetalXRTrackingFlags {
+    METALXR_TRACKING_ORIENTATION_VALID = 0x00000001u,
+    METALXR_TRACKING_POSITION_VALID = 0x00000002u,
+    METALXR_TRACKING_ORIENTATION_TRACKED = 0x00000004u,
+    METALXR_TRACKING_POSITION_TRACKED = 0x00000008u
+} MetalXRTrackingFlags;
+
+typedef enum MetalXRControllerHand {
+    METALXR_CONTROLLER_HAND_LEFT = 0,
+    METALXR_CONTROLLER_HAND_RIGHT = 1
+} MetalXRControllerHand;
+
+typedef enum MetalXRControllerButtonFlags {
+    METALXR_CONTROLLER_BUTTON_PRIMARY = 0x00000001u,
+    METALXR_CONTROLLER_BUTTON_SECONDARY = 0x00000002u,
+    METALXR_CONTROLLER_BUTTON_MENU = 0x00000004u,
+    METALXR_CONTROLLER_BUTTON_THUMBSTICK = 0x00000008u
+} MetalXRControllerButtonFlags;
+
 typedef enum MetalXRErrorCode {
     METALXR_ERROR_NONE = 0,
     METALXR_ERROR_VERSION_MISMATCH = 1,
@@ -133,6 +152,12 @@ typedef struct MetalXRControllerInputPayload {
     float trigger;
     float grip;
     float thumbstick[2];
+    uint32_t trackingFlags;
+    uint32_t reserved;
+    float aimPosition[3];
+    float aimOrientation[4];
+    float gripPosition[3];
+    float gripOrientation[4];
 } MetalXRControllerInputPayload;
 
 typedef struct MetalXRHapticCommandPayload {

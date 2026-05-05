@@ -14,17 +14,36 @@ namespace MetalXR.QuestClient
         public const ushort PacketHelloAck = 2;
         public const ushort PacketError = 4;
         public const ushort PacketVideoFrame = 10;
+        public const ushort PacketPoseSample = 20;
+        public const ushort PacketControllerInput = 21;
+        public const ushort PacketHapticCommand = 22;
         public const uint CodecH264 = 1;
         public const uint EyeLeft = 0;
         public const uint EyeRight = 1;
         public const uint VideoFrameFlagKeyframe = 0x00000001;
+        public const uint TrackingOrientationValid = 0x00000001;
+        public const uint TrackingPositionValid = 0x00000002;
+        public const uint TrackingOrientationTracked = 0x00000004;
+        public const uint TrackingPositionTracked = 0x00000008;
+        public const uint ControllerHandLeft = 0;
+        public const uint ControllerHandRight = 1;
+        public const uint ControllerButtonPrimary = 0x00000001;
+        public const uint ControllerButtonSecondary = 0x00000002;
+        public const uint ControllerButtonMenu = 0x00000004;
+        public const uint ControllerButtonThumbstick = 0x00000008;
 
         private const uint RoleQuestClient = 2;
         private const uint CapabilityH264 = 0x00000001;
         private const uint CapabilityStereoSeparateEyes = 0x00000004;
+        private const uint CapabilityPoseInput = 0x00000010;
+        private const uint CapabilityControllerInput = 0x00000020;
+        private const uint CapabilityHaptics = 0x00000040;
         private const uint CapabilityLogStream = 0x00000080;
         private const int HelloPayloadSize = 96;
         private const int VideoFramePayloadSize = 56;
+        private const int PoseSamplePayloadSize = 60;
+        private const int ControllerInputPayloadSize = 104;
+        private const int HapticCommandPayloadSize = 32;
         private const int DeviceNameSize = 64;
 
         public readonly struct PacketHeader
@@ -78,7 +97,15 @@ namespace MetalXR.QuestClient
             WriteUInt32(packet, ref offset, 0);
 
             WriteUInt32(packet, ref offset, RoleQuestClient);
-            WriteUInt32(packet, ref offset, CapabilityH264 | CapabilityStereoSeparateEyes | CapabilityLogStream);
+            WriteUInt32(
+                packet,
+                ref offset,
+                CapabilityH264 |
+                CapabilityStereoSeparateEyes |
+                CapabilityPoseInput |
+                CapabilityControllerInput |
+                CapabilityHaptics |
+                CapabilityLogStream);
             WriteUInt32(packet, ref offset, 2064);
             WriteUInt32(packet, ref offset, 2208);
             WriteUInt32(packet, ref offset, 72);
@@ -87,6 +114,60 @@ namespace MetalXR.QuestClient
             WriteUInt32(packet, ref offset, 0);
             WriteFixedAscii(packet, ref offset, "MetalXR Quest Unity Client", DeviceNameSize);
 
+            return packet;
+        }
+
+        public static byte[] CreatePoseSamplePacket(
+            ulong sequence,
+            ulong sampleId,
+            ulong timestampNs,
+            ulong predictedDisplayTimeNs,
+            float[] position,
+            float[] orientation,
+            uint trackingFlags)
+        {
+            byte[] packet = CreatePacketHeader(PacketPoseSample, sequence, PoseSamplePayloadSize);
+            int offset = HeaderSize;
+            WriteUInt64(packet, ref offset, sampleId);
+            WriteUInt64(packet, ref offset, timestampNs);
+            WriteUInt64(packet, ref offset, predictedDisplayTimeNs);
+            WriteFloatArray(packet, ref offset, position, 3);
+            WriteFloatArray(packet, ref offset, orientation, 4);
+            WriteUInt32(packet, ref offset, trackingFlags);
+            WriteUInt32(packet, ref offset, 0);
+            return packet;
+        }
+
+        public static byte[] CreateControllerInputPacket(
+            ulong sequence,
+            ulong sampleId,
+            ulong timestampNs,
+            uint hand,
+            uint buttons,
+            float trigger,
+            float grip,
+            float[] thumbstick,
+            uint trackingFlags,
+            float[] aimPosition,
+            float[] aimOrientation,
+            float[] gripPosition,
+            float[] gripOrientation)
+        {
+            byte[] packet = CreatePacketHeader(PacketControllerInput, sequence, ControllerInputPayloadSize);
+            int offset = HeaderSize;
+            WriteUInt64(packet, ref offset, sampleId);
+            WriteUInt64(packet, ref offset, timestampNs);
+            WriteUInt32(packet, ref offset, hand);
+            WriteUInt32(packet, ref offset, buttons);
+            WriteSingle(packet, ref offset, trigger);
+            WriteSingle(packet, ref offset, grip);
+            WriteFloatArray(packet, ref offset, thumbstick, 2);
+            WriteUInt32(packet, ref offset, trackingFlags);
+            WriteUInt32(packet, ref offset, 0);
+            WriteFloatArray(packet, ref offset, aimPosition, 3);
+            WriteFloatArray(packet, ref offset, aimOrientation, 4);
+            WriteFloatArray(packet, ref offset, gripPosition, 3);
+            WriteFloatArray(packet, ref offset, gripOrientation, 4);
             return packet;
         }
 
@@ -167,6 +248,47 @@ namespace MetalXR.QuestClient
             return true;
         }
 
+        public static bool TryParseHapticCommandPayload(byte[] payload, out MetalXRQuestHapticCommand command)
+        {
+            command = null;
+            if (payload == null || payload.Length < HapticCommandPayloadSize)
+            {
+                return false;
+            }
+
+            int offset = 0;
+            ulong commandId = ReadUInt64(payload, ref offset);
+            ulong timestampNs = ReadUInt64(payload, ref offset);
+            uint hand = ReadUInt32(payload, ref offset);
+            float amplitude = ReadSingle(payload, ref offset);
+            float frequencyHz = ReadSingle(payload, ref offset);
+            uint durationUs = ReadUInt32(payload, ref offset);
+            if (hand != ControllerHandLeft && hand != ControllerHandRight)
+            {
+                return false;
+            }
+
+            command = new MetalXRQuestHapticCommand(commandId, timestampNs, hand, amplitude, frequencyHz, durationUs);
+            return true;
+        }
+
+        private static byte[] CreatePacketHeader(ushort packetType, ulong sequence, int payloadSize)
+        {
+            byte[] packet = new byte[HeaderSize + payloadSize];
+            int offset = 0;
+            WriteUInt32(packet, ref offset, Magic);
+            WriteUInt16(packet, ref offset, HeaderSize);
+            WriteUInt16(packet, ref offset, packetType);
+            WriteUInt16(packet, ref offset, VersionMajor);
+            WriteUInt16(packet, ref offset, VersionMinor);
+            WriteUInt32(packet, ref offset, 0);
+            WriteUInt64(packet, ref offset, sequence);
+            WriteUInt64(packet, ref offset, NowNs());
+            WriteUInt32(packet, ref offset, (uint)payloadSize);
+            WriteUInt32(packet, ref offset, 0);
+            return packet;
+        }
+
         public static ulong NowNs()
         {
             double timestamp = Stopwatch.GetTimestamp();
@@ -202,6 +324,22 @@ namespace MetalXR.QuestClient
             WriteUInt32(bytes, ref offset, (uint)((value >> 32) & 0xffffffff));
         }
 
+        private static void WriteSingle(byte[] bytes, ref int offset, float value)
+        {
+            byte[] encoded = BitConverter.GetBytes(value);
+            Array.Copy(encoded, 0, bytes, offset, 4);
+            offset += 4;
+        }
+
+        private static void WriteFloatArray(byte[] bytes, ref int offset, float[] values, int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                float value = values != null && i < values.Length ? values[i] : 0.0f;
+                WriteSingle(bytes, ref offset, value);
+            }
+        }
+
         private static ushort ReadUInt16(byte[] bytes, ref int offset)
         {
             ushort value = (ushort)(bytes[offset] | (bytes[offset + 1] << 8));
@@ -225,6 +363,13 @@ namespace MetalXR.QuestClient
             ulong low = ReadUInt32(bytes, ref offset);
             ulong high = ReadUInt32(bytes, ref offset);
             return low | (high << 32);
+        }
+
+        private static float ReadSingle(byte[] bytes, ref int offset)
+        {
+            float value = BitConverter.ToSingle(bytes, offset);
+            offset += 4;
+            return value;
         }
     }
 
@@ -275,5 +420,32 @@ namespace MetalXR.QuestClient
         public byte[] EncodedBytes { get; }
         public bool IsLeftEye { get { return Eye == MetalXRQuestProtocol.EyeLeft; } }
         public bool IsKeyframe { get { return (Flags & MetalXRQuestProtocol.VideoFrameFlagKeyframe) != 0; } }
+    }
+
+    public sealed class MetalXRQuestHapticCommand
+    {
+        public MetalXRQuestHapticCommand(
+            ulong commandId,
+            ulong timestampNs,
+            uint hand,
+            float amplitude,
+            float frequencyHz,
+            uint durationUs)
+        {
+            CommandId = commandId;
+            TimestampNs = timestampNs;
+            Hand = hand;
+            Amplitude = amplitude;
+            FrequencyHz = frequencyHz;
+            DurationUs = durationUs;
+        }
+
+        public ulong CommandId { get; }
+        public ulong TimestampNs { get; }
+        public uint Hand { get; }
+        public float Amplitude { get; }
+        public float FrequencyHz { get; }
+        public uint DurationUs { get; }
+        public bool IsLeftHand { get { return Hand == MetalXRQuestProtocol.ControllerHandLeft; } }
     }
 }

@@ -16,11 +16,13 @@ Working:
 - Build and probe shared host/client protocol packet definitions with loopback handshake, heartbeat, and version-mismatch handling.
 - Build a Quest/Android Unity OpenXR client shell that displays generated stereo diagnostic frames in-headset and attempts the shared HELLO handshake over an adb-reversed host endpoint.
 - Stream synthetic macOS VideoToolbox H.264 stereo frames over the shared TCP protocol to the Quest client, with MediaCodec decode attempted on-device and receive-to-display timing logged from Unity.
+- Bridge Quest HMD pose and controller samples back to the macOS host, expose them to the native runtime through a development state file, and map them into minimal OpenXR view, action-state, action-space, and haptic APIs.
 
 Not implemented yet:
 
 - CPU pixel readback, IOSurface export, or VideoToolbox encoding of Unity-submitted Metal textures.
-- A production Quest PCVR media transport layer for tracking, input, audio, clock sync, loss recovery, and adaptive timing.
+- A production Quest PCVR transport layer for audio, clock sync, loss recovery, adaptive timing, and low-latency datagrams.
+- Production-grade OpenXR action binding/profile coverage, true separate aim/grip poses on every device path, and predictive input timing.
 - Encoding of real Unity-submitted Metal frames instead of the current synthetic host stream.
 - SteamVR/OpenComposite compatibility on macOS.
 
@@ -39,6 +41,7 @@ Build and probe the native MetalXR runtime:
 ```sh
 Scripts/build-metalxr-runtime.sh
 Scripts/probe-metalxr-runtime.sh
+Scripts/probe-metalxr-input-bridge.sh
 ```
 
 Build and probe the macOS host encoder:
@@ -114,6 +117,8 @@ When the MetalXR runtime is selected, the script also sets:
 
 - `METALXR_RUNTIME_LOG` for runtime lifecycle and swapchain logs.
 - `METALXR_FRAME_DUMP_DIR` for per-frame metadata files written from `xrEndFrame`.
+- `METALXR_TRACKING_STATE_PATH` for HMD/controller state consumed by view and action APIs.
+- `METALXR_HAPTIC_COMMAND_PATH` for haptic commands emitted by `xrApplyHapticFeedback`.
 
 ## How does it work?
 
@@ -124,6 +129,7 @@ The macOS app is a SwiftUI wrapper around bundled adb platform-tools. The script
 - `Scripts/launch-unity-openxr.sh` launches Unity with `XR_RUNTIME_JSON` pointing at a runtime manifest.
 - `Scripts/build-metalxr-runtime.sh` builds the native runtime.
 - `Scripts/probe-metalxr-runtime.sh` verifies OpenXR loader/runtime negotiation, the dummy HMD lifecycle, Metal swapchain creation, and projection frame metadata dumps.
+- `Scripts/probe-metalxr-input-bridge.sh` verifies runtime-side HMD pose, controller action states, action spaces, and haptic command output.
 - `Scripts/build-metalxr-host.sh` builds the macOS host utilities.
 - `Scripts/probe-metalxr-host-encoder.sh` verifies continuous VideoToolbox H.264 encoding from a synthetic stereo frame stream.
 - `Scripts/probe-metalxr-frame-stream.sh` verifies TCP HELLO/HELLO_ACK negotiation plus streamed H.264 VIDEO_FRAME packets.
@@ -134,7 +140,7 @@ The macOS app is a SwiftUI wrapper around bundled adb platform-tools. The script
 - `Scripts/run-metalxr-frame-stream.sh` runs the host streamer for USB adb reverse or Wi-Fi transport tests.
 - `Scripts/probe-quest-client-unity.sh` compiles the Unity Quest client scripts through uloop.
 
-The next major engineering step is connecting runtime-owned Metal textures to the host streamer, then adding clock sync, adaptive frame pacing, tracking, input, haptics, and timing control.
+The next major engineering step is connecting runtime-owned Metal textures to the host streamer, then improving clock sync, adaptive frame pacing, input prediction, loss recovery, and timing control.
 
 ## How can I install it?
 

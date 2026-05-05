@@ -18,6 +18,8 @@ Environment:
   METALXR_STREAM_FPS          Stream frame rate. Defaults to 60.
   METALXR_STREAM_BITRATE      H.264 bitrate in bits per second. Defaults to 8000000.
   METALXR_STREAM_FRAMES       Frame count. Defaults to 0, which streams until disconnect.
+  METALXR_TRACKING_STATE_PATH Host tracking state output. Defaults to /tmp/metalxr_tracking_state.txt.
+  METALXR_HAPTIC_COMMAND_PATH Runtime haptic command input. Defaults to /tmp/metalxr_haptic_command.txt.
 USAGE
 }
 
@@ -35,6 +37,8 @@ height="${METALXR_STREAM_HEIGHT:-360}"
 fps="${METALXR_STREAM_FPS:-60}"
 bitrate="${METALXR_STREAM_BITRATE:-8000000}"
 frames="${METALXR_STREAM_FRAMES:-0}"
+tracking_state_path="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}"
+haptic_command_path="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}"
 
 if [[ ! -x "$streamer" ]]; then
   "$repo_root/Scripts/build-metalxr-host.sh"
@@ -76,4 +80,6 @@ exec "$streamer" \
   --fps "$fps" \
   --width "$width" \
   --height "$height" \
-  --bitrate "$bitrate"
+  --bitrate "$bitrate" \
+  --tracking-state-path "$tracking_state_path" \
+  --haptic-command-path "$haptic_command_path"

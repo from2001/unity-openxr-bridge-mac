@@ -1,6 +1,6 @@
 # MetalXR Quest client shell
 
-Issue #7 added the first Quest-side client surface inside the Unity OpenXR smoke project. Issue #8 extends it into a stream receiver: Unity's Android OpenXR loader owns the native headset session and stereo projection path, while the MetalXR scripts receive host VIDEO_FRAME packets, attempt H.264 decode with Android MediaCodec, and draw the resulting eye textures in front of the XR camera.
+Issue #7 added the first Quest-side client surface inside the Unity OpenXR smoke project. Issue #8 extends it into a stream receiver: Unity's Android OpenXR loader owns the native headset session and stereo projection path, while the MetalXR scripts receive host VIDEO_FRAME packets, attempt H.264 decode with Android MediaCodec, and draw the resulting eye textures in front of the XR camera. Issue #9 adds Quest-to-host HMD/controller samples and host-to-Quest haptic commands.
 
 ## Project location
 
@@ -19,7 +19,7 @@ The client attempts to connect to `127.0.0.1:47000` by default. This works with 
 adb reverse tcp:47000 tcp:47000
 ```
 
-The packet format matches `Runtime/MetalXRProtocol/include/MetalXRProtocol/metalxr_protocol.h` for HELLO, HELLO_ACK, and VIDEO_FRAME packets. The client advertises Quest client role, H.264, separate-eye stereo, and log-stream capability. A missing host is non-fatal; the client continues showing the diagnostic frame and periodically retries. If the stream disconnects, the background TCP thread reconnects without restarting Unity.
+The packet format matches `Runtime/MetalXRProtocol/include/MetalXRProtocol/metalxr_protocol.h` for HELLO, HELLO_ACK, VIDEO_FRAME, POSE_SAMPLE, CONTROLLER_INPUT, and HAPTIC_COMMAND packets. The client advertises Quest client role, H.264, separate-eye stereo, pose input, controller input, haptics, and log-stream capability. A missing host is non-fatal; the client continues showing the diagnostic frame and periodically retries. If the stream disconnects, the background TCP thread reconnects without restarting Unity.
 
 The host can be overridden with Unity command-line arguments when a launcher supports them:
 
@@ -52,8 +52,23 @@ Scripts/run-metalxr-frame-stream.sh
 - `METALXR_STREAM_BITRATE`
 - `METALXR_STREAM_FRAMES`
 - `METALXR_TRANSPORT=usb|wifi`
+- `METALXR_TRACKING_STATE_PATH`
+- `METALXR_HAPTIC_COMMAND_PATH`
 
 On Quest, the client reads VIDEO_FRAME packets on a background thread, queues encoded access units, and processes decode/display work on the Unity main thread. Android builds attempt MediaCodec H.264 decode first. If MediaCodec is unavailable or has not produced an output buffer yet, the client displays a compressed-payload preview so transport and frame pacing remain visible during development. Display logs include host encoder latency and local client receive-to-display timing.
+
+## Tracking, Controllers, And Haptics
+
+The Quest client samples the center-eye HMD, left controller, and right controller through Unity's XR input devices on the Unity main thread. It sends:
+
+- `METALXR_PACKET_POSE_SAMPLE` for HMD position, orientation, and tracking flags.
+- `METALXR_PACKET_CONTROLLER_INPUT` for controller buttons, trigger, grip, thumbstick, tracking flags, and aim/grip poses.
+
+The macOS host streamer drains those packets on the stream socket and atomically rewrites `METALXR_TRACKING_STATE_PATH`. The native runtime consumes that file for `xrLocateViews`, action-space locations, and action-state reads.
+
+Haptics flow in the opposite direction. The runtime writes the latest command to `METALXR_HAPTIC_COMMAND_PATH` from `xrApplyHapticFeedback`; the host streamer sends it as `METALXR_PACKET_HAPTIC_COMMAND`; the Quest client applies it with Unity XR `SendHapticImpulse` on the main thread.
+
+This is a development bridge for USB smoke tests. It does not yet provide clock-synchronized prediction, datagram delivery, or production reconnect policy.
 
 ## Build
 
