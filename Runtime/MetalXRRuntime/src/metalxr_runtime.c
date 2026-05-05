@@ -951,7 +951,7 @@ static uint64_t metalxr_swapchain_storage_mode(void)
     }
 
     return metalxr_has_env("METALXR_FRAME_EXPORT_DIR") ?
-        kMetalStorageModeManaged :
+        kMetalStorageModeShared :
         kMetalStorageModePrivate;
 }
 
@@ -2883,6 +2883,113 @@ static void metalxr_append_frame_export_record(const char* exportDirectory, cons
     fclose(output);
 }
 
+static void metalxr_export_fixture_eye(
+    XrSession session,
+    const XrFrameEndInfo* frameEndInfo,
+    const char* exportDirectory,
+    uint32_t eye)
+{
+    const uint32_t width = 640;
+    const uint32_t height = 360;
+    const size_t bytesPerPixel = 4;
+    const size_t bytesPerRow = (size_t)width * bytesPerPixel;
+    const size_t payloadBytes = bytesPerRow * (size_t)height;
+
+    uint8_t* payload = (uint8_t*)calloc(1, payloadBytes);
+    if (payload == NULL) {
+        metalxr_log("fixture frame export allocation failed eye=%u bytes=%zu", eye, payloadBytes);
+        return;
+    }
+
+    metalxr_write_fixture_pixels(payload,
+                                 width,
+                                 height,
+                                 bytesPerRow,
+                                 bytesPerPixel,
+                                 session->frameIndex,
+                                 eye);
+
+    char payloadPath[1024];
+    snprintf(payloadPath,
+             sizeof(payloadPath),
+             "%s/frame_%06" PRIu64 "_eye_%u.bgra",
+             exportDirectory,
+             session->frameIndex,
+             eye);
+
+    if (!metalxr_write_binary_file(payloadPath, payload, payloadBytes)) {
+        free(payload);
+        metalxr_log("fixture frame export payload write failed: %s", payloadPath);
+        return;
+    }
+
+    free(payload);
+
+    char recordPath[1024];
+    snprintf(recordPath,
+             sizeof(recordPath),
+             "%s/frame_%06" PRIu64 "_eye_%u.json",
+             exportDirectory,
+             session->frameIndex,
+             eye);
+
+    char record[4096];
+    snprintf(record,
+             sizeof(record),
+             "{\"event\":\"frame_export\",\"frame\":%" PRIu64 ",\"eye\":%u,"
+             "\"displayTime\":%" PRId64 ",\"swapchain\":0,\"imageIndex\":0,"
+             "\"texture\":\"%p\",\"pixelFormat\":80,\"payloadFormat\":\"BGRA8\","
+             "\"width\":%u,\"height\":%u,\"bytesPerRow\":%zu,\"payloadBytes\":%zu,"
+             "\"sourceRect\":{\"x\":0,\"y\":0,\"width\":%u,\"height\":%u},"
+             "\"arrayIndex\":0,\"storageMode\":0,\"mode\":\"fixture\",\"payloadPath\":\"%s\"}",
+             session->frameIndex,
+             eye,
+             frameEndInfo != NULL ? frameEndInfo->displayTime : 0,
+             NULL,
+             width,
+             height,
+             bytesPerRow,
+             payloadBytes,
+             width,
+             height,
+             payloadPath);
+
+    char tempRecordPath[1024];
+    snprintf(tempRecordPath, sizeof(tempRecordPath), "%s.tmp", recordPath);
+    FILE* recordOutput = fopen(tempRecordPath, "w");
+    if (recordOutput == NULL) {
+        metalxr_log("fixture frame export record write failed: %s", recordPath);
+        return;
+    }
+    fprintf(recordOutput, "%s\n", record);
+    fclose(recordOutput);
+    if (rename(tempRecordPath, recordPath) != 0) {
+        (void)remove(tempRecordPath);
+        metalxr_log("fixture frame export record rename failed: %s", recordPath);
+        return;
+    }
+
+    metalxr_append_frame_export_record(exportDirectory, record);
+    metalxr_log("fixture frame export wrote frame=%" PRIu64 " eye=%u payload=%s",
+                session->frameIndex,
+                eye,
+                payloadPath);
+}
+
+static void metalxr_export_fixture_frame(
+    XrSession session,
+    const XrFrameEndInfo* frameEndInfo,
+    const char* exportDirectory)
+{
+    if (!metalxr_is_session(session) || exportDirectory == NULL) {
+        return;
+    }
+
+    for (uint32_t eye = 0; eye < kViewCount; ++eye) {
+        metalxr_export_fixture_eye(session, frameEndInfo, exportDirectory, eye);
+    }
+}
+
 static void metalxr_export_projection_view(
     XrSession session,
     const XrFrameEndInfo* frameEndInfo,
@@ -3044,8 +3151,17 @@ static void metalxr_export_projection_frame(
     const XrFrameEndInfo* frameEndInfo,
     const XrCompositionLayerProjection* projectionLayer)
 {
-    if (metalxr_frame_export_dir() == NULL ||
-        projectionLayer == NULL || projectionLayer->views == NULL) {
+    const char* exportDirectory = metalxr_frame_export_dir();
+    if (exportDirectory == NULL) {
+        return;
+    }
+
+    if (strcmp(metalxr_frame_export_mode(), "fixture") == 0) {
+        metalxr_export_fixture_frame(session, frameEndInfo, exportDirectory);
+        return;
+    }
+
+    if (projectionLayer == NULL || projectionLayer->views == NULL) {
         return;
     }
 
@@ -3123,6 +3239,10 @@ static void metalxr_capture_frame_metadata(XrSession session, const XrFrameEndIn
     const int shouldSampleFrame = session->frameIndex <= 5 || (session->frameIndex % 300) == 0;
 
     if (frameEndInfo->layerCount == 0 || frameEndInfo->layers == NULL) {
+        if (shouldSampleFrame) {
+            metalxr_write_frame_metadata(session, frameEndInfo, NULL);
+        }
+        metalxr_export_projection_frame(session, frameEndInfo, NULL);
         return;
     }
 

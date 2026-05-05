@@ -45,6 +45,16 @@ Scripts/install-run-quest-client.sh
 Scripts/run-metalxr-frame-stream.sh
 ```
 
+For the full Unity Play Mode workflow:
+
+```sh
+Scripts/run-metalxr-playmode-workflow.sh
+```
+
+The workflow script installs and launches the Quest client, resets `adb reverse`, launches Unity with `METALXR_FRAME_EXPORT_DIR`, enters Play Mode through uloop when available, waits for exported stereo frame records, starts the host streamer in `unity-export` mode, waits for Quest display logs, and captures a screenshot smoke check.
+
+By default, the workflow uses `METALXR_FRAME_EXPORT_MODE=fixture` to keep the end-to-end device smoke test deterministic with compact payloads. Set `METALXR_FRAME_EXPORT_MODE=readback` when validating CPU readback of Unity-submitted projection textures. Readback defaults to `METALXR_SWAPCHAIN_STORAGE_MODE=shared`; `managed` remains available as a debugging override but currently stops Unity's OpenXR session on Apple Silicon.
+
 `Scripts/run-metalxr-frame-stream.sh` configures `adb reverse` in USB mode and then starts `Runtime/MetalXRHost/build/metalxr_host_streamer`. Useful stream controls are exposed as environment variables:
 
 - `METALXR_STREAM_WIDTH` and `METALXR_STREAM_HEIGHT`
@@ -54,6 +64,7 @@ Scripts/run-metalxr-frame-stream.sh
 - `METALXR_STREAM_QUEUE_DEPTH`
 - `METALXR_FRAME_SOURCE=synthetic|unity-export`
 - `METALXR_FRAME_EXPORT_DIR`
+- `METALXR_SWAPCHAIN_STORAGE_MODE=shared|managed|private`
 - `METALXR_PREDICTION_OFFSET_MS`
 - `METALXR_CLOCK_SYNC_INTERVAL_MS`
 - `METALXR_TRANSPORT=usb|wifi`

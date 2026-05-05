@@ -473,7 +473,8 @@ static int parse_unity_export_record(const char* line, UnityExportRecord* record
 
     if (eye > 1 || width > INT_MAX || height > INT_MAX ||
         bytesPerRow > SIZE_MAX || payloadBytes > SIZE_MAX ||
-        strcmp(record->payloadFormat, "BGRA8") != 0) {
+        (strcmp(record->payloadFormat, "BGRA8") != 0 &&
+         strcmp(record->payloadFormat, "RGBA8") != 0)) {
         return 0;
     }
 
@@ -966,7 +967,9 @@ static int read_file_exact(const char* path, uint8_t* data, size_t size)
 
 static CVPixelBufferRef create_unity_export_pixel_buffer(const UnityExportRecord* record)
 {
-    if (record == NULL || strcmp(record->payloadFormat, "BGRA8") != 0 ||
+    if (record == NULL ||
+        (strcmp(record->payloadFormat, "BGRA8") != 0 &&
+         strcmp(record->payloadFormat, "RGBA8") != 0) ||
         record->width <= 0 || record->height <= 0 ||
         record->bytesPerRow < (size_t)record->width * 4u ||
         record->bytesPerRow > SIZE_MAX / (size_t)record->height ||
@@ -1007,10 +1010,23 @@ static CVPixelBufferRef create_unity_export_pixel_buffer(const UnityExportRecord
     uint8_t* base = (uint8_t*)CVPixelBufferGetBaseAddress(pixelBuffer);
     const size_t destinationBytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
     const size_t copiedRowBytes = (size_t)record->width * 4u;
+    const int sourceIsRgba = strcmp(record->payloadFormat, "RGBA8") == 0;
     for (int y = 0; y < record->height; ++y) {
         const uint8_t* sourceRow = payload + ((size_t)y * record->bytesPerRow);
         uint8_t* destinationRow = base + ((size_t)y * destinationBytesPerRow);
-        memcpy(destinationRow, sourceRow, copiedRowBytes);
+        if (!sourceIsRgba) {
+            memcpy(destinationRow, sourceRow, copiedRowBytes);
+            continue;
+        }
+
+        for (int x = 0; x < record->width; ++x) {
+            const uint8_t* sourcePixel = sourceRow + ((size_t)x * 4u);
+            uint8_t* destinationPixel = destinationRow + ((size_t)x * 4u);
+            destinationPixel[0] = sourcePixel[2];
+            destinationPixel[1] = sourcePixel[1];
+            destinationPixel[2] = sourcePixel[0];
+            destinationPixel[3] = sourcePixel[3];
+        }
     }
 
     CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
