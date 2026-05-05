@@ -6,7 +6,7 @@ This document defines the initial host/client protocol for issue #6.
 
 The initial control transport is a reliable byte stream. The development probe uses `socketpair` for in-process loopback; production should use TCP for Wi-Fi and adb reverse/forward for USB development.
 
-Media transport is intentionally separated from the control channel. H.264 frame metadata is defined now, but payload delivery can move to UDP or a QUIC-like datagram path after the Quest client exists and packet loss behavior can be measured.
+The first media transport reuses the reliable TCP stream after HELLO/HELLO_ACK. H.264 frame metadata is followed by the encoded access-unit bytes in the same `METALXR_PACKET_VIDEO_FRAME` payload. This keeps USB adb reverse and Wi-Fi testing simple; payload delivery can move to UDP or a QUIC-like datagram path after packet loss behavior can be measured.
 
 ## Versioning
 
@@ -65,6 +65,16 @@ Both endpoints can send `METALXR_PACKET_HEARTBEAT` with:
 - `payloadBytes`
 - `flags`
 
+The packet payload layout is:
+
+```text
+MetalXRPacketHeader
+MetalXRVideoFramePayload
+payloadBytes of H.264 Annex B data
+```
+
+`flags & 0x1` marks keyframes. Keyframe packets include SPS/PPS parameter sets before the access unit so the Quest-side decoder can recover after reconnects.
+
 `METALXR_PACKET_TIMING_SAMPLE` separates timing telemetry from media payloads and includes host capture, predicted display, encode start/end, client receive, and client display timestamps. All timing fields are monotonic nanoseconds in the sender's local clock domain unless a later clock-sync packet defines a shared mapping.
 
 Pose, controller, haptic, and log packet structs are declared in the shared header so host and Quest code can agree on binary layout before those subsystems are implemented.
@@ -88,5 +98,5 @@ The probe verifies:
 
 - The loopback uses an in-process socket pair, not adb or Wi-Fi.
 - Packet structs are fixed-layout C structs; cross-language bindings for Quest Android are still needed.
-- Media payload framing is not implemented yet. The current packet only defines metadata.
 - There is no clock synchronization packet yet; timing fields are explicit but remain in local monotonic clock domains.
+- TCP media transport is a development path. Datagram transport, adaptive pacing, and retransmission policy are not defined yet.
