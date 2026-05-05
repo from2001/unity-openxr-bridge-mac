@@ -116,4 +116,4 @@ METALXR_RUNTIME_JSON=/absolute/path/to/runtime.json Scripts/launch-unity-openxr.
 
 ## Next Step
 
-Issue #5 should build on the runtime-owned Metal textures and add a host-side frame capture path suitable for VideoToolbox encoding. The likely implementation options are a Metal blit into staging textures for CPU readback or changing swapchain allocation to IOSurface-backed textures that can be handed to the encoder with lower copy overhead.
+Issue #5 adds a standalone host encoder for synthetic stereo frames. The remaining integration work is connecting runtime-owned Metal textures to that encoder through a Metal blit into VideoToolbox-compatible pixel buffers or by changing swapchain allocation to IOSurface-backed textures that can be handed to the encoder with lower copy overhead.
