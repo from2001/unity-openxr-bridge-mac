@@ -13,6 +13,9 @@ Environment:
   METALXR_RUNTIME_JSON     Full path to an OpenXR runtime JSON manifest.
   METALXR_RUNTIME_LOG      Runtime log path. Defaults to TMPDIR/metalxr_unity_runtime.log.
   METALXR_FRAME_DUMP_DIR   Directory for frame metadata dumps from the MetalXR runtime.
+  METALXR_FRAME_EXPORT_DIR Directory for per-eye frame export records and payloads.
+  METALXR_FRAME_EXPORT_MODE
+                           Frame export mode: readback or fixture. Defaults to readback.
   METALXR_VIEW_WIDTH       Runtime eye width. Defaults to runtime fallback.
   METALXR_VIEW_HEIGHT      Runtime eye height. Defaults to runtime fallback.
   METALXR_REFRESH_RATE     Runtime refresh rate in Hz. Defaults to runtime fallback.
@@ -97,9 +100,15 @@ metalxr_tracking_state_path="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_trackin
 metalxr_haptic_command_path="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}"
 metalxr_timing_state_path="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}"
 mkdir -p "$metalxr_frame_dump_dir"
+if [[ -n "${METALXR_FRAME_EXPORT_DIR:-}" ]]; then
+  mkdir -p "$METALXR_FRAME_EXPORT_DIR"
+fi
 
 echo "MetalXR runtime log: $metalxr_runtime_log"
 echo "MetalXR frame dumps: $metalxr_frame_dump_dir"
+if [[ -n "${METALXR_FRAME_EXPORT_DIR:-}" ]]; then
+  echo "MetalXR frame exports: $METALXR_FRAME_EXPORT_DIR"
+fi
 echo "MetalXR tracking state: $metalxr_tracking_state_path"
 echo "MetalXR haptic commands: $metalxr_haptic_command_path"
 echo "MetalXR timing state: $metalxr_timing_state_path"

@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +45,8 @@ enum {
 enum {
     kMetalTextureType2D = 2,
     kMetalTextureType2DArray = 3,
+    kMetalStorageModeShared = 0,
+    kMetalStorageModeManaged = 1,
     kMetalStorageModePrivate = 2,
     kMetalTextureUsageShaderRead = 0x0001,
     kMetalTextureUsageShaderWrite = 0x0002,
@@ -136,6 +139,7 @@ struct XrSwapchain_T {
     uint32_t arraySize;
     uint32_t mipCount;
     uint32_t sampleCount;
+    uint64_t storageMode;
     void* textures[kSwapchainImageCount];
     uint32_t imageCount;
     uint32_t acquiredImageIndex;
@@ -149,6 +153,15 @@ typedef void* MetalXrObjcId;
 typedef void* MetalXrObjcClass;
 typedef void* MetalXrSel;
 
+typedef struct MetalXrRegion {
+    uint64_t originX;
+    uint64_t originY;
+    uint64_t originZ;
+    uint64_t width;
+    uint64_t height;
+    uint64_t depth;
+} MetalXrRegion;
+
 typedef MetalXrObjcClass (*PFN_objc_getClass)(const char* name);
 typedef MetalXrSel (*PFN_sel_registerName)(const char* name);
 
@@ -158,7 +171,18 @@ typedef MetalXrObjcId (*PFN_objc_msgSend_id_id)(
     MetalXrSel selector,
     MetalXrObjcId value);
 typedef void (*PFN_objc_msgSend_void)(MetalXrObjcId receiver, MetalXrSel selector);
+typedef void (*PFN_objc_msgSend_void_id)(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    MetalXrObjcId value);
 typedef void (*PFN_objc_msgSend_void_uint)(MetalXrObjcId receiver, MetalXrSel selector, uint64_t value);
+typedef void (*PFN_objc_msgSend_get_bytes)(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    void* bytes,
+    uint64_t bytesPerRow,
+    MetalXrRegion region,
+    uint64_t mipmapLevel);
 
 typedef struct MetalXrObjcBridge {
     void* library;
@@ -910,6 +934,27 @@ static uint64_t metalxr_metal_texture_usage(XrSwapchainUsageFlags usageFlags)
     return metalUsage != 0 ? metalUsage : kMetalTextureUsageRenderTarget;
 }
 
+static uint64_t metalxr_swapchain_storage_mode(void)
+{
+    const char* configured = getenv("METALXR_SWAPCHAIN_STORAGE_MODE");
+    if (configured != NULL && configured[0] != '\0') {
+        if (strcmp(configured, "shared") == 0) {
+            return kMetalStorageModeShared;
+        }
+        if (strcmp(configured, "managed") == 0) {
+            return kMetalStorageModeManaged;
+        }
+        if (strcmp(configured, "private") == 0) {
+            return kMetalStorageModePrivate;
+        }
+        metalxr_log("unknown METALXR_SWAPCHAIN_STORAGE_MODE=%s, using default", configured);
+    }
+
+    return metalxr_has_env("METALXR_FRAME_EXPORT_DIR") ?
+        kMetalStorageModeManaged :
+        kMetalStorageModePrivate;
+}
+
 static MetalXrObjcBridge* metalxr_objc_bridge(void)
 {
     if (g_objcBridge.loaded) {
@@ -978,6 +1023,20 @@ static void metalxr_objc_send_void(MetalXrObjcId receiver, MetalXrSel selector)
     send(receiver, selector);
 }
 
+static void metalxr_objc_send_void_id(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    MetalXrObjcId value)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || receiver == NULL || selector == NULL) {
+        return;
+    }
+
+    PFN_objc_msgSend_void_id send = (PFN_objc_msgSend_void_id)bridge->objc_msgSend;
+    send(receiver, selector, value);
+}
+
 static void metalxr_objc_send_void_uint(MetalXrObjcId receiver, MetalXrSel selector, uint64_t value)
 {
     MetalXrObjcBridge* bridge = metalxr_objc_bridge();
@@ -987,6 +1046,23 @@ static void metalxr_objc_send_void_uint(MetalXrObjcId receiver, MetalXrSel selec
 
     PFN_objc_msgSend_void_uint send = (PFN_objc_msgSend_void_uint)bridge->objc_msgSend;
     send(receiver, selector, value);
+}
+
+static void metalxr_objc_get_texture_bytes(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    void* bytes,
+    uint64_t bytesPerRow,
+    MetalXrRegion region,
+    uint64_t mipmapLevel)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || receiver == NULL || selector == NULL || bytes == NULL) {
+        return;
+    }
+
+    PFN_objc_msgSend_get_bytes send = (PFN_objc_msgSend_get_bytes)bridge->objc_msgSend;
+    send(receiver, selector, bytes, bytesPerRow, region, mipmapLevel);
 }
 
 static void* metalxr_retain_objc(void* object)
@@ -1026,7 +1102,8 @@ static void* metalxr_create_metal_texture(
     uint32_t height,
     uint32_t arraySize,
     uint32_t mipCount,
-    XrSwapchainUsageFlags usageFlags)
+    XrSwapchainUsageFlags usageFlags,
+    uint64_t storageMode)
 {
     MetalXrObjcBridge* bridge = metalxr_objc_bridge();
     if (bridge == NULL || metalDevice == NULL) {
@@ -1057,8 +1134,7 @@ static void* metalxr_create_metal_texture(
     metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setArrayLength:"), arraySize);
     metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setUsage:"),
                                 metalxr_metal_texture_usage(usageFlags));
-    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setStorageMode:"),
-                                kMetalStorageModePrivate);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setStorageMode:"), storageMode);
 
     MetalXrObjcId texture = metalxr_objc_send_id_id(
         (MetalXrObjcId)metalDevice,
@@ -2321,6 +2397,7 @@ static XrResult XRAPI_CALL metalxr_xrCreateSwapchain(
     created->arraySize = createInfo->arraySize;
     created->mipCount = createInfo->mipCount;
     created->sampleCount = createInfo->sampleCount;
+    created->storageMode = metalxr_swapchain_storage_mode();
     created->imageCount = kSwapchainImageCount;
 
     for (uint32_t i = 0; i < created->imageCount; ++i) {
@@ -2331,7 +2408,8 @@ static XrResult XRAPI_CALL metalxr_xrCreateSwapchain(
             createInfo->height,
             createInfo->arraySize,
             createInfo->mipCount,
-            createInfo->usageFlags);
+            createInfo->usageFlags,
+            created->storageMode);
         if (created->textures[i] == NULL) {
             metalxr_log("xrCreateSwapchain failed: Metal texture allocation failed");
             metalxr_release_swapchain(created);
@@ -2343,14 +2421,15 @@ static XrResult XRAPI_CALL metalxr_xrCreateSwapchain(
     *swapchain = created;
 
     metalxr_log("swapchain %" PRIu64 " created format=%" PRId64
-                " %ux%u array=%u images=%u usage=0x%llx",
+                " %ux%u array=%u images=%u usage=0x%llx storage=%llu",
                 created->id,
                 created->format,
                 created->width,
                 created->height,
                 created->arraySize,
                 created->imageCount,
-                (unsigned long long)created->usageFlags);
+                (unsigned long long)created->usageFlags,
+                (unsigned long long)created->storageMode);
 
     return XR_SUCCESS;
 }
@@ -2559,6 +2638,422 @@ static XrResult XRAPI_CALL metalxr_xrBeginFrame(
     return XR_SUCCESS;
 }
 
+static const char* metalxr_frame_export_dir(void)
+{
+    const char* exportDirectory = getenv("METALXR_FRAME_EXPORT_DIR");
+    return exportDirectory != NULL && exportDirectory[0] != '\0' ? exportDirectory : NULL;
+}
+
+static const char* metalxr_frame_export_mode(void)
+{
+    const char* mode = getenv("METALXR_FRAME_EXPORT_MODE");
+    return mode != NULL && mode[0] != '\0' ? mode : "readback";
+}
+
+static size_t metalxr_pixel_format_bytes_per_pixel(int64_t format)
+{
+    switch (format) {
+        case kMetalPixelFormatBGRA8Unorm:
+        case kMetalPixelFormatBGRA8UnormSrgb:
+        case kMetalPixelFormatRGBA8Unorm:
+        case kMetalPixelFormatRGBA8UnormSrgb:
+        case kMetalPixelFormatRGB10A2Unorm:
+            return 4;
+        case kMetalPixelFormatRGBA16Float:
+            return 8;
+        default:
+            return 0;
+    }
+}
+
+static const char* metalxr_payload_format_name(int64_t format)
+{
+    switch (format) {
+        case kMetalPixelFormatBGRA8Unorm:
+        case kMetalPixelFormatBGRA8UnormSrgb:
+            return "BGRA8";
+        case kMetalPixelFormatRGBA8Unorm:
+        case kMetalPixelFormatRGBA8UnormSrgb:
+            return "RGBA8";
+        case kMetalPixelFormatRGB10A2Unorm:
+            return "RGB10A2";
+        case kMetalPixelFormatRGBA16Float:
+            return "RGBA16F";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static int metalxr_export_rect(
+    XrSwapchain swapchain,
+    const XrRect2Di* sourceRect,
+    uint32_t* x,
+    uint32_t* y,
+    uint32_t* width,
+    uint32_t* height)
+{
+    if (!metalxr_is_swapchain(swapchain) || x == NULL || y == NULL ||
+        width == NULL || height == NULL) {
+        return 0;
+    }
+
+    int32_t rectX = sourceRect != NULL ? sourceRect->offset.x : 0;
+    int32_t rectY = sourceRect != NULL ? sourceRect->offset.y : 0;
+    int32_t rectWidth = sourceRect != NULL ? sourceRect->extent.width : (int32_t)swapchain->width;
+    int32_t rectHeight = sourceRect != NULL ? sourceRect->extent.height : (int32_t)swapchain->height;
+
+    if (rectX < 0) {
+        rectWidth += rectX;
+        rectX = 0;
+    }
+    if (rectY < 0) {
+        rectHeight += rectY;
+        rectY = 0;
+    }
+    if (rectWidth <= 0) {
+        rectWidth = (int32_t)swapchain->width;
+    }
+    if (rectHeight <= 0) {
+        rectHeight = (int32_t)swapchain->height;
+    }
+    if ((uint32_t)rectX >= swapchain->width || (uint32_t)rectY >= swapchain->height) {
+        return 0;
+    }
+    if ((uint32_t)rectWidth > swapchain->width - (uint32_t)rectX) {
+        rectWidth = (int32_t)(swapchain->width - (uint32_t)rectX);
+    }
+    if ((uint32_t)rectHeight > swapchain->height - (uint32_t)rectY) {
+        rectHeight = (int32_t)(swapchain->height - (uint32_t)rectY);
+    }
+    if (rectWidth <= 0 || rectHeight <= 0) {
+        return 0;
+    }
+
+    *x = (uint32_t)rectX;
+    *y = (uint32_t)rectY;
+    *width = (uint32_t)rectWidth;
+    *height = (uint32_t)rectHeight;
+    return 1;
+}
+
+static void metalxr_write_fixture_pixels(
+    uint8_t* bytes,
+    uint32_t width,
+    uint32_t height,
+    size_t bytesPerRow,
+    size_t bytesPerPixel,
+    uint64_t frameIndex,
+    uint32_t eye)
+{
+    if (bytes == NULL || bytesPerPixel == 0) {
+        return;
+    }
+
+    for (uint32_t y = 0; y < height; ++y) {
+        uint8_t* row = bytes + ((size_t)y * bytesPerRow);
+        for (uint32_t x = 0; x < width; ++x) {
+            uint8_t* pixel = row + ((size_t)x * bytesPerPixel);
+            const uint8_t base = (uint8_t)((frameIndex * 3u + eye * 80u) & 0xffu);
+            pixel[0] = (uint8_t)((base + x) & 0xffu);
+            if (bytesPerPixel > 1) {
+                pixel[1] = (uint8_t)((base + y * 2u) & 0xffu);
+            }
+            if (bytesPerPixel > 2) {
+                pixel[2] = (uint8_t)(eye == 0 ? 0x40u : 0xc0u);
+            }
+            if (bytesPerPixel > 3) {
+                pixel[3] = 0xffu;
+            }
+            for (size_t byteIndex = 4; byteIndex < bytesPerPixel; ++byteIndex) {
+                pixel[byteIndex] = (uint8_t)(base + byteIndex);
+            }
+        }
+    }
+}
+
+static void metalxr_synchronize_texture_for_cpu(XrSession session, void* texture)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || !metalxr_is_session(session) ||
+        session->metalCommandQueue == NULL || texture == NULL) {
+        return;
+    }
+
+    MetalXrObjcId commandBuffer = metalxr_objc_send_id(
+        (MetalXrObjcId)session->metalCommandQueue,
+        metalxr_sel(bridge, "commandBuffer"));
+    MetalXrObjcId blitEncoder = metalxr_objc_send_id(
+        commandBuffer,
+        metalxr_sel(bridge, "blitCommandEncoder"));
+    if (blitEncoder != NULL) {
+        metalxr_objc_send_void_id(blitEncoder,
+                                  metalxr_sel(bridge, "synchronizeResource:"),
+                                  (MetalXrObjcId)texture);
+        metalxr_objc_send_void(blitEncoder, metalxr_sel(bridge, "endEncoding"));
+    }
+    if (commandBuffer != NULL) {
+        metalxr_objc_send_void(commandBuffer, metalxr_sel(bridge, "commit"));
+        metalxr_objc_send_void(commandBuffer, metalxr_sel(bridge, "waitUntilCompleted"));
+    }
+}
+
+static int metalxr_read_texture_payload(
+    XrSession session,
+    XrSwapchain swapchain,
+    uint32_t imageIndex,
+    uint32_t arrayIndex,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height,
+    size_t bytesPerRow,
+    uint8_t* bytes)
+{
+    if (!metalxr_is_session(session) || !metalxr_is_swapchain(swapchain) ||
+        imageIndex >= swapchain->imageCount || bytes == NULL) {
+        return 0;
+    }
+
+    void* texture = swapchain->textures[imageIndex];
+    if (texture == NULL) {
+        return 0;
+    }
+
+    metalxr_synchronize_texture_for_cpu(session, texture);
+
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL) {
+        return 0;
+    }
+
+    MetalXrRegion region = {
+        x,
+        y,
+        arrayIndex,
+        width,
+        height,
+        1
+    };
+    metalxr_objc_get_texture_bytes((MetalXrObjcId)texture,
+                                   metalxr_sel(bridge, "getBytes:bytesPerRow:fromRegion:mipmapLevel:"),
+                                   bytes,
+                                   (uint64_t)bytesPerRow,
+                                   region,
+                                   0);
+    return 1;
+}
+
+static int metalxr_write_binary_file(const char* path, const uint8_t* bytes, size_t byteCount)
+{
+    char tempPath[1024];
+    snprintf(tempPath, sizeof(tempPath), "%s.tmp", path);
+
+    FILE* output = fopen(tempPath, "wb");
+    if (output == NULL) {
+        return 0;
+    }
+
+    const size_t written = fwrite(bytes, 1, byteCount, output);
+    fclose(output);
+    if (written != byteCount) {
+        (void)remove(tempPath);
+        return 0;
+    }
+
+    if (rename(tempPath, path) != 0) {
+        (void)remove(tempPath);
+        return 0;
+    }
+
+    return 1;
+}
+
+static void metalxr_append_frame_export_record(const char* exportDirectory, const char* record)
+{
+    char indexPath[1024];
+    snprintf(indexPath, sizeof(indexPath), "%s/frames.jsonl", exportDirectory);
+
+    FILE* output = fopen(indexPath, "a");
+    if (output == NULL) {
+        metalxr_log("frame export index append failed: %s", indexPath);
+        return;
+    }
+
+    fprintf(output, "%s\n", record);
+    fclose(output);
+}
+
+static void metalxr_export_projection_view(
+    XrSession session,
+    const XrFrameEndInfo* frameEndInfo,
+    const XrCompositionLayerProjectionView* view,
+    uint32_t eye)
+{
+    const char* exportDirectory = metalxr_frame_export_dir();
+    if (exportDirectory == NULL || !metalxr_is_session(session) ||
+        frameEndInfo == NULL || view == NULL) {
+        return;
+    }
+
+    XrSwapchain swapchain = view->subImage.swapchain;
+    if (!metalxr_is_swapchain(swapchain)) {
+        return;
+    }
+
+    const size_t bytesPerPixel = metalxr_pixel_format_bytes_per_pixel(swapchain->format);
+    if (bytesPerPixel == 0) {
+        metalxr_log("frame export skipped unsupported pixel format=%" PRId64, swapchain->format);
+        return;
+    }
+
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    if (!metalxr_export_rect(swapchain, &view->subImage.imageRect, &x, &y, &width, &height)) {
+        metalxr_log("frame export skipped invalid rect eye=%u", eye);
+        return;
+    }
+
+    if (width > SIZE_MAX / bytesPerPixel || height > SIZE_MAX / (width * bytesPerPixel)) {
+        metalxr_log("frame export skipped oversized payload eye=%u size=%ux%u", eye, width, height);
+        return;
+    }
+
+    const size_t bytesPerRow = (size_t)width * bytesPerPixel;
+    const size_t payloadBytes = bytesPerRow * (size_t)height;
+    uint8_t* payload = (uint8_t*)calloc(1, payloadBytes);
+    if (payload == NULL) {
+        metalxr_log("frame export allocation failed eye=%u bytes=%zu", eye, payloadBytes);
+        return;
+    }
+
+    const char* mode = metalxr_frame_export_mode();
+    int payloadReady = 0;
+    if (strcmp(mode, "fixture") == 0) {
+        metalxr_write_fixture_pixels(payload,
+                                     width,
+                                     height,
+                                     bytesPerRow,
+                                     bytesPerPixel,
+                                     session->frameIndex,
+                                     eye);
+        payloadReady = 1;
+    } else {
+        payloadReady = metalxr_read_texture_payload(session,
+                                                    swapchain,
+                                                    swapchain->acquiredImageIndex,
+                                                    view->subImage.imageArrayIndex,
+                                                    x,
+                                                    y,
+                                                    width,
+                                                    height,
+                                                    bytesPerRow,
+                                                    payload);
+    }
+
+    if (!payloadReady) {
+        free(payload);
+        metalxr_log("frame export readback failed eye=%u mode=%s", eye, mode);
+        return;
+    }
+
+    const char* extension =
+        strcmp(metalxr_payload_format_name(swapchain->format), "BGRA8") == 0 ? "bgra" : "raw";
+    char payloadPath[1024];
+    snprintf(payloadPath,
+             sizeof(payloadPath),
+             "%s/frame_%06" PRIu64 "_eye_%u.%s",
+             exportDirectory,
+             session->frameIndex,
+             eye,
+             extension);
+
+    if (!metalxr_write_binary_file(payloadPath, payload, payloadBytes)) {
+        free(payload);
+        metalxr_log("frame export payload write failed: %s", payloadPath);
+        return;
+    }
+
+    free(payload);
+
+    char recordPath[1024];
+    snprintf(recordPath,
+             sizeof(recordPath),
+             "%s/frame_%06" PRIu64 "_eye_%u.json",
+             exportDirectory,
+             session->frameIndex,
+             eye);
+
+    char record[4096];
+    snprintf(record,
+             sizeof(record),
+             "{\"event\":\"frame_export\",\"frame\":%" PRIu64 ",\"eye\":%u,"
+             "\"displayTime\":%" PRId64 ",\"swapchain\":%" PRIu64 ",\"imageIndex\":%u,"
+             "\"texture\":\"%p\",\"pixelFormat\":%" PRId64 ",\"payloadFormat\":\"%s\","
+             "\"width\":%u,\"height\":%u,\"bytesPerRow\":%zu,\"payloadBytes\":%zu,"
+             "\"sourceRect\":{\"x\":%u,\"y\":%u,\"width\":%u,\"height\":%u},"
+             "\"arrayIndex\":%u,\"storageMode\":%llu,\"mode\":\"%s\",\"payloadPath\":\"%s\"}",
+             session->frameIndex,
+             eye,
+             frameEndInfo->displayTime,
+             swapchain->id,
+             swapchain->acquiredImageIndex,
+             swapchain->acquiredImageIndex < swapchain->imageCount ?
+                 swapchain->textures[swapchain->acquiredImageIndex] :
+                 NULL,
+             swapchain->format,
+             metalxr_payload_format_name(swapchain->format),
+             width,
+             height,
+             bytesPerRow,
+             payloadBytes,
+             x,
+             y,
+             width,
+             height,
+             view->subImage.imageArrayIndex,
+             (unsigned long long)swapchain->storageMode,
+             mode,
+             payloadPath);
+
+    char tempRecordPath[1024];
+    snprintf(tempRecordPath, sizeof(tempRecordPath), "%s.tmp", recordPath);
+    FILE* recordOutput = fopen(tempRecordPath, "w");
+    if (recordOutput == NULL) {
+        metalxr_log("frame export record write failed: %s", recordPath);
+        return;
+    }
+    fprintf(recordOutput, "%s\n", record);
+    fclose(recordOutput);
+    if (rename(tempRecordPath, recordPath) != 0) {
+        (void)remove(tempRecordPath);
+        metalxr_log("frame export record rename failed: %s", recordPath);
+        return;
+    }
+
+    metalxr_append_frame_export_record(exportDirectory, record);
+    metalxr_log("frame export wrote frame=%" PRIu64 " eye=%u payload=%s",
+                session->frameIndex,
+                eye,
+                payloadPath);
+}
+
+static void metalxr_export_projection_frame(
+    XrSession session,
+    const XrFrameEndInfo* frameEndInfo,
+    const XrCompositionLayerProjection* projectionLayer)
+{
+    if (metalxr_frame_export_dir() == NULL ||
+        projectionLayer == NULL || projectionLayer->views == NULL) {
+        return;
+    }
+
+    for (uint32_t viewIndex = 0; viewIndex < projectionLayer->viewCount; ++viewIndex) {
+        metalxr_export_projection_view(session, frameEndInfo, &projectionLayer->views[viewIndex], viewIndex);
+    }
+}
+
 static void metalxr_write_frame_metadata(
     XrSession session,
     const XrFrameEndInfo* frameEndInfo,
@@ -2603,6 +3098,9 @@ static void metalxr_write_frame_metadata(
             fprintf(output, "view[%u].imageIndex=%u\n", viewIndex, imageIndex);
             fprintf(output, "view[%u].texture=%p\n", viewIndex, texture);
             fprintf(output, "view[%u].format=%" PRId64 "\n", viewIndex, swapchain->format);
+            fprintf(output, "view[%u].storageMode=%llu\n",
+                    viewIndex,
+                    (unsigned long long)swapchain->storageMode);
             fprintf(output, "view[%u].size=%ux%u\n", viewIndex, swapchain->width, swapchain->height);
             fprintf(output, "view[%u].arrayIndex=%u\n", viewIndex, view->subImage.imageArrayIndex);
             fprintf(output,
@@ -2687,6 +3185,7 @@ static void metalxr_capture_frame_metadata(XrSession session, const XrFrameEndIn
     if (shouldSampleFrame) {
         metalxr_write_frame_metadata(session, frameEndInfo, firstProjectionLayer);
     }
+    metalxr_export_projection_frame(session, frameEndInfo, firstProjectionLayer);
 }
 
 static XrResult XRAPI_CALL metalxr_xrEndFrame(

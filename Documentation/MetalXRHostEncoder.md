@@ -75,9 +75,10 @@ The streamer also emits `clock_sync` and `latency` JSON records. Latency records
 - The input is synthetic `CVPixelBuffer` data, not a Unity-rendered Metal texture.
 - The encoder uses one H.264 session per eye. A future transport can either keep separate eye streams or add a stereo packing step.
 - There is no HEVC path yet.
-- There is no GPU synchronization, Metal blit, IOSurface export, or CPU readback from the OpenXR swapchain yet.
+- Runtime frame export can now write development BGRA/raw payload files, but the host encoder does not consume them yet.
+- There is no production GPU synchronization, IOSurface export, or direct VideoToolbox handoff from the OpenXR swapchain yet.
 - The stream path is TCP-only for now. USB adb reverse and Wi-Fi are both usable for evaluation, but adaptive bitrate, packet loss handling, and production-grade clock sync are still future work.
 
 ## Next Step
 
-The runtime and host streamer can be joined by adding a frame-source abstraction that accepts runtime-owned Metal textures through an IOSurface-backed path or a Metal blit into VideoToolbox-compatible pixel buffers.
+The runtime and host streamer can be joined by adding a frame-source abstraction that consumes the runtime frame export records first, then replacing that file-based bridge with an IOSurface-backed path or a Metal blit into VideoToolbox-compatible pixel buffers.

@@ -13,6 +13,7 @@ Working:
 - Use Meta XR Simulator as the default macOS OpenXR runtime when it is installed at `/Applications/MetaXRSimulator.app`.
 - Build and probe a native MetalXR OpenXR runtime that can create an instance, report a dummy stereo HMD system, create a session, emit lifecycle events, create reference spaces, and run a deterministic frame loop.
 - Create runtime-owned Metal swapchain textures for Unity OpenXR Play Mode, accept stereo projection layers, and dump per-frame metadata proving which textures were submitted.
+- Export submitted projection views as per-eye frame records with host-readable BGRA/raw payload files when `METALXR_FRAME_EXPORT_DIR` is set.
 - Build and probe a macOS VideoToolbox host encoder that converts synthetic stereo frames into H.264 elementary streams with per-frame latency/drop metadata.
 - Build and probe shared host/client protocol packet definitions with loopback handshake, heartbeat, and version-mismatch handling.
 - Build a Quest/Android Unity OpenXR client shell that displays generated stereo diagnostic frames in-headset and attempts the shared HELLO handshake over an adb-reversed host endpoint.
@@ -22,7 +23,7 @@ Working:
 
 Not implemented yet:
 
-- CPU pixel readback, IOSurface export, or VideoToolbox encoding of Unity-submitted Metal textures.
+- Production IOSurface export or VideoToolbox encoding of Unity-submitted Metal textures.
 - A production Quest PCVR transport layer for audio, loss recovery, adaptive timing, and low-latency datagrams.
 - Production-grade OpenXR action binding/profile coverage, true separate aim/grip poses on every device path, and predictive input timing.
 - Encoding of real Unity-submitted Metal frames instead of the current synthetic host stream.
@@ -119,6 +120,8 @@ When the MetalXR runtime is selected, the script also sets:
 
 - `METALXR_RUNTIME_LOG` for runtime lifecycle and swapchain logs.
 - `METALXR_FRAME_DUMP_DIR` for per-frame metadata files written from `xrEndFrame`.
+- `METALXR_FRAME_EXPORT_DIR` for per-eye frame export records and payload files written from submitted projection views.
+- `METALXR_FRAME_EXPORT_MODE=readback|fixture` for CPU readback or deterministic probe payloads.
 - `METALXR_TRACKING_STATE_PATH` for HMD/controller state consumed by view and action APIs.
 - `METALXR_HAPTIC_COMMAND_PATH` for haptic commands emitted by `xrApplyHapticFeedback`.
 - `METALXR_TIMING_STATE_PATH` for measured Quest timing consumed by `xrWaitFrame`.
