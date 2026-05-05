@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the native MetalXR OpenXR runtime skeleton.
+# Build the native MetalXR OpenXR runtime.
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 runtime_dir="$repo_root/Runtime/MetalXRRuntime"
@@ -12,7 +12,7 @@ if command -v cmake >/dev/null 2>&1; then
   cmake --build "$build_dir" --config "${CMAKE_BUILD_TYPE:-Debug}"
 else
   if ! command -v clang >/dev/null 2>&1; then
-    echo "cmake or clang is required to build the MetalXR runtime skeleton." >&2
+    echo "cmake or clang is required to build the MetalXR runtime." >&2
     exit 1
   fi
 
