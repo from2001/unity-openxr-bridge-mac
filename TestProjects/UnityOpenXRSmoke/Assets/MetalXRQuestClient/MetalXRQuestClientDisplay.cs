@@ -554,7 +554,7 @@ namespace MetalXR.QuestClient
 
             for (int y = 0; y < TextureHeight; y++)
             {
-                int sourceY = (y * sourceHeight) / TextureHeight;
+                int sourceY = sourceHeight - 1 - ((y * sourceHeight) / TextureHeight);
                 int sourceRow = sourceY * strideBytes;
                 for (int x = 0; x < TextureWidth; x++)
                 {
