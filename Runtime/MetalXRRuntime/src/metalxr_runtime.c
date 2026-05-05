@@ -3062,7 +3062,7 @@ static void metalxr_export_fixture_eye(
              session->frameIndex,
              eye);
 
-    char record[4096];
+    char record[8192];
     snprintf(record,
              sizeof(record),
              "{\"event\":\"frame_export\",\"frame\":%" PRIu64 ",\"eye\":%u,"
@@ -3070,6 +3070,12 @@ static void metalxr_export_fixture_eye(
              "\"texture\":\"%p\",\"pixelFormat\":80,\"payloadFormat\":\"BGRA8\","
              "\"width\":%u,\"height\":%u,\"bytesPerRow\":%zu,\"payloadBytes\":%zu,"
              "\"sourceRect\":{\"x\":0,\"y\":0,\"width\":%u,\"height\":%u},"
+             "\"imageRectX\":0,\"imageRectY\":0,\"imageRectWidth\":%u,\"imageRectHeight\":%u,"
+             "\"imageArrayIndex\":0,\"projectionFlags\":0,\"referenceSpaceId\":0,"
+             "\"posePositionX\":0,\"posePositionY\":0,\"posePositionZ\":0,"
+             "\"poseOrientationX\":0,\"poseOrientationY\":0,\"poseOrientationZ\":0,\"poseOrientationW\":1,"
+             "\"fovAngleLeft\":-0.7853982,\"fovAngleRight\":0.7853982,"
+             "\"fovAngleUp\":0.7853982,\"fovAngleDown\":-0.7853982,"
              "\"arrayIndex\":0,\"storageMode\":0,\"mode\":\"fixture\",\"payloadPath\":\"%s\"}",
              session->frameIndex,
              eye,
@@ -3079,6 +3085,8 @@ static void metalxr_export_fixture_eye(
              height,
              bytesPerRow,
              payloadBytes,
+             width,
+             height,
              width,
              height,
              payloadPath);
@@ -3122,6 +3130,7 @@ static void metalxr_export_fixture_frame(
 static void metalxr_export_projection_view(
     XrSession session,
     const XrFrameEndInfo* frameEndInfo,
+    XrSpace referenceSpace,
     const XrCompositionLayerProjectionView* view,
     uint32_t eye)
 {
@@ -3221,7 +3230,7 @@ static void metalxr_export_projection_view(
              session->frameIndex,
              eye);
 
-    char record[4096];
+    char record[8192];
     snprintf(record,
              sizeof(record),
              "{\"event\":\"frame_export\",\"frame\":%" PRIu64 ",\"eye\":%u,"
@@ -3229,6 +3238,13 @@ static void metalxr_export_projection_view(
              "\"texture\":\"%p\",\"pixelFormat\":%" PRId64 ",\"payloadFormat\":\"%s\","
              "\"width\":%u,\"height\":%u,\"bytesPerRow\":%zu,\"payloadBytes\":%zu,"
              "\"sourceRect\":{\"x\":%u,\"y\":%u,\"width\":%u,\"height\":%u},"
+             "\"imageRectX\":%u,\"imageRectY\":%u,\"imageRectWidth\":%u,\"imageRectHeight\":%u,"
+             "\"imageArrayIndex\":%u,\"projectionFlags\":1,\"referenceSpaceId\":%" PRIu64 ","
+             "\"posePositionX\":%.9g,\"posePositionY\":%.9g,\"posePositionZ\":%.9g,"
+             "\"poseOrientationX\":%.9g,\"poseOrientationY\":%.9g,"
+             "\"poseOrientationZ\":%.9g,\"poseOrientationW\":%.9g,"
+             "\"fovAngleLeft\":%.9g,\"fovAngleRight\":%.9g,"
+             "\"fovAngleUp\":%.9g,\"fovAngleDown\":%.9g,"
              "\"arrayIndex\":%u,\"storageMode\":%llu,\"mode\":\"%s\",\"payloadPath\":\"%s\"}",
              session->frameIndex,
              eye,
@@ -3248,6 +3264,23 @@ static void metalxr_export_projection_view(
              y,
              width,
              height,
+             x,
+             y,
+             width,
+             height,
+             view->subImage.imageArrayIndex,
+             (uint64_t)(uintptr_t)referenceSpace,
+             view->pose.position.x,
+             view->pose.position.y,
+             view->pose.position.z,
+             view->pose.orientation.x,
+             view->pose.orientation.y,
+             view->pose.orientation.z,
+             view->pose.orientation.w,
+             view->fov.angleLeft,
+             view->fov.angleRight,
+             view->fov.angleUp,
+             view->fov.angleDown,
              view->subImage.imageArrayIndex,
              (unsigned long long)swapchain->storageMode,
              mode,
@@ -3295,7 +3328,12 @@ static void metalxr_export_projection_frame(
     }
 
     for (uint32_t viewIndex = 0; viewIndex < projectionLayer->viewCount; ++viewIndex) {
-        metalxr_export_projection_view(session, frameEndInfo, &projectionLayer->views[viewIndex], viewIndex);
+        metalxr_export_projection_view(
+            session,
+            frameEndInfo,
+            projectionLayer->space,
+            &projectionLayer->views[viewIndex],
+            viewIndex);
     }
 }
 

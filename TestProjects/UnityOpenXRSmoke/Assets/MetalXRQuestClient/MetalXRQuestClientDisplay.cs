@@ -54,8 +54,9 @@ namespace MetalXR.QuestClient
             UpdateDiagnosticTexture(false, 0);
 
             MetalXRQuestEndpoint endpoint = MetalXRQuestEndpoint.FromCommandLine();
+            MetalXRQuestDeviceProfile deviceProfile = CreateDeviceProfile();
             _videoDecoder = new MetalXRQuestVideoDecoder(LogClientMessage);
-            _handshakeClient = new MetalXRQuestHandshakeClient(endpoint);
+            _handshakeClient = new MetalXRQuestHandshakeClient(endpoint, deviceProfile);
             _handshakeClient.Start();
 
             Debug.Log(LogPrefix + " started; stream client active with diagnostic fallback; host=" + endpoint.Host + ":" + endpoint.Port);
@@ -99,6 +100,46 @@ namespace MetalXR.QuestClient
             DestroyUnityObject(_leftTexture);
             DestroyUnityObject(_rightTexture);
             DestroyUnityObject(_quadMesh);
+        }
+
+        private static MetalXRQuestDeviceProfile CreateDeviceProfile()
+        {
+            int eyeTextureWidth = XRSettings.eyeTextureWidth;
+            int eyeTextureHeight = XRSettings.eyeTextureHeight;
+            if (eyeTextureWidth <= 0)
+            {
+                eyeTextureWidth = (int)MetalXRQuestDeviceProfile.Default.MaxVideoWidth;
+            }
+            if (eyeTextureHeight <= 0)
+            {
+                eyeTextureHeight = (int)MetalXRQuestDeviceProfile.Default.MaxVideoHeight;
+            }
+
+            float refreshRate = 0.0f;
+            List<XRDisplaySubsystem> displays = new List<XRDisplaySubsystem>();
+            SubsystemManager.GetInstances(displays);
+            for (int i = 0; i < displays.Count; i++)
+            {
+                XRDisplaySubsystem display = displays[i];
+                if (display != null && display.running && display.TryGetDisplayRefreshRate(out refreshRate))
+                {
+                    break;
+                }
+            }
+
+            int preferredFps = refreshRate > 0.0f ?
+                Mathf.RoundToInt(refreshRate) :
+                (int)MetalXRQuestDeviceProfile.Default.PreferredFps;
+
+            string deviceName =
+                string.IsNullOrEmpty(SystemInfo.deviceModel) ?
+                    MetalXRQuestDeviceProfile.Default.DeviceName :
+                    SystemInfo.deviceModel;
+            return new MetalXRQuestDeviceProfile(
+                (uint)Mathf.Max(1, eyeTextureWidth),
+                (uint)Mathf.Max(1, eyeTextureHeight),
+                (uint)Mathf.Max(1, preferredFps),
+                deviceName);
         }
 
         private static void LogClientMessage(string message)
@@ -871,6 +912,16 @@ namespace MetalXR.QuestClient
             PredictedDisplayTimeNs = source.PredictedDisplayTimeNs;
             PacketTimestampNs = source.PacketTimestampNs;
             EncoderLatencyUs = source.EncoderLatencyUs;
+            ImageRectX = source.ImageRectX;
+            ImageRectY = source.ImageRectY;
+            ImageRectWidth = source.ImageRectWidth;
+            ImageRectHeight = source.ImageRectHeight;
+            ImageArrayIndex = source.ImageArrayIndex;
+            ProjectionFlags = source.ProjectionFlags;
+            ReferenceSpaceId = source.ReferenceSpaceId;
+            PosePosition = source.PosePosition;
+            PoseOrientation = source.PoseOrientation;
+            Fov = source.Fov;
             ReceiveTimeNs = source.ReceiveTimeNs;
             EncodedBytes = source.EncodedBytes.Length;
             RgbaBytes = rgbaBytes;
@@ -888,6 +939,16 @@ namespace MetalXR.QuestClient
         public ulong PredictedDisplayTimeNs { get; }
         public ulong PacketTimestampNs { get; }
         public ulong EncoderLatencyUs { get; }
+        public int ImageRectX { get; }
+        public int ImageRectY { get; }
+        public uint ImageRectWidth { get; }
+        public uint ImageRectHeight { get; }
+        public uint ImageArrayIndex { get; }
+        public uint ProjectionFlags { get; }
+        public ulong ReferenceSpaceId { get; }
+        public float[] PosePosition { get; }
+        public float[] PoseOrientation { get; }
+        public float[] Fov { get; }
         public ulong ReceiveTimeNs { get; }
         public ulong DecodeStartTimeNs { get; private set; }
         public ulong DecodeEndTimeNs { get; private set; }

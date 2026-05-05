@@ -25,7 +25,6 @@
 #include <unistd.h>
 
 #define METALXR_DEFAULT_STREAM_PORT 47000
-#define METALXR_VIDEO_FRAME_FLAG_KEYFRAME 0x00000001u
 #define METALXR_MAX_UNITY_EXPORT_PAYLOAD_BYTES (512ull * 1024ull * 1024ull)
 
 typedef enum FrameSourceMode {
@@ -57,8 +56,18 @@ typedef struct UnityExportRecord {
     uint64_t sourceFrameId;
     int eye;
     uint64_t displayTimeNs;
+    uint64_t referenceSpaceId;
     int width;
     int height;
+    int imageRectX;
+    int imageRectY;
+    uint32_t imageRectWidth;
+    uint32_t imageRectHeight;
+    uint32_t imageArrayIndex;
+    uint32_t projectionFlags;
+    float posePosition[3];
+    float poseOrientation[4];
+    float fov[4];
     size_t bytesPerRow;
     size_t payloadBytes;
     char payloadFormat[32];
@@ -180,6 +189,16 @@ typedef struct FrameRefcon {
     int eyeIndex;
     int width;
     int height;
+    int imageRectX;
+    int imageRectY;
+    uint32_t imageRectWidth;
+    uint32_t imageRectHeight;
+    uint32_t imageArrayIndex;
+    uint32_t projectionFlags;
+    uint64_t referenceSpaceId;
+    float posePosition[3];
+    float poseOrientation[4];
+    float fov[4];
     uint64_t captureTimeNs;
     uint64_t predictedDisplayTimeNs;
     uint64_t encodeStartTimeNs;
@@ -422,6 +441,24 @@ static int json_read_i64_field(const char* json, const char* key, int64_t* outpu
     return 1;
 }
 
+static int json_read_float_field(const char* json, const char* key, float* output)
+{
+    const char* value = json_find_value(json, key);
+    if (value == NULL || output == NULL) {
+        return 0;
+    }
+
+    char* end = NULL;
+    errno = 0;
+    const double parsed = strtod(value, &end);
+    if (end == value || errno != 0) {
+        return 0;
+    }
+
+    *output = (float)parsed;
+    return 1;
+}
+
 static int json_read_string_field(const char* json, const char* key, char* output, size_t outputSize)
 {
     const char* value = json_find_value(json, key);
@@ -462,6 +499,13 @@ static int parse_unity_export_record(const char* line, UnityExportRecord* record
     uint64_t height = 0;
     uint64_t bytesPerRow = 0;
     uint64_t payloadBytes = 0;
+    uint64_t imageArrayIndex = 0;
+    uint64_t imageRectWidth = 0;
+    uint64_t imageRectHeight = 0;
+    uint64_t referenceSpaceId = 0;
+    uint64_t projectionFlags = 0;
+    int64_t imageRectX = 0;
+    int64_t imageRectY = 0;
     int64_t displayTime = 0;
 
     if (!json_read_u64_field(line, "\"frame\":", &record->sourceFrameId) ||
@@ -487,6 +531,62 @@ static int parse_unity_export_record(const char* line, UnityExportRecord* record
     record->displayTimeNs = displayTime > 0 ? (uint64_t)displayTime : 0;
     record->width = (int)width;
     record->height = (int)height;
+    record->imageRectX = 0;
+    record->imageRectY = 0;
+    record->imageRectWidth = (uint32_t)record->width;
+    record->imageRectHeight = (uint32_t)record->height;
+    record->imageArrayIndex = 0;
+    record->referenceSpaceId = 0;
+    record->projectionFlags = 0;
+    record->poseOrientation[3] = 1.0f;
+    record->fov[0] = -0.7853982f;
+    record->fov[1] = 0.7853982f;
+    record->fov[2] = 0.7853982f;
+    record->fov[3] = -0.7853982f;
+
+    if (json_read_i64_field(line, "\"imageRectX\":", &imageRectX) &&
+        json_read_i64_field(line, "\"imageRectY\":", &imageRectY) &&
+        json_read_u64_field(line, "\"imageRectWidth\":", &imageRectWidth) &&
+        json_read_u64_field(line, "\"imageRectHeight\":", &imageRectHeight) &&
+        json_read_u64_field(line, "\"imageArrayIndex\":", &imageArrayIndex) &&
+        imageRectX >= INT_MIN &&
+        imageRectX <= INT_MAX &&
+        imageRectY >= INT_MIN &&
+        imageRectY <= INT_MAX &&
+        imageRectWidth <= UINT32_MAX &&
+        imageRectHeight <= UINT32_MAX &&
+        imageArrayIndex <= UINT32_MAX) {
+        record->imageRectX = (int)imageRectX;
+        record->imageRectY = (int)imageRectY;
+        record->imageRectWidth = (uint32_t)imageRectWidth;
+        record->imageRectHeight = (uint32_t)imageRectHeight;
+        record->imageArrayIndex = (uint32_t)imageArrayIndex;
+    }
+
+    if (json_read_u64_field(line, "\"referenceSpaceId\":", &referenceSpaceId)) {
+        record->referenceSpaceId = referenceSpaceId;
+    }
+    if (json_read_u64_field(line, "\"projectionFlags\":", &projectionFlags) &&
+        projectionFlags <= UINT32_MAX) {
+        record->projectionFlags = (uint32_t)projectionFlags;
+    }
+
+    if (json_read_float_field(line, "\"posePositionX\":", &record->posePosition[0]) &&
+        json_read_float_field(line, "\"posePositionY\":", &record->posePosition[1]) &&
+        json_read_float_field(line, "\"posePositionZ\":", &record->posePosition[2]) &&
+        json_read_float_field(line, "\"poseOrientationX\":", &record->poseOrientation[0]) &&
+        json_read_float_field(line, "\"poseOrientationY\":", &record->poseOrientation[1]) &&
+        json_read_float_field(line, "\"poseOrientationZ\":", &record->poseOrientation[2]) &&
+        json_read_float_field(line, "\"poseOrientationW\":", &record->poseOrientation[3]) &&
+        json_read_float_field(line, "\"fovAngleLeft\":", &record->fov[0]) &&
+        json_read_float_field(line, "\"fovAngleRight\":", &record->fov[1]) &&
+        json_read_float_field(line, "\"fovAngleUp\":", &record->fov[2]) &&
+        json_read_float_field(line, "\"fovAngleDown\":", &record->fov[3])) {
+        if (record->projectionFlags == 0 && projectionFlags != 0) {
+            record->projectionFlags = 1;
+        }
+    }
+
     record->bytesPerRow = (size_t)bytesPerRow;
     record->payloadBytes = (size_t)payloadBytes;
     return 1;
@@ -544,7 +644,7 @@ static int poll_unity_export_frame_source(UnityExportFrameSource* source, UnityE
     }
 
     int parsedRecords = 0;
-    char line[4096];
+    char line[8192];
     while (fgets(line, sizeof(line), input) != NULL) {
         UnityExportRecord record;
         if (parse_unity_export_record(line, &record)) {
@@ -793,7 +893,19 @@ static int stream_video_frame(
     metadata.predictedDisplayTimeNs = frame->predictedDisplayTimeNs;
     metadata.encoderLatencyUs = encoderLatencyUs;
     metadata.payloadBytes = (uint32_t)encoded->size;
-    metadata.flags = flags;
+    metadata.flags =
+        flags |
+        (frame->projectionFlags != 0 ? METALXR_VIDEO_FRAME_FLAG_PROJECTION_METADATA : 0u);
+    metadata.imageRectX = frame->imageRectX;
+    metadata.imageRectY = frame->imageRectY;
+    metadata.imageRectWidth = frame->imageRectWidth;
+    metadata.imageRectHeight = frame->imageRectHeight;
+    metadata.imageArrayIndex = frame->imageArrayIndex;
+    metadata.projectionFlags = frame->projectionFlags;
+    metadata.referenceSpaceId = frame->referenceSpaceId;
+    memcpy(metadata.posePosition, frame->posePosition, sizeof(metadata.posePosition));
+    memcpy(metadata.poseOrientation, frame->poseOrientation, sizeof(metadata.poseOrientation));
+    memcpy(metadata.fov, frame->fov, sizeof(metadata.fov));
 
     const uint32_t payloadSize = (uint32_t)(sizeof(metadata) + encoded->size);
     uint8_t* payload = (uint8_t*)malloc(payloadSize);
@@ -1110,7 +1222,8 @@ static int submit_pixel_buffer_frame(
     uint64_t frameId,
     uint64_t captureTimeNs,
     uint64_t predictedDisplayTimeNs,
-    CVPixelBufferRef pixelBuffer)
+    CVPixelBufferRef pixelBuffer,
+    const UnityExportRecord* unityRecord)
 {
     if (!reserve_encoder_queue_slot(context, frameId)) {
         return 1;
@@ -1136,6 +1249,30 @@ static int submit_pixel_buffer_frame(
     frame->eyeIndex = context->eyeIndex;
     frame->width = context->width;
     frame->height = context->height;
+    frame->imageRectX = 0;
+    frame->imageRectY = 0;
+    frame->imageRectWidth = (uint32_t)context->width;
+    frame->imageRectHeight = (uint32_t)context->height;
+    frame->imageArrayIndex = 0;
+    frame->projectionFlags = 0;
+    frame->referenceSpaceId = 0;
+    frame->poseOrientation[3] = 1.0f;
+    frame->fov[0] = -0.7853982f;
+    frame->fov[1] = 0.7853982f;
+    frame->fov[2] = 0.7853982f;
+    frame->fov[3] = -0.7853982f;
+    if (unityRecord != NULL) {
+        frame->imageRectX = unityRecord->imageRectX;
+        frame->imageRectY = unityRecord->imageRectY;
+        frame->imageRectWidth = unityRecord->imageRectWidth;
+        frame->imageRectHeight = unityRecord->imageRectHeight;
+        frame->imageArrayIndex = unityRecord->imageArrayIndex;
+        frame->projectionFlags = unityRecord->projectionFlags;
+        frame->referenceSpaceId = unityRecord->referenceSpaceId;
+        memcpy(frame->posePosition, unityRecord->posePosition, sizeof(frame->posePosition));
+        memcpy(frame->poseOrientation, unityRecord->poseOrientation, sizeof(frame->poseOrientation));
+        memcpy(frame->fov, unityRecord->fov, sizeof(frame->fov));
+    }
     frame->captureTimeNs = captureTimeNs;
     frame->predictedDisplayTimeNs = predictedDisplayTimeNs;
     frame->encodeStartTimeNs = host_time_ns();
@@ -1187,7 +1324,8 @@ static int encode_synthetic_eye_frame(
         frameId,
         captureTimeNs,
         predictedDisplayTimeNs,
-        pixelBuffer);
+        pixelBuffer,
+        NULL);
     CVPixelBufferRelease(pixelBuffer);
     return ok;
 }
@@ -1231,7 +1369,8 @@ static int encode_unity_export_eye_frame(
         frameId,
         captureTimeNs,
         predictedDisplayTimeNs,
-        pixelBuffer);
+        pixelBuffer,
+        record);
     CVPixelBufferRelease(pixelBuffer);
     return ok;
 }

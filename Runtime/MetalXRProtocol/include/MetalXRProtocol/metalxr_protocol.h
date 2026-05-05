@@ -78,6 +78,11 @@ typedef enum MetalXRTimingFlags {
     METALXR_TIMING_FLAG_FRAME_DISPLAY = 0x00000002u
 } MetalXRTimingFlags;
 
+typedef enum MetalXRVideoFrameFlags {
+    METALXR_VIDEO_FRAME_FLAG_KEYFRAME = 0x00000001u,
+    METALXR_VIDEO_FRAME_FLAG_PROJECTION_METADATA = 0x00000002u
+} MetalXRVideoFrameFlags;
+
 typedef enum MetalXRErrorCode {
     METALXR_ERROR_NONE = 0,
     METALXR_ERROR_VERSION_MISMATCH = 1,
@@ -137,6 +142,16 @@ typedef struct MetalXRVideoFramePayload {
     uint64_t encoderLatencyUs;
     uint32_t payloadBytes;
     uint32_t flags;
+    int32_t imageRectX;
+    int32_t imageRectY;
+    uint32_t imageRectWidth;
+    uint32_t imageRectHeight;
+    uint32_t imageArrayIndex;
+    uint32_t projectionFlags;
+    uint64_t referenceSpaceId;
+    float posePosition[3];
+    float poseOrientation[4];
+    float fov[4];
 } MetalXRVideoFramePayload;
 
 typedef struct MetalXRPoseSamplePayload {
