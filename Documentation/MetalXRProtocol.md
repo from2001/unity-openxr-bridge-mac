@@ -82,6 +82,8 @@ payloadBytes of H.264 Annex B data
 
 The host estimates Quest-to-host clock offset from clock sync replies, converts Quest display timestamps into the host clock domain, logs encode/network/decode/compositor/total latency, and writes measured display timing to `METALXR_TIMING_STATE_PATH` for the runtime.
 
+The host streamer accepts a new Quest client after disconnects. Continuous sessions use an unlimited reconnect loop; finite smoke runs can enable bounded retries with `METALXR_STREAM_RECONNECT_ATTEMPTS`. Keyframe packets include decoder parameter sets so the Quest client can recover after reconnect without relying on earlier stream state.
+
 ## Pose, Controller, And Haptic Packets
 
 `METALXR_PACKET_POSE_SAMPLE` carries one Quest HMD sample:

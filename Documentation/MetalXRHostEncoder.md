@@ -48,7 +48,7 @@ The stream probe exercises the TCP transport path:
 Scripts/probe-metalxr-frame-stream.sh
 ```
 
-It starts `metalxr_host_streamer` twice, once with the synthetic frame source and once with a generated Unity-export fixture. Each run performs the Quest HELLO/HELLO_ACK exchange, responds to timing sync probes, receives finite `METALXR_PACKET_VIDEO_FRAME` packets, verifies left/right eye counts, and checks that each packet carries H.264 bytes after the fixed video-frame metadata. The probe also verifies clock-sync, latency, and frame-source JSON records.
+It starts `metalxr_host_streamer` with the synthetic frame source, with a generated Unity-export fixture, and with a reconnecting synthetic client. Each run performs the Quest HELLO/HELLO_ACK exchange, responds to timing sync probes, receives finite `METALXR_PACKET_VIDEO_FRAME` packets, verifies left/right eye counts, and checks that each packet carries H.264 bytes after the fixed video-frame metadata. The probe also verifies clock-sync, latency, reconnect, and frame-source JSON records.
 
 For a headset session, launch the Quest client APK and then run:
 
@@ -56,7 +56,7 @@ For a headset session, launch the Quest client APK and then run:
 Scripts/run-metalxr-frame-stream.sh
 ```
 
-USB development uses `adb reverse tcp:47000 tcp:47000` and binds the streamer to `127.0.0.1`. Wi-Fi tests can use `METALXR_TRANSPORT=wifi`, which binds to `0.0.0.0`; launch the Quest client with a reachable host address through the `metalxr_host` intent extra or `--metalxr-host` argument.
+USB development uses `adb reverse tcp:47000 tcp:47000` and binds the streamer to `127.0.0.1`. While the streamer is running, the launch script refreshes `adb reverse` every `METALXR_ADB_REVERSE_REFRESH_SECONDS` seconds (default 5, set 0 to disable) so common USB or Quest-client restarts can reconnect without restarting the Mac-side session. Wi-Fi tests can use `METALXR_TRANSPORT=wifi`, which binds to `0.0.0.0`; launch the Quest client with a reachable host address through the `metalxr_host` intent extra or `--metalxr-host` argument.
 
 By default the streamer uses synthetic frames. To stream Unity-exported runtime frames, launch Unity with `METALXR_FRAME_EXPORT_DIR` set and then run:
 
@@ -68,6 +68,8 @@ Scripts/run-metalxr-frame-stream.sh
 
 The streamer reads `<export-dir>/frames.jsonl`, selects the latest complete left/right BGRA eye pair, auto-configures the encoder dimensions from that pair, and logs frame age plus repeated-frame counts. If no complete pair is available when the client connects, it exits with a setup error instead of silently falling back to synthetic content.
 
+For normal Play Mode sessions, `METALXR_STREAM_FRAMES=0` keeps the streamer alive and waits for a Quest client to reconnect after the app restarts or USB transport drops. Finite smoke tests can set `METALXR_STREAM_RECONNECT_ATTEMPTS=N`; the streamer logs `client_disconnect` and `reconnect_wait` records before accepting the next client. `METALXR_STREAM_QUEUE_DEPTH`, `METALXR_STREAM_BITRATE`, resolution, frame rate, `METALXR_PREDICTION_OFFSET_MS`, and `METALXR_CLOCK_SYNC_INTERVAL_MS` remain the primary tuning controls for latency and backlog.
+
 ## Metadata
 
 Each encoded frame emits one JSONL record:
@@ -78,7 +80,7 @@ Each encoded frame emits one JSONL record:
 
 At shutdown, each eye emits a summary record with submitted frames, encoded frames, dropped frames, output bytes, average latency, and max latency.
 
-The streamer also emits `frame_source`, `clock_sync`, and `latency` JSON records. Latency records break frame timing into encode, network, decode, compositor-submit, total, prediction error, queue depth, and measured frame period.
+The streamer also emits `frame_source`, `clock_sync`, `latency`, `client_disconnect`, and `reconnect_wait` JSON records. Latency records break frame timing into encode, network, decode, compositor-submit, total, prediction error, queue depth, and measured frame period.
 
 ## Current Limitations
 
@@ -86,8 +88,8 @@ The streamer also emits `frame_source`, `clock_sync`, and `latency` JSON records
 - The encoder uses one H.264 session per eye. A future transport can either keep separate eye streams or add a stereo packing step.
 - There is no HEVC path yet.
 - There is no production GPU synchronization, IOSurface export, or direct VideoToolbox handoff from the OpenXR swapchain yet.
-- The stream path is TCP-only for now. USB adb reverse and Wi-Fi are both usable for evaluation, but adaptive bitrate, packet loss handling, and production-grade clock sync are still future work.
+- The stream path is TCP-only for now. USB adb reverse and Wi-Fi are both usable for evaluation, but automatic bitrate adaptation, packet loss handling, and production-grade clock sync are still future work.
 
 ## Next Step
 
-The file-based Unity export bridge should be replaced with a lower-latency IOSurface-backed path or a Metal blit into VideoToolbox-compatible pixel buffers. The remaining stream work is wiring the end-to-end launch sequence and then hardening timing, recovery, and transport behavior.
+The file-based Unity export bridge should be replaced with a lower-latency IOSurface-backed path or a Metal blit into VideoToolbox-compatible pixel buffers. The remaining stream work is adaptive stream policy and a synchronized runtime/host bridge that replaces the development state files.

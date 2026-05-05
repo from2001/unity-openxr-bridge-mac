@@ -62,15 +62,18 @@ By default, the workflow uses `METALXR_FRAME_EXPORT_MODE=fixture` to keep the en
 - `METALXR_STREAM_BITRATE`
 - `METALXR_STREAM_FRAMES`
 - `METALXR_STREAM_QUEUE_DEPTH`
+- `METALXR_STREAM_RECONNECT_ATTEMPTS`
 - `METALXR_FRAME_SOURCE=synthetic|unity-export`
 - `METALXR_FRAME_EXPORT_DIR`
 - `METALXR_SWAPCHAIN_STORAGE_MODE=shared|managed|private`
 - `METALXR_PREDICTION_OFFSET_MS`
 - `METALXR_CLOCK_SYNC_INTERVAL_MS`
 - `METALXR_TRANSPORT=usb|wifi`
+- `METALXR_ADB_REVERSE_REFRESH_SECONDS`
 - `METALXR_TRACKING_STATE_PATH`
 - `METALXR_HAPTIC_COMMAND_PATH`
 - `METALXR_TIMING_STATE_PATH`
+- `METALXR_TRACKING_STALE_TIMEOUT_MS`
 
 On Quest, the client reads VIDEO_FRAME packets on a background thread, queues encoded access units, and processes decode/display work on the Unity main thread. Android builds attempt MediaCodec H.264 decode first, read `Image.getPlanes()` YUV_420_888 output, convert it to RGBA, and upload the color result into the per-eye Unity textures. If MediaCodec is unavailable, output images are unavailable, or decoded color samples are near-black, the client displays a compressed-payload preview so transport and frame pacing remain visible during development. Display logs include decoder mode, output format, frame id, eye, host encoder latency, local client receive-to-display timing, decode time, submit time, and queue depth.
 
@@ -95,7 +98,7 @@ The Quest client samples the center-eye HMD, left controller, and right controll
 - `METALXR_PACKET_POSE_SAMPLE` for HMD position, orientation, and tracking flags.
 - `METALXR_PACKET_CONTROLLER_INPUT` for controller buttons, trigger, grip, thumbstick, tracking flags, and aim/grip poses.
 
-The macOS host streamer drains those packets on the stream socket and atomically rewrites `METALXR_TRACKING_STATE_PATH`. The native runtime consumes that file for `xrLocateViews`, action-space locations, and action-state reads.
+The macOS host streamer drains those packets on the stream socket and atomically rewrites `METALXR_TRACKING_STATE_PATH`. The native runtime consumes that file for `xrLocateViews`, action-space locations, and action-state reads. If the state file is older than `METALXR_TRACKING_STALE_TIMEOUT_MS` (default 1000), the runtime keeps the last pose for continuity but clears OpenXR tracking flags, button states, triggers, grips, and thumbsticks so Unity sees inactive/stale input instead of frozen valid tracking.
 
 Haptics flow in the opposite direction. The runtime writes the latest command to `METALXR_HAPTIC_COMMAND_PATH` from `xrApplyHapticFeedback`; the host streamer sends it as `METALXR_PACKET_HAPTIC_COMMAND`; the Quest client applies it with Unity XR `SendHapticImpulse` on the main thread.
 
