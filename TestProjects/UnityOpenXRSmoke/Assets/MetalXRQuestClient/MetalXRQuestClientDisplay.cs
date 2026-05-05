@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using UnityEngine;
 using UnityEngine.XR;
 
@@ -35,6 +36,9 @@ namespace MetalXR.QuestClient
         private ulong _displayedEyeFrames;
         private ulong _displayedLeftEyeFrames;
         private ulong _displayedRightEyeFrames;
+        private MetalXRQuestDecodedVideoFrame _lastFreshLeftFrame;
+        private MetalXRQuestDecodedVideoFrame _lastFreshRightFrame;
+        private bool _reusedDecodedFrameLogged;
 
         private void Start()
         {
@@ -110,9 +114,92 @@ namespace MetalXR.QuestClient
             if (_videoDecoder.TryDecode(encodedFrame, out decodedFrame) && decodedFrame != null)
             {
                 ulong decodeEndTimeNs = MetalXRQuestProtocol.NowNs();
+                if (!IsFreshMediaCodecFrame(decodedFrame))
+                {
+                    MetalXRQuestDecodedVideoFrame reusedFrame = CreateReusedDecodedFrame(encodedFrame);
+                    if (reusedFrame != null)
+                    {
+                        decodedFrame = reusedFrame;
+                    }
+                }
+
                 decodedFrame.SetDecodeTiming(decodeStartTimeNs, decodeEndTimeNs);
+                if (IsFreshMediaCodecFrame(decodedFrame))
+                {
+                    RememberFreshMediaCodecFrame(decodedFrame);
+                }
+
                 UpdateStreamTexture(decodedFrame);
             }
+        }
+
+        private static bool IsFreshMediaCodecFrame(MetalXRQuestDecodedVideoFrame frame)
+        {
+            return frame != null && frame.DecodedByMediaCodec && frame.DecoderMode == "mediacodec-yuv420";
+        }
+
+        private void RememberFreshMediaCodecFrame(MetalXRQuestDecodedVideoFrame frame)
+        {
+            if (frame == null)
+            {
+                return;
+            }
+
+            if (frame.IsLeftEye)
+            {
+                _lastFreshLeftFrame = frame;
+            }
+            else
+            {
+                _lastFreshRightFrame = frame;
+            }
+        }
+
+        private MetalXRQuestDecodedVideoFrame CreateReusedDecodedFrame(MetalXRQuestEncodedVideoFrame encodedFrame)
+        {
+            if (encodedFrame == null)
+            {
+                return null;
+            }
+
+            MetalXRQuestDecodedVideoFrame preferred = encodedFrame.IsLeftEye ? _lastFreshLeftFrame : _lastFreshRightFrame;
+            MetalXRQuestDecodedVideoFrame alternate = encodedFrame.IsLeftEye ? _lastFreshRightFrame : _lastFreshLeftFrame;
+            MetalXRQuestDecodedVideoFrame source = IsCompatibleReuseFrame(preferred, encodedFrame) ? preferred : null;
+            if (source == null && IsCompatibleReuseFrame(alternate, encodedFrame))
+            {
+                source = alternate;
+            }
+
+            if (source == null)
+            {
+                return null;
+            }
+
+            if (!_reusedDecodedFrameLogged)
+            {
+                _reusedDecodedFrameLogged = true;
+                string sourceEye = source.IsLeftEye ? "left" : "right";
+                LogClientMessage("reusing last MediaCodec " + sourceEye + " eye frame when preview fallback would be shown");
+            }
+
+            string reuseMode = source.IsLeftEye ? "mediacodec-reused-left" : "mediacodec-reused-right";
+            return new MetalXRQuestDecodedVideoFrame(
+                encodedFrame,
+                source.RgbaBytes,
+                source.RgbaStrideBytes,
+                false,
+                reuseMode,
+                source.OutputFormat);
+        }
+
+        private static bool IsCompatibleReuseFrame(MetalXRQuestDecodedVideoFrame frame, MetalXRQuestEncodedVideoFrame encodedFrame)
+        {
+            return frame != null &&
+                   encodedFrame != null &&
+                   frame.RgbaBytes != null &&
+                   frame.Width == encodedFrame.Width &&
+                   frame.Height == encodedFrame.Height &&
+                   frame.RgbaStrideBytes >= encodedFrame.Width * 4;
         }
 
         private void HandleHapticCommand(MetalXRQuestHapticCommand command)
@@ -734,6 +821,7 @@ namespace MetalXR.QuestClient
         private int _outputColorFormat;
         private bool _nearBlackOutputLogged;
         private bool _outputImageFallbackLogged;
+        private bool _zeroPlaneOutputLogged;
 #endif
 
         public MetalXRQuestEyeDecoder(bool leftEye, Action<string> log)
@@ -990,6 +1078,17 @@ namespace MetalXR.QuestClient
                     return false;
                 }
 
+                if (ImagePlanesAreAllZero(yPlane, uPlane, vPlane))
+                {
+                    if (!_zeroPlaneOutputLogged)
+                    {
+                        _zeroPlaneOutputLogged = true;
+                        Log("MediaCodec output image planes were all zero for " + _eyeName + " eye; using compressed payload preview");
+                    }
+
+                    return false;
+                }
+
                 rgbaStrideBytes = sourceFrame.Width * 4;
                 rgbaBytes = new byte[rgbaStrideBytes * sourceFrame.Height];
                 for (int y = 0; y < sourceFrame.Height; y++)
@@ -1063,17 +1162,22 @@ namespace MetalXR.QuestClient
 
                 int rowStride = plane.Call<int>("getRowStride");
                 int pixelStride = plane.Call<int>("getPixelStride");
+                buffer.Call<AndroidJavaObject>("position", 0);
                 int remaining = buffer.Call<int>("remaining");
                 if (rowStride <= 0 || pixelStride <= 0 || remaining <= 0)
                 {
                     return false;
                 }
 
-                sbyte[] signedBytes = new sbyte[remaining];
-                buffer.Call<AndroidJavaObject>("position", 0);
-                buffer.Call<AndroidJavaObject>("get", signedBytes, 0, remaining);
-                byte[] bytes = new byte[remaining];
-                Buffer.BlockCopy(signedBytes, 0, bytes, 0, remaining);
+                byte[] bytes;
+                if (!TryCopyDirectByteBuffer(buffer, remaining, out bytes))
+                {
+                    sbyte[] signedBytes = new sbyte[remaining];
+                    buffer.Call<AndroidJavaObject>("position", 0);
+                    buffer.Call<AndroidJavaObject>("get", signedBytes, 0, remaining);
+                    bytes = new byte[remaining];
+                    Buffer.BlockCopy(signedBytes, 0, bytes, 0, remaining);
+                }
 
                 planeData.Bytes = bytes;
                 planeData.RowStride = rowStride;
@@ -1094,6 +1198,32 @@ namespace MetalXR.QuestClient
             }
         }
 
+        private static unsafe bool TryCopyDirectByteBuffer(AndroidJavaObject buffer, int byteCount, out byte[] bytes)
+        {
+            bytes = null;
+            if (buffer == null || byteCount <= 0)
+            {
+                return false;
+            }
+
+            IntPtr rawBuffer = buffer.GetRawObject();
+            if (rawBuffer == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            sbyte* address = AndroidJNI.GetDirectBufferAddress(rawBuffer);
+            long capacity = AndroidJNI.GetDirectBufferCapacity(rawBuffer);
+            if (address == null || capacity < byteCount)
+            {
+                return false;
+            }
+
+            bytes = new byte[byteCount];
+            Marshal.Copy((IntPtr)address, bytes, 0, byteCount);
+            return true;
+        }
+
         private static byte ReadPlaneSample(ImagePlaneData plane, int x, int y, byte fallback)
         {
             if (plane.Bytes == null)
@@ -1108,6 +1238,32 @@ namespace MetalXR.QuestClient
             }
 
             return plane.Bytes[index];
+        }
+
+        private static bool ImagePlanesAreAllZero(ImagePlaneData yPlane, ImagePlaneData uPlane, ImagePlaneData vPlane)
+        {
+            return !PlaneHasNonZeroByte(yPlane) &&
+                   !PlaneHasNonZeroByte(uPlane) &&
+                   !PlaneHasNonZeroByte(vPlane);
+        }
+
+        private static bool PlaneHasNonZeroByte(ImagePlaneData plane)
+        {
+            if (plane.Bytes == null || plane.Bytes.Length == 0)
+            {
+                return false;
+            }
+
+            int sampleStep = Math.Max(1, plane.Bytes.Length / 4096);
+            for (int index = 0; index < plane.Bytes.Length; index += sampleStep)
+            {
+                if (plane.Bytes[index] != 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static void WriteYuvAsRgba(byte[] rgbaBytes, int targetIndex, byte yValue, byte uValue, byte vValue)
@@ -1242,6 +1398,7 @@ namespace MetalXR.QuestClient
             _outputSliceHeight = 0;
             _outputColorFormat = 0;
             _outputImageFallbackLogged = false;
+            _zeroPlaneOutputLogged = false;
         }
 #endif
 
