@@ -1,10 +1,10 @@
-# MetalXR OpenXR Runtime Lifecycle
+# MetalXR OpenXR Runtime Lifecycle and Swapchain
 
-This document tracks the native runtime milestones for issue #2 and issue #3.
+This document tracks the native runtime milestones for issue #2 through issue #4.
 
 ## Purpose
 
-The runtime proves that the OpenXR loader can discover and load a MetalXR runtime on macOS, then exercise enough core OpenXR lifecycle behavior for Unity Play Mode initialization work. It intentionally does not implement real swapchain images, frame capture, tracking, input, or streaming yet.
+The runtime proves that the OpenXR loader can discover and load a MetalXR runtime on macOS, exercise enough core OpenXR lifecycle behavior for Unity Play Mode initialization, and accept Unity-rendered stereo frames through runtime-owned Metal swapchain textures. It intentionally does not implement tracking, input, CPU pixel readback, encoding, transport, or Quest display yet.
 
 The current runtime:
 
@@ -31,6 +31,13 @@ The current runtime:
   - `xrCreateReferenceSpace`
   - `xrDestroySpace`
   - `xrLocateSpace`
+  - `xrEnumerateSwapchainFormats`
+  - `xrCreateSwapchain`
+  - `xrDestroySwapchain`
+  - `xrEnumerateSwapchainImages`
+  - `xrAcquireSwapchainImage`
+  - `xrWaitSwapchainImage`
+  - `xrReleaseSwapchainImage`
   - `xrEnumerateViewConfigurations`
   - `xrGetViewConfigurationProperties`
   - `xrEnumerateViewConfigurationViews`
@@ -40,9 +47,30 @@ The current runtime:
   - `xrEndFrame`
   - `xrLocateViews`
 - Reports a dummy stereo HMD with two fixed 1832 x 1920 views and opaque environment blending.
-- Emits lifecycle logs for instance/session creation, session state transitions, and sampled frame-loop calls.
+- Creates `MTLTexture` objects through `MTLTextureDescriptor` and returns them via `XrSwapchainImageMetalKHR`.
+- Parses submitted `XrCompositionLayerProjection` layers in `xrEndFrame`.
+- Emits lifecycle logs for instance/session creation, session state transitions, swapchain ownership, and sampled frame-loop calls.
 
-The runtime currently accepts a Metal graphics binding enough to create a session, but does not create runtime-owned Metal swapchain images. That is the next roadmap item.
+## macOS Graphics Path
+
+The selected path is direct Metal through `XR_KHR_metal_enable`, plus Unity's legacy `XR_KHRX2_metal_enable` function name. Unity passes a Metal command queue through `XrGraphicsBindingMetalKHR` during `xrCreateSession`. The runtime asks that command queue for its Metal device and allocates runtime-owned 2D Metal textures for swapchain images.
+
+The runtime currently supports single-sample 2D swapchains with these Metal pixel formats:
+
+- `MTLPixelFormatBGRA8Unorm`
+- `MTLPixelFormatBGRA8Unorm_sRGB`
+- `MTLPixelFormatRGBA8Unorm`
+- `MTLPixelFormatRGBA8Unorm_sRGB`
+- `MTLPixelFormatRGB10A2Unorm`
+- `MTLPixelFormatRGBA16Float`
+
+Tradeoffs and limitations:
+
+- The runtime can prove frame access at the GPU-resource level because Unity renders into textures allocated by the runtime.
+- `METALXR_FRAME_DUMP_DIR` writes metadata for submitted projection frames, including swapchain ids, Metal texture pointers, image indices, formats, and rectangles.
+- The runtime does not read pixels back to CPU memory yet.
+- The runtime does not allocate IOSurface-backed textures yet, so there is no cross-process share handle or VideoToolbox encode path.
+- Synchronization is minimal and only models the OpenXR acquire/wait/release call order. Real GPU fences must be added before encoding or streaming.
 
 ## Build
 
@@ -68,7 +96,9 @@ Runtime/MetalXRRuntime/metalxr_runtime.json
 Scripts/probe-metalxr-runtime.sh
 ```
 
-The probe uses `dlopen`, calls `xrNegotiateLoaderRuntimeInterface`, creates an instance with Unity's `XR_KHRX2_metal_enable` path, discovers the dummy HMD system, creates a session, consumes session-state events, creates a local reference space, and runs three deterministic frames through `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews`, and `xrEndFrame`.
+The probe uses `dlopen`, calls `xrNegotiateLoaderRuntimeInterface`, creates an instance with Unity's `XR_KHRX2_metal_enable` path, discovers the dummy HMD system, creates a session, consumes session-state events, creates a local reference space, creates one Metal swapchain per eye, and runs three deterministic frames through `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews`, swapchain acquire/wait/release, and `xrEndFrame`.
+
+The probe also sets `METALXR_FRAME_DUMP_DIR` and fails unless `frame_000001.txt` is written with projection frame metadata.
 
 ## Unity Launch
 
@@ -86,4 +116,4 @@ METALXR_RUNTIME_JSON=/absolute/path/to/runtime.json Scripts/launch-unity-openxr.
 
 ## Next Step
 
-Issue #4 should prove the Unity macOS graphics path and replace the current no-swapchain lifecycle runtime with a minimal Metal swapchain path that Unity accepts. That work must determine how the runtime can access or capture Unity-rendered stereo frame images.
+Issue #5 should build on the runtime-owned Metal textures and add a host-side frame capture path suitable for VideoToolbox encoding. The likely implementation options are a Metal blit into staging textures for CPU readback or changing swapchain allocation to IOSurface-backed textures that can be handed to the encoder with lower copy overhead.

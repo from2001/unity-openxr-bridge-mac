@@ -10,6 +10,7 @@ runtime_dylib="$runtime_dir/build/libmetalxr_runtime.dylib"
 probe_source="${TMPDIR:-/tmp}/metalxr_runtime_probe.c"
 probe_binary="${TMPDIR:-/tmp}/metalxr_runtime_probe"
 probe_log="${TMPDIR:-/tmp}/metalxr_runtime_probe.log"
+probe_dump_dir="${TMPDIR:-/tmp}/metalxr_frame_dump"
 
 if [[ ! -f "$runtime_dylib" ]]; then
   "$repo_root/Scripts/build-metalxr-runtime.sh"
@@ -132,6 +133,31 @@ int main(int argc, char** argv)
         const XrReferenceSpaceCreateInfo* createInfo,
         XrSpace* space);
     typedef XrResult (*PFN_xrDestroySpace)(XrSpace space);
+    typedef XrResult (*PFN_xrEnumerateSwapchainFormats)(
+        XrSession session,
+        uint32_t formatCapacityInput,
+        uint32_t* formatCountOutput,
+        int64_t* formats);
+    typedef XrResult (*PFN_xrCreateSwapchain)(
+        XrSession session,
+        const XrSwapchainCreateInfo* createInfo,
+        XrSwapchain* swapchain);
+    typedef XrResult (*PFN_xrDestroySwapchain)(XrSwapchain swapchain);
+    typedef XrResult (*PFN_xrEnumerateSwapchainImages)(
+        XrSwapchain swapchain,
+        uint32_t imageCapacityInput,
+        uint32_t* imageCountOutput,
+        XrSwapchainImageBaseHeader* images);
+    typedef XrResult (*PFN_xrAcquireSwapchainImage)(
+        XrSwapchain swapchain,
+        const XrSwapchainImageAcquireInfo* acquireInfo,
+        uint32_t* index);
+    typedef XrResult (*PFN_xrWaitSwapchainImage)(
+        XrSwapchain swapchain,
+        const XrSwapchainImageWaitInfo* waitInfo);
+    typedef XrResult (*PFN_xrReleaseSwapchainImage)(
+        XrSwapchain swapchain,
+        const XrSwapchainImageReleaseInfo* releaseInfo);
     typedef XrResult (*PFN_xrWaitFrame)(XrSession session, const XrFrameWaitInfo* frameWaitInfo, XrFrameState* frameState);
     typedef XrResult (*PFN_xrBeginFrame)(XrSession session, const XrFrameBeginInfo* frameBeginInfo);
     typedef XrResult (*PFN_xrEndFrame)(XrSession session, const XrFrameEndInfo* frameEndInfo);
@@ -214,6 +240,13 @@ int main(int argc, char** argv)
     LOAD_XR_PROC(instance, PFN_xrEnumerateReferenceSpaces, xrEnumerateReferenceSpaces, "xrEnumerateReferenceSpaces")
     LOAD_XR_PROC(instance, PFN_xrCreateReferenceSpace, xrCreateReferenceSpace, "xrCreateReferenceSpace")
     LOAD_XR_PROC(instance, PFN_xrDestroySpace, xrDestroySpace, "xrDestroySpace")
+    LOAD_XR_PROC(instance, PFN_xrEnumerateSwapchainFormats, xrEnumerateSwapchainFormats, "xrEnumerateSwapchainFormats")
+    LOAD_XR_PROC(instance, PFN_xrCreateSwapchain, xrCreateSwapchain, "xrCreateSwapchain")
+    LOAD_XR_PROC(instance, PFN_xrDestroySwapchain, xrDestroySwapchain, "xrDestroySwapchain")
+    LOAD_XR_PROC(instance, PFN_xrEnumerateSwapchainImages, xrEnumerateSwapchainImages, "xrEnumerateSwapchainImages")
+    LOAD_XR_PROC(instance, PFN_xrAcquireSwapchainImage, xrAcquireSwapchainImage, "xrAcquireSwapchainImage")
+    LOAD_XR_PROC(instance, PFN_xrWaitSwapchainImage, xrWaitSwapchainImage, "xrWaitSwapchainImage")
+    LOAD_XR_PROC(instance, PFN_xrReleaseSwapchainImage, xrReleaseSwapchainImage, "xrReleaseSwapchainImage")
     LOAD_XR_PROC(instance, PFN_xrWaitFrame, xrWaitFrame, "xrWaitFrame")
     LOAD_XR_PROC(instance, PFN_xrBeginFrame, xrBeginFrame, "xrBeginFrame")
     LOAD_XR_PROC(instance, PFN_xrEndFrame, xrEndFrame, "xrEndFrame")
@@ -370,6 +403,58 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    uint32_t swapchainFormatCount = 0;
+    int64_t swapchainFormats[8] = { 0 };
+    result = xrEnumerateSwapchainFormats(session, 8, &swapchainFormatCount, swapchainFormats);
+    printf("swapchainFormats=%d count=%u first=%lld\n",
+           result,
+           swapchainFormatCount,
+           (long long)swapchainFormats[0]);
+    if (result != XR_SUCCESS || swapchainFormatCount == 0) {
+        return 1;
+    }
+
+    XrSwapchain swapchains[2] = { NULL, NULL };
+    XrSwapchainImageMetalKHR swapchainImages[2][3] = { 0 };
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        XrSwapchainCreateInfo swapchainCreateInfo = {
+            XR_TYPE_SWAPCHAIN_CREATE_INFO,
+            NULL,
+            0,
+            XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT,
+            swapchainFormats[0],
+            1,
+            configViews[eye].recommendedImageRectWidth,
+            configViews[eye].recommendedImageRectHeight,
+            1,
+            1,
+            1
+        };
+        result = xrCreateSwapchain(session, &swapchainCreateInfo, &swapchains[eye]);
+        printf("createSwapchain[%u]=%d swapchain=%s\n",
+               eye,
+               result,
+               swapchains[eye] != NULL ? "yes" : "no");
+        if (result != XR_SUCCESS || swapchains[eye] == NULL) {
+            return 1;
+        }
+
+        uint32_t swapchainImageCount = 0;
+        result = xrEnumerateSwapchainImages(
+            swapchains[eye],
+            3,
+            &swapchainImageCount,
+            (XrSwapchainImageBaseHeader*)swapchainImages[eye]);
+        printf("swapchainImages[%u]=%d count=%u firstTexture=%s\n",
+               eye,
+               result,
+               swapchainImageCount,
+               swapchainImages[eye][0].texture != NULL ? "yes" : "no");
+        if (result != XR_SUCCESS || swapchainImageCount != 3 || swapchainImages[eye][0].texture == NULL) {
+            return 1;
+        }
+    }
+
     for (int frame = 0; frame < 3; ++frame) {
         XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO, NULL };
         XrFrameState frameState = { 0 };
@@ -416,16 +501,84 @@ int main(int argc, char** argv)
             return 1;
         }
 
+        uint32_t swapchainImageIndices[2] = { 0, 0 };
+        XrCompositionLayerProjectionView projectionViews[2] = { 0 };
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            XrSwapchainImageAcquireInfo acquireInfo = {
+                XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO,
+                NULL
+            };
+            result = xrAcquireSwapchainImage(swapchains[eye], &acquireInfo, &swapchainImageIndices[eye]);
+            printf("acquireSwapchainImage[%d][%u]=%d index=%u\n",
+                   frame,
+                   eye,
+                   result,
+                   swapchainImageIndices[eye]);
+            if (result != XR_SUCCESS) {
+                return 1;
+            }
+
+            XrSwapchainImageWaitInfo waitImageInfo = {
+                XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO,
+                NULL,
+                0
+            };
+            result = xrWaitSwapchainImage(swapchains[eye], &waitImageInfo);
+            printf("waitSwapchainImage[%d][%u]=%d\n", frame, eye, result);
+            if (result != XR_SUCCESS) {
+                return 1;
+            }
+
+            XrSwapchainImageReleaseInfo releaseInfo = {
+                XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO,
+                NULL
+            };
+            result = xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
+            printf("releaseSwapchainImage[%d][%u]=%d\n", frame, eye, result);
+            if (result != XR_SUCCESS) {
+                return 1;
+            }
+
+            projectionViews[eye].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+            projectionViews[eye].pose = views[eye].pose;
+            projectionViews[eye].fov = views[eye].fov;
+            projectionViews[eye].subImage.swapchain = swapchains[eye];
+            projectionViews[eye].subImage.imageRect.offset.x = 0;
+            projectionViews[eye].subImage.imageRect.offset.y = 0;
+            projectionViews[eye].subImage.imageRect.extent.width = (int32_t)configViews[eye].recommendedImageRectWidth;
+            projectionViews[eye].subImage.imageRect.extent.height = (int32_t)configViews[eye].recommendedImageRectHeight;
+            projectionViews[eye].subImage.imageArrayIndex = 0;
+        }
+
+        XrCompositionLayerProjection projectionLayer = {
+            XR_TYPE_COMPOSITION_LAYER_PROJECTION,
+            NULL,
+            0,
+            localSpace,
+            2,
+            projectionViews
+        };
+        const XrCompositionLayerBaseHeader* layers[] = {
+            (const XrCompositionLayerBaseHeader*)&projectionLayer
+        };
         XrFrameEndInfo frameEndInfo = {
             XR_TYPE_FRAME_END_INFO,
             NULL,
             frameState.predictedDisplayTime,
             XR_ENVIRONMENT_BLEND_MODE_OPAQUE,
-            0,
-            NULL
+            1,
+            layers
         };
         result = xrEndFrame(session, &frameEndInfo);
         printf("endFrame[%d]=%d\n", frame, result);
+        if (result != XR_SUCCESS) {
+            return 1;
+        }
+    }
+
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        result = xrDestroySwapchain(swapchains[eye]);
+        printf("destroySwapchain[%u]=%d\n", eye, result);
         if (result != XR_SUCCESS) {
             return 1;
         }
@@ -471,7 +624,20 @@ clang -std=c11 -Wall -Wextra -Werror \
   -o "$probe_binary"
 
 rm -f "$probe_log"
-METALXR_RUNTIME_LOG="$probe_log" "$probe_binary" "$runtime_dylib"
+rm -rf "$probe_dump_dir"
+mkdir -p "$probe_dump_dir"
+METALXR_RUNTIME_LOG="$probe_log" \
+METALXR_FRAME_DUMP_DIR="$probe_dump_dir" \
+"$probe_binary" "$runtime_dylib"
 
 echo "Runtime log: $probe_log"
-sed -n '1,120p' "$probe_log"
+sed -n '1,180p' "$probe_log"
+
+metadata_file="$probe_dump_dir/frame_000001.txt"
+if [[ ! -f "$metadata_file" ]]; then
+  echo "Expected frame metadata was not written: $metadata_file" >&2
+  exit 1
+fi
+
+echo "Frame metadata: $metadata_file"
+sed -n '1,80p' "$metadata_file"

@@ -11,6 +11,8 @@ Usage:
 
 Environment:
   METALXR_RUNTIME_JSON     Full path to an OpenXR runtime JSON manifest.
+  METALXR_RUNTIME_LOG      Runtime log path. Defaults to TMPDIR/metalxr_unity_runtime.log.
+  METALXR_FRAME_DUMP_DIR   Directory for frame metadata dumps from the MetalXR runtime.
   UNITY_APP                Full path to Unity.app. If omitted, the newest Unity Hub editor is used.
   METALXR_START_SIMULATOR  Set to 0 to avoid launching MetaXRSimulator.app automatically.
   XR_LOADER_DEBUG          OpenXR loader logging level. Defaults to warn.
@@ -78,6 +80,15 @@ echo "Repository: $repo_root"
 echo "Unity: $unity_app"
 echo "OpenXR runtime: $runtime_json"
 
+metalxr_runtime_log="${METALXR_RUNTIME_LOG:-${TMPDIR:-/tmp}/metalxr_unity_runtime.log}"
+metalxr_frame_dump_dir="${METALXR_FRAME_DUMP_DIR:-${TMPDIR:-/tmp}/metalxr_unity_frames}"
+mkdir -p "$metalxr_frame_dump_dir"
+
+echo "MetalXR runtime log: $metalxr_runtime_log"
+echo "MetalXR frame dumps: $metalxr_frame_dump_dir"
+
 XR_RUNTIME_JSON="$runtime_json" \
 XR_LOADER_DEBUG="${XR_LOADER_DEBUG:-warn}" \
+METALXR_RUNTIME_LOG="$metalxr_runtime_log" \
+METALXR_FRAME_DUMP_DIR="$metalxr_frame_dump_dir" \
 "$unity_app/Contents/MacOS/Unity" "${unity_args[@]}"
