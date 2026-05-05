@@ -31,6 +31,8 @@ struct DeveloperStatus: Sendable {
     let adbPath: String?
     let devices: [ADBDevice]
     let questClientInstalled: Bool
+    let questClientRunning: Bool
+    let adbReverseConfigured: Bool
     let runtimeManifestExists: Bool
     let runtimeDylibExists: Bool
     let hostStreamerExists: Bool
@@ -59,6 +61,9 @@ struct DeveloperStatus: Sendable {
         }
         if !questClientInstalled {
             messages.append("Quest client package is not installed.")
+        }
+        if questClientInstalled && !adbReverseConfigured {
+            messages.append("adb reverse tcp:47000 is not configured. Launch the Quest client or start the Play Mode workflow.")
         }
         if !runtimeManifestExists || !runtimeDylibExists {
             messages.append("MetalXR runtime is not built. Run Scripts/build-metalxr-runtime.sh.")
@@ -155,6 +160,26 @@ final class Utilities: NSObject, @unchecked Sendable {
         URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "metalxr_unity_runtime.log")
     }
 
+    var frameDumpDirURL: URL {
+        URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "metalxr_unity_frames")
+    }
+
+    var frameExportDirURL: URL {
+        URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "metalxr_frame_export")
+    }
+
+    var trackingStateURL: URL {
+        URL(fileURLWithPath: "/tmp/metalxr_tracking_state.txt")
+    }
+
+    var hapticCommandURL: URL {
+        URL(fileURLWithPath: "/tmp/metalxr_haptic_command.txt")
+    }
+
+    var timingStateURL: URL {
+        URL(fileURLWithPath: "/tmp/metalxr_timing_state.txt")
+    }
+
     var streamerLogURL: URL? {
         appLogFolder?.appending(path: "metalxr_host_streamer.log")
     }
@@ -237,10 +262,14 @@ final class Utilities: NSObject, @unchecked Sendable {
 
     func collectDeveloperStatus(packageName: String) -> DeveloperStatus {
         let devices = listADBDevices()
+        let hasReadyDevice = devices.contains { $0.state == "device" }
+        let installed = hasReadyDevice && isPackageInstalled(packageName: packageName)
         return DeveloperStatus(
             adbPath: adbExecutableURL?.path,
             devices: devices,
-            questClientInstalled: devices.contains { $0.state == "device" } && isPackageInstalled(packageName: packageName),
+            questClientInstalled: installed,
+            questClientRunning: installed && isPackageRunning(packageName: packageName),
+            adbReverseConfigured: hasReadyDevice && isADBReverseConfigured(port: 47000),
             runtimeManifestExists: FileManager.default.fileExists(atPath: repositoryRootURL.appending(path: "Runtime/MetalXRRuntime/metalxr_runtime.json").path),
             runtimeDylibExists: FileManager.default.fileExists(atPath: repositoryRootURL.appending(path: "Runtime/MetalXRRuntime/build/libmetalxr_runtime.dylib").path),
             hostStreamerExists: FileManager.default.fileExists(atPath: repositoryRootURL.appending(path: "Runtime/MetalXRHost/build/metalxr_host_streamer").path),
@@ -249,6 +278,24 @@ final class Utilities: NSObject, @unchecked Sendable {
             questAPKExists: FileManager.default.fileExists(atPath: defaultQuestClientAPKURL.path),
             unityEditors: installedUnityEditors()
         )
+    }
+
+    func isPackageRunning(packageName: String) -> Bool {
+        let result = runADBCommand(arguments: ["shell", "pidof", packageName], shouldPrintOutput: false)
+        return result.succeeded && !result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func isADBReverseConfigured(port: Int) -> Bool {
+        let result = runADBCommand(arguments: ["reverse", "--list"], shouldPrintOutput: false)
+        guard result.succeeded else {
+            return false
+        }
+        return result.output
+            .split(whereSeparator: \.isNewline)
+            .contains { line in
+                let components = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+                return components.count >= 3 && components[1] == "tcp:\(port)" && components[2] == "tcp:\(port)"
+            }
     }
 
     func recentStreamerLogContainsProtocolMismatch() -> Bool {
@@ -340,13 +387,39 @@ final class Utilities: NSObject, @unchecked Sendable {
     }
 
     func runRepositoryScript(_ scriptPath: String, arguments: [String], shouldPrintOutput: Bool) -> CommandResult {
+        runRepositoryScript(scriptPath, arguments: arguments, environment: [:], shouldPrintOutput: shouldPrintOutput)
+    }
+
+    func runRepositoryScript(_ scriptPath: String, arguments: [String], environment: [String: String], shouldPrintOutput: Bool) -> CommandResult {
         let scriptURL = repositoryRootURL.appending(path: scriptPath)
-        return runProcess(
-            executableURL: scriptURL,
-            arguments: arguments,
-            currentDirectoryURL: repositoryRootURL,
-            shouldPrintOutput: shouldPrintOutput
-        )
+        let task = Process()
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+        task.executableURL = scriptURL
+        task.arguments = arguments
+        task.currentDirectoryURL = repositoryRootURL
+        task.standardInput = nil
+        var mergedEnvironment = ProcessInfo.processInfo.environment
+        for (key, value) in environment {
+            mergedEnvironment[key] = value
+        }
+        task.environment = mergedEnvironment
+
+        do {
+            try task.run()
+        } catch {
+            return CommandResult(output: error.localizedDescription + "\n", exitCode: 127)
+        }
+
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        task.waitUntilExit()
+
+        if shouldPrintOutput {
+            print("[Command] Exit code: \(task.terminationStatus)")
+        }
+
+        return CommandResult(output: output, exitCode: task.terminationStatus)
     }
 
     func startRepositoryScript(_ scriptPath: String, arguments: [String], environment: [String: String], logURL: URL) throws -> Process {
@@ -389,12 +462,18 @@ final class Utilities: NSObject, @unchecked Sendable {
                 "Unity project: \(unitySmokeProjectURL.path)",
                 "XR_RUNTIME_JSON: \(repositoryRootURL.appending(path: "Runtime/MetalXRRuntime/metalxr_runtime.json").path)",
                 "METALXR_RUNTIME_LOG: \(runtimeLogURL.path)",
-                "METALXR_TRACKING_STATE_PATH: /tmp/metalxr_tracking_state.txt",
-                "METALXR_HAPTIC_COMMAND_PATH: /tmp/metalxr_haptic_command.txt",
-                "METALXR_TIMING_STATE_PATH: /tmp/metalxr_timing_state.txt"
+                "METALXR_FRAME_DUMP_DIR: \(frameDumpDirURL.path)",
+                "METALXR_FRAME_EXPORT_DIR: \(frameExportDirURL.path)",
+                "METALXR_FRAME_EXPORT_MODE: readback",
+                "METALXR_SWAPCHAIN_STORAGE_MODE: shared",
+                "METALXR_FRAME_SOURCE: unity-export",
+                "METALXR_TRACKING_STATE_PATH: \(trackingStateURL.path)",
+                "METALXR_HAPTIC_COMMAND_PATH: \(hapticCommandURL.path)",
+                "METALXR_TIMING_STATE_PATH: \(timingStateURL.path)"
             ].joined(separator: "\n")
             try launchEnvironment.write(to: bundleURL.appending(path: "unity-launch-environment.txt"), atomically: true, encoding: .utf8)
 
+            copyFrameExportManifests(to: bundleURL.appending(path: "frame-exports"))
             copyIfExists(runtimeLogURL, to: bundleURL.appending(path: "metalxr-runtime.log"))
             if let unityLaunchLogURL {
                 copyIfExists(unityLaunchLogURL, to: bundleURL.appending(path: "unity-launch.log"))
@@ -402,6 +481,15 @@ final class Utilities: NSObject, @unchecked Sendable {
             if let streamerLogURL {
                 copyIfExists(streamerLogURL, to: bundleURL.appending(path: "host-streamer.log"))
             }
+
+            let screenshotURL = bundleURL.appending(path: "quest-screenshot.png")
+            let screenshot = runRepositoryScript(
+                "Scripts/probe-quest-client-screenshot.sh",
+                arguments: [],
+                environment: ["METALXR_SCREENSHOT_PATH": screenshotURL.path],
+                shouldPrintOutput: false
+            )
+            try screenshot.output.write(to: bundleURL.appending(path: "quest-screenshot-check.txt"), atomically: true, encoding: .utf8)
 
             let logcat = runADBCommand(arguments: ["logcat", "-d", "Unity:D", "*:S"], shouldPrintOutput: false)
             let filteredLogcat = logcat.output
@@ -422,6 +510,29 @@ final class Utilities: NSObject, @unchecked Sendable {
         }
         try? FileManager.default.removeItem(at: destinationURL)
         try? FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+    }
+
+    private func copyFrameExportManifests(to destinationURL: URL) {
+        guard FileManager.default.fileExists(atPath: frameExportDirURL.path) else {
+            return
+        }
+
+        try? FileManager.default.removeItem(at: destinationURL)
+        try? FileManager.default.createDirectory(at: destinationURL, withIntermediateDirectories: true)
+
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: frameExportDirURL,
+            includingPropertiesForKeys: nil
+        ) else {
+            return
+        }
+
+        for file in files {
+            let name = file.lastPathComponent
+            if name == "frames.jsonl" || file.pathExtension == "json" {
+                try? FileManager.default.copyItem(at: file, to: destinationURL.appending(path: name))
+            }
+        }
     }
     
     // MARK: App setup functions

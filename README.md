@@ -13,8 +13,8 @@ Working:
 - Use Meta XR Simulator as the default macOS OpenXR runtime when it is installed at `/Applications/MetaXRSimulator.app`.
 - Build and probe a native MetalXR OpenXR runtime that can create an instance, report a dummy stereo HMD system, create a session, emit lifecycle events, create reference spaces, and run a deterministic frame loop.
 - Create runtime-owned Metal swapchain textures for Unity OpenXR Play Mode, accept stereo projection layers, and dump per-frame metadata proving which textures were submitted.
-- Export submitted projection views as per-eye frame records with host-readable BGRA/raw payload files when `METALXR_FRAME_EXPORT_DIR` is set.
-- Build and probe a macOS VideoToolbox host encoder that converts synthetic stereo frames or exported Unity BGRA eye frames into H.264 elementary streams with per-frame latency/drop metadata.
+- Export submitted projection views as per-eye frame records with host-readable BGRA/RGBA payload files when `METALXR_FRAME_EXPORT_DIR` is set. Readback uses shared Metal swapchain storage; fixture mode remains available for deterministic workflow smoke tests.
+- Build and probe a macOS VideoToolbox host encoder that converts synthetic stereo frames or exported Unity BGRA/RGBA eye frames into H.264 elementary streams with per-frame latency/drop metadata.
 - Build and probe shared host/client protocol packet definitions with loopback handshake, heartbeat, and version-mismatch handling.
 - Build a Quest/Android Unity OpenXR client shell that displays generated stereo diagnostic frames in-headset and attempts the shared HELLO handshake over an adb-reversed host endpoint.
 - Stream synthetic or Unity-exported macOS VideoToolbox H.264 stereo frames over the shared TCP protocol to the Quest client, with MediaCodec YUV-to-RGBA color decode attempted on-device and receive-to-display timing logged from Unity.
@@ -26,7 +26,7 @@ Not implemented yet:
 - Production IOSurface export, zero-copy frame handoff, or direct VideoToolbox encoding of Unity-submitted Metal textures.
 - A production Quest PCVR transport layer for audio, loss recovery, adaptive timing, and low-latency datagrams.
 - Production-grade OpenXR action binding/profile coverage, true separate aim/grip poses on every device path, and predictive input timing.
-- A fully wired one-click Unity Play Mode to Quest workflow.
+- A production one-click Unity Play Mode workflow with adaptive settings, bounded disk usage, and user-facing failure recovery.
 - SteamVR/OpenComposite compatibility on macOS.
 
 That means this repository can currently make Unity's OpenXR loader run on macOS against an existing runtime such as Meta XR Simulator, but it is not yet the macOS equivalent of Quest Link/Air Link. [Unity's Meta Quest Link documentation](https://docs.unity.cn/Packages/com.unity.xr.meta-openxr%402.1/manual/get-started/link.html) states that Meta Quest Link is Windows-only, so a real Mac version requires implementing both a host OpenXR runtime and a headset streaming client.
@@ -115,6 +115,14 @@ METALXR_FRAME_EXPORT_DIR=/tmp/metalxr_frame_export \
 Scripts/run-metalxr-frame-stream.sh
 ```
 
+Run the coordinated Quest client, Unity Play Mode, unity-export streamer, log, and screenshot smoke workflow:
+
+```sh
+Scripts/run-metalxr-playmode-workflow.sh
+```
+
+The workflow defaults to `METALXR_FRAME_EXPORT_MODE=fixture` so CI-style device smoke tests can prove the launcher, runtime lifecycle, host streamer, Quest client, display logs, and screenshot path with compact deterministic payloads. Use `METALXR_FRAME_EXPORT_MODE=readback` to stream CPU-readback frames from Unity-submitted projection textures. The readback path defaults to `METALXR_SWAPCHAIN_STORAGE_MODE=shared`; managed storage is kept as an override for debugging but currently causes Unity to stop the OpenXR session on Apple Silicon.
+
 The headset must have Developer Mode enabled, USB debugging accepted in-headset, and must appear as `device` in `adb devices -l`.
 
 ## Unity project setup
@@ -136,6 +144,7 @@ When the MetalXR runtime is selected, the script also sets:
 - `METALXR_FRAME_DUMP_DIR` for per-frame metadata files written from `xrEndFrame`.
 - `METALXR_FRAME_EXPORT_DIR` for per-eye frame export records and payload files written from submitted projection views.
 - `METALXR_FRAME_EXPORT_MODE=readback|fixture` for CPU readback or deterministic probe payloads.
+- `METALXR_SWAPCHAIN_STORAGE_MODE=shared|managed|private` to override Metal storage for runtime-owned swapchain textures. Unity readback workflows default to `shared`.
 - `METALXR_TRACKING_STATE_PATH` for HMD/controller state consumed by view and action APIs.
 - `METALXR_HAPTIC_COMMAND_PATH` for haptic commands emitted by `xrApplyHapticFeedback`.
 - `METALXR_TIMING_STATE_PATH` for measured Quest timing consumed by `xrWaitFrame`.
@@ -159,10 +168,11 @@ The macOS app is a SwiftUI dashboard around bundled adb platform-tools and the r
 - `Scripts/build-quest-client-apk.sh` builds the Unity OpenXR smoke project as a Quest APK.
 - `Scripts/install-run-quest-client.sh` installs, launches, configures adb reverse, and prints client logcat entries.
 - `Scripts/run-metalxr-frame-stream.sh` runs the host streamer for USB adb reverse or Wi-Fi transport tests, using `METALXR_FRAME_SOURCE=synthetic|unity-export`.
+- `Scripts/run-metalxr-playmode-workflow.sh` coordinates Quest client launch, Unity with frame export, Play Mode entry through uloop when available, unity-export streaming, Quest display logs, and screenshot smoke checks. Its default fixture export mode is a compact workflow smoke path; readback mode validates Unity-submitted texture streaming through the same loop.
 - `Scripts/probe-quest-client-screenshot.sh` captures a Quest screenshot over adb and fails when sampled pixels are too dark or have too little color variation.
 - `Scripts/probe-quest-client-unity.sh` compiles the Unity Quest client scripts through uloop.
 
-The next major engineering step is rendering the decoded color video on Quest without diagnostic fallback, then wiring the full Unity Play Mode workflow and improving adaptive frame pacing, input prediction, loss recovery, and timing control.
+The next major engineering step is replacing file-backed readback with a bounded or zero-copy production frame handoff, then improving adaptive frame pacing, input prediction, loss recovery, and timing control.
 
 ## How can I install it?
 

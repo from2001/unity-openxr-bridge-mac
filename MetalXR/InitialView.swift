@@ -93,12 +93,12 @@ struct InitialView: View {
     private var statusGrid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], alignment: .leading, spacing: 12) {
             StatusTile(title: "Quest", value: questStatusText, detail: questDetailText, isReady: developerStatus?.readyDevice != nil)
-            StatusTile(title: "Quest Client", value: installedText, detail: packageName, isReady: developerStatus?.questClientInstalled == true)
+            StatusTile(title: "Quest Client", value: questClientStatusText, detail: packageName, isReady: developerStatus?.questClientRunning == true)
             StatusTile(title: "Runtime", value: runtimeStatusText, detail: "MetalXR OpenXR runtime", isReady: runtimeIsReady)
             StatusTile(title: "Protocol", value: protocolStatusText, detail: "Host/client packet version", isReady: protocolIsReady)
             StatusTile(title: "Host Streamer", value: streamerStatusText, detail: "VideoToolbox stream host", isReady: developerStatus?.hostStreamerExists == true)
             StatusTile(title: "Unity", value: unityStatusText, detail: "UnityOpenXRSmoke project", isReady: !(developerStatus?.unityEditors.isEmpty ?? true))
-            StatusTile(title: "Stream", value: streamStatusText, detail: "adb reverse TCP 47000", isReady: streamProcess?.isRunning == true)
+            StatusTile(title: "Stream", value: streamStatusText, detail: reverseStatusText, isReady: streamProcess?.isRunning == true && developerStatus?.adbReverseConfigured == true)
         }
     }
 
@@ -114,6 +114,11 @@ struct InitialView: View {
                     showAPKImporter = true
                 }
                 .disabled(operationIsActive || developerStatus?.readyDevice == nil)
+
+                Button("Launch Client") {
+                    Task { await launchQuestClient() }
+                }
+                .disabled(operationIsActive || developerStatus?.readyDevice == nil || developerStatus?.questClientInstalled != true)
 
                 Button("Launch Unity") {
                     launchUnity()
@@ -167,7 +172,7 @@ struct InitialView: View {
                 }
                 .buttonStyle(.bordered)
 
-                Text("Includes status output, Unity launch environment, runtime log, streamer log, and MetalXR Quest logcat excerpts.")
+                Text("Includes status output, Unity launch environment, frame export manifests, runtime log, streamer log, Quest screenshot checks, and MetalXR Quest logcat excerpts.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -200,8 +205,11 @@ struct InitialView: View {
         return "Connect Quest with USB debugging enabled"
     }
 
-    private var installedText: String {
-        developerStatus?.questClientInstalled == true ? "Installed" : "Missing"
+    private var questClientStatusText: String {
+        if developerStatus?.questClientRunning == true {
+            return "Running"
+        }
+        return developerStatus?.questClientInstalled == true ? "Installed" : "Missing"
     }
 
     private var runtimeStatusText: String {
@@ -228,6 +236,10 @@ struct InitialView: View {
 
     private var streamStatusText: String {
         streamProcess?.isRunning == true ? "Running" : "Stopped"
+    }
+
+    private var reverseStatusText: String {
+        developerStatus?.adbReverseConfigured == true ? "adb reverse TCP 47000 ready" : "adb reverse TCP 47000 missing"
     }
 
     private var runtimeIsReady: Bool {
@@ -311,6 +323,35 @@ struct InitialView: View {
         }
     }
 
+    func launchQuestClient() async {
+        operationIsActive = true
+        defer { operationIsActive = false }
+
+        let result = await Task.detached(priority: .utility) {
+            let reverseRemove = utils.runADBCommand(arguments: ["reverse", "--remove", "tcp:47000"], shouldPrintOutput: true)
+            _ = reverseRemove
+            let reverse = utils.runADBCommand(arguments: ["reverse", "tcp:47000", "tcp:47000"], shouldPrintOutput: true)
+            if !reverse.succeeded {
+                return reverse
+            }
+
+            _ = utils.runADBCommand(arguments: ["logcat", "-c"], shouldPrintOutput: false)
+            _ = utils.runADBCommand(arguments: ["shell", "am", "force-stop", packageName], shouldPrintOutput: true)
+            return utils.runADBCommand(
+                arguments: ["shell", "monkey", "-p", packageName, "-c", "com.oculus.intent.category.VR", "1"],
+                shouldPrintOutput: true
+            )
+        }.value
+
+        if result.succeeded {
+            lastActionMessage = "Quest client launched with adb reverse tcp:47000."
+            await refreshDeviceState()
+        } else {
+            showFailureAlert = true
+            failureAlertMessage = result.output.isEmpty ? "Quest client launch failed with exit code \(result.exitCode)." : result.output
+        }
+    }
+
     func launchUnity() {
         guard let logURL = utils.unityLaunchLogURL else {
             showFailureAlert = true
@@ -322,10 +363,19 @@ struct InitialView: View {
             unityProcess = try utils.startRepositoryScript(
                 "Scripts/launch-unity-openxr.sh",
                 arguments: [utils.unitySmokeProjectURL.path],
-                environment: [:],
+                environment: [
+                    "METALXR_RUNTIME_LOG": utils.runtimeLogURL.path,
+                    "METALXR_FRAME_DUMP_DIR": utils.frameDumpDirURL.path,
+                    "METALXR_FRAME_EXPORT_DIR": utils.frameExportDirURL.path,
+                    "METALXR_FRAME_EXPORT_MODE": "readback",
+                    "METALXR_SWAPCHAIN_STORAGE_MODE": "shared",
+                    "METALXR_TRACKING_STATE_PATH": utils.trackingStateURL.path,
+                    "METALXR_HAPTIC_COMMAND_PATH": utils.hapticCommandURL.path,
+                    "METALXR_TIMING_STATE_PATH": utils.timingStateURL.path
+                ],
                 logURL: logURL
             )
-            lastActionMessage = "Unity launch started. Log: \(logURL.path)"
+            lastActionMessage = "Unity launch started with frame export enabled. Log: \(logURL.path)"
         } catch {
             showFailureAlert = true
             failureAlertMessage = error.localizedDescription
@@ -343,10 +393,18 @@ struct InitialView: View {
             streamProcess = try utils.startRepositoryScript(
                 "Scripts/run-metalxr-frame-stream.sh",
                 arguments: [],
-                environment: ["METALXR_TRANSPORT": "usb"],
+                environment: [
+                    "METALXR_TRANSPORT": "usb",
+                    "METALXR_FRAME_SOURCE": "unity-export",
+                    "METALXR_FRAME_EXPORT_DIR": utils.frameExportDirURL.path,
+                    "METALXR_TRACKING_STATE_PATH": utils.trackingStateURL.path,
+                    "METALXR_HAPTIC_COMMAND_PATH": utils.hapticCommandURL.path,
+                    "METALXR_TIMING_STATE_PATH": utils.timingStateURL.path
+                ],
                 logURL: logURL
             )
-            lastActionMessage = "Host streamer started. Log: \(logURL.path)"
+            lastActionMessage = "Host streamer started in unity-export mode. Log: \(logURL.path)"
+            Task { await refreshDeviceState() }
         } catch {
             showFailureAlert = true
             failureAlertMessage = error.localizedDescription
@@ -357,6 +415,7 @@ struct InitialView: View {
         streamProcess?.terminate()
         streamProcess = nil
         lastActionMessage = "Host streamer stopped."
+        Task { await refreshDeviceState() }
     }
 
     func exportDiagnostics() {
