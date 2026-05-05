@@ -39,6 +39,8 @@ typedef struct XrInstance_T* XrInstance;
 typedef struct XrSession_T* XrSession;
 typedef struct XrSpace_T* XrSpace;
 typedef struct XrSwapchain_T* XrSwapchain;
+typedef struct XrActionSet_T* XrActionSet;
+typedef struct XrAction_T* XrAction;
 typedef int32_t XrResult;
 typedef void (XRAPI_PTR *PFN_xrVoidFunction)(void);
 typedef XrResult (XRAPI_PTR *PFN_xrGetInstanceProcAddr)(
@@ -72,6 +74,11 @@ typedef XrResult (XRAPI_PTR *PFN_xrGetInstanceProcAddr)(
 #define XR_MAX_API_LAYER_DESCRIPTION_SIZE 256
 #define XR_MAX_STRUCTURE_NAME_SIZE 64
 #define XR_MAX_RESULT_STRING_SIZE 64
+#define XR_MAX_ACTION_SET_NAME_SIZE 64
+#define XR_MAX_ACTION_NAME_SIZE 64
+#define XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE 128
+#define XR_MAX_LOCALIZED_ACTION_NAME_SIZE 128
+#define XR_MAX_PATH_LENGTH 256
 
 enum {
     XR_SUCCESS = 0,
@@ -137,6 +144,19 @@ typedef enum XrStructureType {
     XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO = 55,
     XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO = 56,
     XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO = 57,
+    XR_TYPE_HAPTIC_VIBRATION = 13,
+    XR_TYPE_ACTION_STATE_BOOLEAN = 23,
+    XR_TYPE_ACTION_STATE_FLOAT = 24,
+    XR_TYPE_ACTION_STATE_VECTOR2F = 25,
+    XR_TYPE_ACTION_STATE_POSE = 27,
+    XR_TYPE_ACTION_SET_CREATE_INFO = 28,
+    XR_TYPE_ACTION_CREATE_INFO = 29,
+    XR_TYPE_ACTION_SPACE_CREATE_INFO = 38,
+    XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING = 51,
+    XR_TYPE_ACTION_STATE_GET_INFO = 58,
+    XR_TYPE_HAPTIC_ACTION_INFO = 59,
+    XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO = 60,
+    XR_TYPE_ACTIONS_SYNC_INFO = 61,
     XR_TYPE_GRAPHICS_BINDING_METAL_KHR = 1000029000,
     XR_TYPE_SWAPCHAIN_IMAGE_METAL_KHR = 1000029001,
     XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR = 1000029002,
@@ -182,6 +202,15 @@ typedef enum XrSessionState {
     XR_SESSION_STATE_MAX_ENUM = 0x7FFFFFFF
 } XrSessionState;
 
+typedef enum XrActionType {
+    XR_ACTION_TYPE_BOOLEAN_INPUT = 1,
+    XR_ACTION_TYPE_FLOAT_INPUT = 2,
+    XR_ACTION_TYPE_VECTOR2F_INPUT = 3,
+    XR_ACTION_TYPE_POSE_INPUT = 4,
+    XR_ACTION_TYPE_VIBRATION_OUTPUT = 100,
+    XR_ACTION_TYPE_MAX_ENUM = 0x7FFFFFFF
+} XrActionType;
+
 typedef XrFlags64 XrInstanceCreateFlags;
 typedef XrFlags64 XrSessionCreateFlags;
 typedef XrFlags64 XrSpaceLocationFlags;
@@ -189,6 +218,8 @@ typedef XrFlags64 XrViewStateFlags;
 typedef XrFlags64 XrCompositionLayerFlags;
 typedef XrFlags64 XrSwapchainCreateFlags;
 typedef XrFlags64 XrSwapchainUsageFlags;
+typedef XrFlags64 XrActionSetCreateFlags;
+typedef XrFlags64 XrActionCreateFlags;
 
 static const XrSpaceLocationFlags XR_SPACE_LOCATION_ORIENTATION_VALID_BIT = 0x00000001;
 static const XrSpaceLocationFlags XR_SPACE_LOCATION_POSITION_VALID_BIT = 0x00000002;
@@ -352,6 +383,11 @@ typedef struct XrVector3f {
     float z;
 } XrVector3f;
 
+typedef struct XrVector2f {
+    float x;
+    float y;
+} XrVector2f;
+
 typedef struct XrQuaternionf {
     float x;
     float y;
@@ -370,6 +406,126 @@ typedef struct XrReferenceSpaceCreateInfo {
     XrReferenceSpaceType referenceSpaceType;
     XrPosef poseInReferenceSpace;
 } XrReferenceSpaceCreateInfo;
+
+typedef struct XrActionSetCreateInfo {
+    XrStructureType type;
+    const void* next;
+    XrActionSetCreateFlags createFlags;
+    char actionSetName[XR_MAX_ACTION_SET_NAME_SIZE];
+    char localizedActionSetName[XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE];
+    uint32_t priority;
+} XrActionSetCreateInfo;
+
+typedef struct XrActionCreateInfo {
+    XrStructureType type;
+    const void* next;
+    XrActionCreateFlags createFlags;
+    char actionName[XR_MAX_ACTION_NAME_SIZE];
+    XrActionType actionType;
+    uint32_t countSubactionPaths;
+    const XrPath* subactionPaths;
+    char localizedActionName[XR_MAX_LOCALIZED_ACTION_NAME_SIZE];
+} XrActionCreateInfo;
+
+typedef struct XrActionSuggestedBinding {
+    XrAction action;
+    XrPath binding;
+} XrActionSuggestedBinding;
+
+typedef struct XrInteractionProfileSuggestedBinding {
+    XrStructureType type;
+    const void* next;
+    XrPath interactionProfile;
+    uint32_t countSuggestedBindings;
+    const XrActionSuggestedBinding* suggestedBindings;
+} XrInteractionProfileSuggestedBinding;
+
+typedef struct XrSessionActionSetsAttachInfo {
+    XrStructureType type;
+    const void* next;
+    uint32_t countActionSets;
+    const XrActionSet* actionSets;
+} XrSessionActionSetsAttachInfo;
+
+typedef struct XrActiveActionSet {
+    XrActionSet actionSet;
+    XrPath subactionPath;
+} XrActiveActionSet;
+
+typedef struct XrActionsSyncInfo {
+    XrStructureType type;
+    const void* next;
+    uint32_t countActiveActionSets;
+    const XrActiveActionSet* activeActionSets;
+} XrActionsSyncInfo;
+
+typedef struct XrActionStateGetInfo {
+    XrStructureType type;
+    const void* next;
+    XrAction action;
+    XrPath subactionPath;
+} XrActionStateGetInfo;
+
+typedef struct XrActionStateBoolean {
+    XrStructureType type;
+    void* next;
+    XrBool32 currentState;
+    XrBool32 changedSinceLastSync;
+    XrTime lastChangeTime;
+    XrBool32 isActive;
+} XrActionStateBoolean;
+
+typedef struct XrActionStateFloat {
+    XrStructureType type;
+    void* next;
+    float currentState;
+    XrBool32 changedSinceLastSync;
+    XrTime lastChangeTime;
+    XrBool32 isActive;
+} XrActionStateFloat;
+
+typedef struct XrActionStateVector2f {
+    XrStructureType type;
+    void* next;
+    XrVector2f currentState;
+    XrBool32 changedSinceLastSync;
+    XrTime lastChangeTime;
+    XrBool32 isActive;
+} XrActionStateVector2f;
+
+typedef struct XrActionStatePose {
+    XrStructureType type;
+    void* next;
+    XrBool32 isActive;
+} XrActionStatePose;
+
+typedef struct XrActionSpaceCreateInfo {
+    XrStructureType type;
+    const void* next;
+    XrAction action;
+    XrPath subactionPath;
+    XrPosef poseInActionSpace;
+} XrActionSpaceCreateInfo;
+
+typedef struct XrHapticActionInfo {
+    XrStructureType type;
+    const void* next;
+    XrAction action;
+    XrPath subactionPath;
+} XrHapticActionInfo;
+
+typedef struct XrHapticBaseHeader {
+    XrStructureType type;
+    const void* next;
+} XrHapticBaseHeader;
+
+typedef struct XrHapticVibration {
+    XrStructureType type;
+    const void* next;
+    XrDuration duration;
+    float frequency;
+    float amplitude;
+} XrHapticVibration;
 
 typedef struct XrExtent2Df {
     float width;

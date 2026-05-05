@@ -20,12 +20,17 @@ enum {
     kViewCount = 2,
     kSwapchainImageCount = 3,
     kMaxSessionSwapchains = 16,
+    kMaxSessionActionSets = 16,
+    kMaxActionSetActions = 64,
+    kMaxPathTableEntries = 256,
 };
 
 static const uint32_t kInstanceMagic = 0x4d584931;
 static const uint32_t kSessionMagic = 0x4d585331;
 static const uint32_t kSpaceMagic = 0x4d585850;
 static const uint32_t kSwapchainMagic = 0x4d585343;
+static const uint32_t kActionSetMagic = 0x4d584153;
+static const uint32_t kActionMagic = 0x4d584143;
 
 enum {
     kMetalPixelFormatRGBA8Unorm = 70,
@@ -82,6 +87,8 @@ struct XrSession_T {
     XrTime nextFrameTime;
     XrSpace spaces[16];
     uint32_t spaceCount;
+    XrActionSet actionSets[kMaxSessionActionSets];
+    uint32_t actionSetCount;
     XrSwapchain swapchains[kMaxSessionSwapchains];
     uint32_t swapchainCount;
 };
@@ -90,8 +97,31 @@ struct XrSpace_T {
     uint32_t magic;
     uint64_t id;
     XrSession session;
+    uint32_t kind;
     XrReferenceSpaceType type;
     XrPosef poseInReferenceSpace;
+    XrAction action;
+    XrPath subactionPath;
+};
+
+struct XrActionSet_T {
+    uint32_t magic;
+    uint64_t id;
+    XrInstance instance;
+    char name[XR_MAX_ACTION_SET_NAME_SIZE];
+    uint32_t priority;
+    XrAction actions[kMaxActionSetActions];
+    uint32_t actionCount;
+};
+
+struct XrAction_T {
+    uint32_t magic;
+    uint64_t id;
+    XrActionSet actionSet;
+    XrActionType type;
+    char name[XR_MAX_ACTION_NAME_SIZE];
+    XrPath subactionPaths[8];
+    uint32_t subactionPathCount;
 };
 
 struct XrSwapchain_T {
@@ -145,8 +175,20 @@ static uint64_t g_nextInstanceId = 1;
 static uint64_t g_nextSessionId = 1;
 static uint64_t g_nextSpaceId = 1;
 static uint64_t g_nextSwapchainId = 1;
+static uint64_t g_nextActionSetId = 1;
+static uint64_t g_nextActionId = 1;
+static uint64_t g_nextHapticCommandId = 1;
+static XrPath g_nextPath = 1;
 static void* g_metalDevice;
 static MetalXrObjcBridge g_objcBridge;
+
+typedef struct MetalXrPathEntry {
+    XrPath path;
+    char text[XR_MAX_PATH_LENGTH];
+} MetalXrPathEntry;
+
+static MetalXrPathEntry g_pathTable[kMaxPathTableEntries];
+static uint32_t g_pathTableCount;
 
 static void metalxr_release_objc(void* object);
 
@@ -255,6 +297,16 @@ static int metalxr_is_swapchain(XrSwapchain swapchain)
            metalxr_is_session(swapchain->session);
 }
 
+static int metalxr_is_action_set(XrActionSet actionSet)
+{
+    return actionSet != NULL && actionSet->magic == kActionSetMagic && metalxr_is_instance(actionSet->instance);
+}
+
+static int metalxr_is_action(XrAction action)
+{
+    return action != NULL && action->magic == kActionMagic && metalxr_is_action_set(action->actionSet);
+}
+
 static const char* metalxr_session_state_name(XrSessionState state)
 {
     switch (state) {
@@ -339,6 +391,19 @@ static const char* metalxr_structure_type_name(XrStructureType type)
         case XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO: return "XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO";
         case XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO: return "XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO";
         case XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO: return "XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO";
+        case XR_TYPE_ACTION_SET_CREATE_INFO: return "XR_TYPE_ACTION_SET_CREATE_INFO";
+        case XR_TYPE_ACTION_CREATE_INFO: return "XR_TYPE_ACTION_CREATE_INFO";
+        case XR_TYPE_ACTION_SPACE_CREATE_INFO: return "XR_TYPE_ACTION_SPACE_CREATE_INFO";
+        case XR_TYPE_ACTIONS_SYNC_INFO: return "XR_TYPE_ACTIONS_SYNC_INFO";
+        case XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO: return "XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO";
+        case XR_TYPE_ACTION_STATE_GET_INFO: return "XR_TYPE_ACTION_STATE_GET_INFO";
+        case XR_TYPE_ACTION_STATE_BOOLEAN: return "XR_TYPE_ACTION_STATE_BOOLEAN";
+        case XR_TYPE_ACTION_STATE_FLOAT: return "XR_TYPE_ACTION_STATE_FLOAT";
+        case XR_TYPE_ACTION_STATE_VECTOR2F: return "XR_TYPE_ACTION_STATE_VECTOR2F";
+        case XR_TYPE_ACTION_STATE_POSE: return "XR_TYPE_ACTION_STATE_POSE";
+        case XR_TYPE_HAPTIC_ACTION_INFO: return "XR_TYPE_HAPTIC_ACTION_INFO";
+        case XR_TYPE_HAPTIC_VIBRATION: return "XR_TYPE_HAPTIC_VIBRATION";
+        case XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING: return "XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING";
         case XR_TYPE_GRAPHICS_BINDING_METAL_KHR: return "XR_TYPE_GRAPHICS_BINDING_METAL_KHR";
         case XR_TYPE_SWAPCHAIN_IMAGE_METAL_KHR: return "XR_TYPE_SWAPCHAIN_IMAGE_METAL_KHR";
         case XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR: return "XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR";
@@ -352,6 +417,166 @@ static XrPosef metalxr_identity_pose(void)
     memset(&pose, 0, sizeof(pose));
     pose.orientation.w = 1.0f;
     return pose;
+}
+
+typedef struct MetalXrControllerState {
+    uint64_t sampleId;
+    uint64_t timestampNs;
+    uint32_t trackingFlags;
+    uint32_t buttons;
+    float trigger;
+    float grip;
+    XrVector2f thumbstick;
+    XrPosef aimPose;
+    XrPosef gripPose;
+} MetalXrControllerState;
+
+typedef struct MetalXrTrackingState {
+    uint64_t hmdSampleId;
+    uint64_t hmdTimestampNs;
+    uint32_t hmdTrackingFlags;
+    XrPosef hmdPose;
+    MetalXrControllerState controllers[2];
+} MetalXrTrackingState;
+
+static const char* metalxr_tracking_state_path(void)
+{
+    const char* path = getenv("METALXR_TRACKING_STATE_PATH");
+    return path != NULL && path[0] != '\0' ? path : "/tmp/metalxr_tracking_state.txt";
+}
+
+static const char* metalxr_haptic_command_path(void)
+{
+    const char* path = getenv("METALXR_HAPTIC_COMMAND_PATH");
+    return path != NULL && path[0] != '\0' ? path : "/tmp/metalxr_haptic_command.txt";
+}
+
+static MetalXrTrackingState metalxr_default_tracking_state(void)
+{
+    MetalXrTrackingState state;
+    memset(&state, 0, sizeof(state));
+    state.hmdPose = metalxr_identity_pose();
+    state.hmdTrackingFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+                             XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                             XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
+                             XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+    for (size_t hand = 0; hand < 2; ++hand) {
+        state.controllers[hand].aimPose = metalxr_identity_pose();
+        state.controllers[hand].gripPose = metalxr_identity_pose();
+        state.controllers[hand].trackingFlags = state.hmdTrackingFlags;
+    }
+    state.controllers[0].aimPose.position.x = -0.25f;
+    state.controllers[1].aimPose.position.x = 0.25f;
+    state.controllers[0].gripPose.position.x = -0.25f;
+    state.controllers[1].gripPose.position.x = 0.25f;
+    return state;
+}
+
+static XrSpaceLocationFlags metalxr_openxr_location_flags(uint32_t trackingFlags)
+{
+    XrSpaceLocationFlags flags = 0;
+    if ((trackingFlags & 0x00000001u) != 0) {
+        flags |= XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    }
+    if ((trackingFlags & 0x00000002u) != 0) {
+        flags |= XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    }
+    if ((trackingFlags & 0x00000004u) != 0) {
+        flags |= XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+    }
+    if ((trackingFlags & 0x00000008u) != 0) {
+        flags |= XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+    }
+    return flags;
+}
+
+static int metalxr_load_tracking_state(MetalXrTrackingState* state)
+{
+    if (state == NULL) {
+        return 0;
+    }
+
+    *state = metalxr_default_tracking_state();
+    FILE* input = fopen(metalxr_tracking_state_path(), "r");
+    if (input == NULL) {
+        return 0;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), input) != NULL) {
+        if (strncmp(line, "hmd ", 4) == 0) {
+            (void)sscanf(line,
+                         "hmd %" SCNu64 " %" SCNu64 " %u %f %f %f %f %f %f %f",
+                         &state->hmdSampleId,
+                         &state->hmdTimestampNs,
+                         &state->hmdTrackingFlags,
+                         &state->hmdPose.position.x,
+                         &state->hmdPose.position.y,
+                         &state->hmdPose.position.z,
+                         &state->hmdPose.orientation.x,
+                         &state->hmdPose.orientation.y,
+                         &state->hmdPose.orientation.z,
+                         &state->hmdPose.orientation.w);
+        } else if (strncmp(line, "controller ", 11) == 0) {
+            uint32_t hand = 0;
+            MetalXrControllerState controller;
+            memset(&controller, 0, sizeof(controller));
+            controller.aimPose = metalxr_identity_pose();
+            controller.gripPose = metalxr_identity_pose();
+            const int scanned = sscanf(line,
+                                       "controller %u %" SCNu64 " %" SCNu64 " %u %u %f %f %f %f "
+                                       "%f %f %f %f %f %f %f %f %f %f %f %f %f %f",
+                                       &hand,
+                                       &controller.sampleId,
+                                       &controller.timestampNs,
+                                       &controller.trackingFlags,
+                                       &controller.buttons,
+                                       &controller.trigger,
+                                       &controller.grip,
+                                       &controller.thumbstick.x,
+                                       &controller.thumbstick.y,
+                                       &controller.aimPose.position.x,
+                                       &controller.aimPose.position.y,
+                                       &controller.aimPose.position.z,
+                                       &controller.aimPose.orientation.x,
+                                       &controller.aimPose.orientation.y,
+                                       &controller.aimPose.orientation.z,
+                                       &controller.aimPose.orientation.w,
+                                       &controller.gripPose.position.x,
+                                       &controller.gripPose.position.y,
+                                       &controller.gripPose.position.z,
+                                       &controller.gripPose.orientation.x,
+                                       &controller.gripPose.orientation.y,
+                                       &controller.gripPose.orientation.z,
+                                       &controller.gripPose.orientation.w);
+            if (scanned == 23 && hand < 2) {
+                state->controllers[hand] = controller;
+            }
+        }
+    }
+
+    fclose(input);
+    return 1;
+}
+
+static int metalxr_string_contains(const char* text, const char* needle)
+{
+    return text != NULL && needle != NULL && strstr(text, needle) != NULL;
+}
+
+static int metalxr_path_is_left_hand(XrPath path)
+{
+    for (uint32_t i = 0; i < g_pathTableCount; ++i) {
+        if (g_pathTable[i].path == path) {
+            return strstr(g_pathTable[i].text, "/left") != NULL;
+        }
+    }
+    return 0;
+}
+
+static uint32_t metalxr_hand_index_from_path(XrPath path)
+{
+    return metalxr_path_is_left_hand(path) ? 0u : 1u;
 }
 
 static XrFovf metalxr_default_fov(void)
@@ -961,6 +1186,79 @@ static XrResult XRAPI_CALL metalxr_xrStructureTypeToString(
     return XR_SUCCESS;
 }
 
+static XrResult XRAPI_CALL metalxr_xrStringToPath(
+    XrInstance instance,
+    const char* pathString,
+    XrPath* path)
+{
+    if (!metalxr_is_instance(instance) || pathString == NULL || path == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    pthread_mutex_lock(&g_mutex);
+    for (uint32_t i = 0; i < g_pathTableCount; ++i) {
+        if (strcmp(g_pathTable[i].text, pathString) == 0) {
+            *path = g_pathTable[i].path;
+            pthread_mutex_unlock(&g_mutex);
+            return XR_SUCCESS;
+        }
+    }
+
+    if (g_pathTableCount >= kMaxPathTableEntries) {
+        pthread_mutex_unlock(&g_mutex);
+        return XR_ERROR_LIMIT_REACHED;
+    }
+
+    XrPath created = g_nextPath++;
+    g_pathTable[g_pathTableCount].path = created;
+    snprintf(g_pathTable[g_pathTableCount].text, sizeof(g_pathTable[g_pathTableCount].text), "%s", pathString);
+    ++g_pathTableCount;
+    *path = created;
+    pthread_mutex_unlock(&g_mutex);
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrPathToString(
+    XrInstance instance,
+    XrPath path,
+    uint32_t bufferCapacityInput,
+    uint32_t* bufferCountOutput,
+    char* buffer)
+{
+    if (!metalxr_is_instance(instance) || bufferCountOutput == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    const char* text = NULL;
+    pthread_mutex_lock(&g_mutex);
+    for (uint32_t i = 0; i < g_pathTableCount; ++i) {
+        if (g_pathTable[i].path == path) {
+            text = g_pathTable[i].text;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_mutex);
+
+    if (text == NULL) {
+        text = "";
+    }
+
+    const uint32_t required = (uint32_t)strlen(text) + 1;
+    *bufferCountOutput = required;
+    if (bufferCapacityInput == 0) {
+        return XR_SUCCESS;
+    }
+    if (buffer == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (bufferCapacityInput < required) {
+        return XR_ERROR_SIZE_INSUFFICIENT;
+    }
+
+    snprintf(buffer, bufferCapacityInput, "%s", text);
+    return XR_SUCCESS;
+}
+
 static XrResult XRAPI_CALL metalxr_xrGetSystem(
     XrInstance instance,
     const XrSystemGetInfo* getInfo,
@@ -1379,6 +1677,7 @@ static XrResult XRAPI_CALL metalxr_xrCreateReferenceSpace(
 
     created->magic = kSpaceMagic;
     created->session = session;
+    created->kind = 0;
     created->type = createInfo->referenceSpaceType;
     created->poseInReferenceSpace = createInfo->poseInReferenceSpace;
     session->spaces[session->spaceCount++] = created;
@@ -1421,12 +1720,28 @@ static XrResult XRAPI_CALL metalxr_xrLocateSpace(
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
+    MetalXrTrackingState tracking = metalxr_default_tracking_state();
+    (void)metalxr_load_tracking_state(&tracking);
+
     location->type = XR_TYPE_SPACE_LOCATION;
-    location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
-                              XR_SPACE_LOCATION_POSITION_VALID_BIT |
-                              XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
-                              XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
     location->pose = metalxr_identity_pose();
+
+    if (space->kind == 1 && metalxr_is_action(space->action)) {
+        const uint32_t hand = metalxr_hand_index_from_path(space->subactionPath);
+        MetalXrControllerState* controller = &tracking.controllers[hand];
+        location->locationFlags = metalxr_openxr_location_flags(controller->trackingFlags);
+        location->pose = metalxr_string_contains(space->action->name, "grip") ?
+            controller->gripPose :
+            controller->aimPose;
+    } else if (space->type == XR_REFERENCE_SPACE_TYPE_VIEW) {
+        location->locationFlags = metalxr_openxr_location_flags(tracking.hmdTrackingFlags);
+        location->pose = tracking.hmdPose;
+    } else {
+        location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+                                  XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                                  XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
+                                  XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+    }
 
     return XR_SUCCESS;
 }
@@ -1454,6 +1769,346 @@ static XrResult XRAPI_CALL metalxr_xrDestroySpace(XrSpace space)
     free(space);
 
     return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrCreateActionSet(
+    XrInstance instance,
+    const XrActionSetCreateInfo* createInfo,
+    XrActionSet* actionSet)
+{
+    if (!metalxr_is_instance(instance) || createInfo == NULL || actionSet == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    XrActionSet created = (XrActionSet)calloc(1, sizeof(*created));
+    if (created == NULL) {
+        return XR_ERROR_OUT_OF_MEMORY;
+    }
+
+    pthread_mutex_lock(&g_mutex);
+    created->id = g_nextActionSetId++;
+    pthread_mutex_unlock(&g_mutex);
+
+    created->magic = kActionSetMagic;
+    created->instance = instance;
+    created->priority = createInfo->priority;
+    snprintf(created->name, sizeof(created->name), "%s", createInfo->actionSetName);
+    *actionSet = created;
+    metalxr_log("action set %" PRIu64 " created name=%s", created->id, created->name);
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrDestroyActionSet(XrActionSet actionSet)
+{
+    if (!metalxr_is_action_set(actionSet)) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
+    for (uint32_t i = 0; i < actionSet->actionCount; ++i) {
+        if (actionSet->actions[i] != NULL) {
+            actionSet->actions[i]->magic = 0;
+            free(actionSet->actions[i]);
+        }
+    }
+
+    actionSet->magic = 0;
+    free(actionSet);
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrCreateAction(
+    XrActionSet actionSet,
+    const XrActionCreateInfo* createInfo,
+    XrAction* action)
+{
+    if (!metalxr_is_action_set(actionSet) || createInfo == NULL || action == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (actionSet->actionCount >= kMaxActionSetActions) {
+        return XR_ERROR_LIMIT_REACHED;
+    }
+
+    XrAction created = (XrAction)calloc(1, sizeof(*created));
+    if (created == NULL) {
+        return XR_ERROR_OUT_OF_MEMORY;
+    }
+
+    pthread_mutex_lock(&g_mutex);
+    created->id = g_nextActionId++;
+    pthread_mutex_unlock(&g_mutex);
+
+    created->magic = kActionMagic;
+    created->actionSet = actionSet;
+    created->type = createInfo->actionType;
+    snprintf(created->name, sizeof(created->name), "%s", createInfo->actionName);
+    created->subactionPathCount = createInfo->countSubactionPaths < 8 ? createInfo->countSubactionPaths : 8;
+    for (uint32_t i = 0; i < created->subactionPathCount; ++i) {
+        created->subactionPaths[i] = createInfo->subactionPaths[i];
+    }
+
+    actionSet->actions[actionSet->actionCount++] = created;
+    *action = created;
+    metalxr_log("action %" PRIu64 " created name=%s type=%d", created->id, created->name, created->type);
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrDestroyAction(XrAction action)
+{
+    if (!metalxr_is_action(action)) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
+    XrActionSet actionSet = action->actionSet;
+    for (uint32_t i = 0; i < actionSet->actionCount; ++i) {
+        if (actionSet->actions[i] == action) {
+            for (uint32_t j = i; j + 1 < actionSet->actionCount; ++j) {
+                actionSet->actions[j] = actionSet->actions[j + 1];
+            }
+            --actionSet->actionCount;
+            break;
+        }
+    }
+
+    action->magic = 0;
+    free(action);
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrSuggestInteractionProfileBindings(
+    XrInstance instance,
+    const XrInteractionProfileSuggestedBinding* suggestedBindings)
+{
+    if (!metalxr_is_instance(instance) || suggestedBindings == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    metalxr_log("xrSuggestInteractionProfileBindings count=%u", suggestedBindings->countSuggestedBindings);
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrAttachSessionActionSets(
+    XrSession session,
+    const XrSessionActionSetsAttachInfo* attachInfo)
+{
+    if (!metalxr_is_session(session) || attachInfo == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (attachInfo->countActionSets > kMaxSessionActionSets) {
+        return XR_ERROR_LIMIT_REACHED;
+    }
+
+    session->actionSetCount = attachInfo->countActionSets;
+    for (uint32_t i = 0; i < attachInfo->countActionSets; ++i) {
+        if (!metalxr_is_action_set(attachInfo->actionSets[i])) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        session->actionSets[i] = attachInfo->actionSets[i];
+    }
+
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrSyncActions(
+    XrSession session,
+    const XrActionsSyncInfo* syncInfo)
+{
+    if (!metalxr_is_session(session) || syncInfo == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    return XR_SUCCESS;
+}
+
+static uint32_t metalxr_hand_from_action_info(const XrActionStateGetInfo* getInfo)
+{
+    if (getInfo != NULL && getInfo->subactionPath != XR_NULL_PATH) {
+        return metalxr_hand_index_from_path(getInfo->subactionPath);
+    }
+
+    return 1;
+}
+
+static XrResult XRAPI_CALL metalxr_xrGetActionStateBoolean(
+    XrSession session,
+    const XrActionStateGetInfo* getInfo,
+    XrActionStateBoolean* state)
+{
+    if (!metalxr_is_session(session) || getInfo == NULL || !metalxr_is_action(getInfo->action) || state == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    MetalXrTrackingState tracking;
+    (void)metalxr_load_tracking_state(&tracking);
+    MetalXrControllerState* controller = &tracking.controllers[metalxr_hand_from_action_info(getInfo)];
+
+    uint32_t buttonMask = 0;
+    if (metalxr_string_contains(getInfo->action->name, "secondary")) {
+        buttonMask = 0x00000002u;
+    } else if (metalxr_string_contains(getInfo->action->name, "menu")) {
+        buttonMask = 0x00000004u;
+    } else if (metalxr_string_contains(getInfo->action->name, "thumbstick") ||
+               metalxr_string_contains(getInfo->action->name, "joystick")) {
+        buttonMask = 0x00000008u;
+    } else {
+        buttonMask = 0x00000001u;
+    }
+
+    state->type = XR_TYPE_ACTION_STATE_BOOLEAN;
+    state->currentState = (controller->buttons & buttonMask) != 0 ? XR_TRUE : XR_FALSE;
+    state->changedSinceLastSync = XR_FALSE;
+    state->lastChangeTime = (XrTime)controller->timestampNs;
+    state->isActive = controller->trackingFlags != 0 ? XR_TRUE : XR_FALSE;
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrGetActionStateFloat(
+    XrSession session,
+    const XrActionStateGetInfo* getInfo,
+    XrActionStateFloat* state)
+{
+    if (!metalxr_is_session(session) || getInfo == NULL || !metalxr_is_action(getInfo->action) || state == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    MetalXrTrackingState tracking;
+    (void)metalxr_load_tracking_state(&tracking);
+    MetalXrControllerState* controller = &tracking.controllers[metalxr_hand_from_action_info(getInfo)];
+
+    state->type = XR_TYPE_ACTION_STATE_FLOAT;
+    state->currentState = metalxr_string_contains(getInfo->action->name, "grip") ? controller->grip : controller->trigger;
+    state->changedSinceLastSync = XR_FALSE;
+    state->lastChangeTime = (XrTime)controller->timestampNs;
+    state->isActive = controller->trackingFlags != 0 ? XR_TRUE : XR_FALSE;
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrGetActionStateVector2f(
+    XrSession session,
+    const XrActionStateGetInfo* getInfo,
+    XrActionStateVector2f* state)
+{
+    if (!metalxr_is_session(session) || getInfo == NULL || !metalxr_is_action(getInfo->action) || state == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    MetalXrTrackingState tracking;
+    (void)metalxr_load_tracking_state(&tracking);
+    MetalXrControllerState* controller = &tracking.controllers[metalxr_hand_from_action_info(getInfo)];
+
+    state->type = XR_TYPE_ACTION_STATE_VECTOR2F;
+    state->currentState = controller->thumbstick;
+    state->changedSinceLastSync = XR_FALSE;
+    state->lastChangeTime = (XrTime)controller->timestampNs;
+    state->isActive = controller->trackingFlags != 0 ? XR_TRUE : XR_FALSE;
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrGetActionStatePose(
+    XrSession session,
+    const XrActionStateGetInfo* getInfo,
+    XrActionStatePose* state)
+{
+    if (!metalxr_is_session(session) || getInfo == NULL || !metalxr_is_action(getInfo->action) || state == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    MetalXrTrackingState tracking;
+    (void)metalxr_load_tracking_state(&tracking);
+    MetalXrControllerState* controller = &tracking.controllers[metalxr_hand_from_action_info(getInfo)];
+
+    state->type = XR_TYPE_ACTION_STATE_POSE;
+    state->isActive = controller->trackingFlags != 0 ? XR_TRUE : XR_FALSE;
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrCreateActionSpace(
+    XrSession session,
+    const XrActionSpaceCreateInfo* createInfo,
+    XrSpace* space)
+{
+    if (!metalxr_is_session(session) || createInfo == NULL || !metalxr_is_action(createInfo->action) || space == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (session->spaceCount >= 16) {
+        return XR_ERROR_LIMIT_REACHED;
+    }
+
+    XrSpace created = (XrSpace)calloc(1, sizeof(*created));
+    if (created == NULL) {
+        return XR_ERROR_OUT_OF_MEMORY;
+    }
+
+    pthread_mutex_lock(&g_mutex);
+    created->id = g_nextSpaceId++;
+    pthread_mutex_unlock(&g_mutex);
+
+    created->magic = kSpaceMagic;
+    created->session = session;
+    created->kind = 1;
+    created->type = XR_REFERENCE_SPACE_TYPE_LOCAL;
+    created->poseInReferenceSpace = createInfo->poseInActionSpace;
+    created->action = createInfo->action;
+    created->subactionPath = createInfo->subactionPath;
+    session->spaces[session->spaceCount++] = created;
+    *space = created;
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrApplyHapticFeedback(
+    XrSession session,
+    const XrHapticActionInfo* hapticActionInfo,
+    const XrHapticBaseHeader* hapticFeedback)
+{
+    if (!metalxr_is_session(session) || hapticActionInfo == NULL || hapticFeedback == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    if (hapticFeedback->type != XR_TYPE_HAPTIC_VIBRATION) {
+        return XR_ERROR_FEATURE_UNSUPPORTED;
+    }
+
+    const XrHapticVibration* vibration = (const XrHapticVibration*)hapticFeedback;
+    const uint32_t hand = hapticActionInfo->subactionPath != XR_NULL_PATH ?
+        metalxr_hand_index_from_path(hapticActionInfo->subactionPath) :
+        1u;
+
+    pthread_mutex_lock(&g_mutex);
+    const uint64_t commandId = g_nextHapticCommandId++;
+    pthread_mutex_unlock(&g_mutex);
+
+    const char* commandPath = metalxr_haptic_command_path();
+    char tempPath[1200];
+    snprintf(tempPath, sizeof(tempPath), "%s.tmp", commandPath);
+    FILE* output = fopen(tempPath, "w");
+    if (output != NULL) {
+        uint32_t durationUs = 0;
+        if (vibration->duration > 0) {
+            durationUs = (uint32_t)(vibration->duration / 1000);
+        }
+        fprintf(output,
+                "%" PRIu64 " %" PRIu64 " %u %.6f %.6f %u\n",
+                commandId,
+                (uint64_t)metalxr_now_ns(),
+                hand,
+                vibration->amplitude,
+                vibration->frequency,
+                durationUs);
+        fclose(output);
+        (void)rename(tempPath, commandPath);
+    }
+
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrStopHapticFeedback(
+    XrSession session,
+    const XrHapticActionInfo* hapticActionInfo)
+{
+    XrHapticVibration stop;
+    memset(&stop, 0, sizeof(stop));
+    stop.type = XR_TYPE_HAPTIC_VIBRATION;
+    stop.duration = 0;
+    return metalxr_xrApplyHapticFeedback(session, hapticActionInfo, (const XrHapticBaseHeader*)&stop);
 }
 
 static XrResult XRAPI_CALL metalxr_xrEnumerateSwapchainFormats(
@@ -1951,10 +2606,9 @@ static XrResult XRAPI_CALL metalxr_xrLocateViews(
 
     *viewCountOutput = kViewCount;
     viewState->type = XR_TYPE_VIEW_STATE;
-    viewState->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT |
-                                XR_VIEW_STATE_POSITION_VALID_BIT |
-                                XR_VIEW_STATE_ORIENTATION_TRACKED_BIT |
-                                XR_VIEW_STATE_POSITION_TRACKED_BIT;
+    MetalXrTrackingState tracking;
+    (void)metalxr_load_tracking_state(&tracking);
+    viewState->viewStateFlags = metalxr_openxr_location_flags(tracking.hmdTrackingFlags);
 
     if (viewCapacityInput == 0) {
         return XR_SUCCESS;
@@ -1970,8 +2624,8 @@ static XrResult XRAPI_CALL metalxr_xrLocateViews(
 
     for (uint32_t i = 0; i < kViewCount; ++i) {
         views[i].type = XR_TYPE_VIEW;
-        views[i].pose = metalxr_identity_pose();
-        views[i].pose.position.x = i == 0 ? -0.032f : 0.032f;
+        views[i].pose = tracking.hmdPose;
+        views[i].pose.position.x += i == 0 ? -0.032f : 0.032f;
         views[i].fov = metalxr_default_fov();
     }
 
@@ -1993,6 +2647,8 @@ static const MetalXrProc kProcTable[] = {
     { "xrPollEvent", (PFN_xrVoidFunction)metalxr_xrPollEvent },
     { "xrResultToString", (PFN_xrVoidFunction)metalxr_xrResultToString },
     { "xrStructureTypeToString", (PFN_xrVoidFunction)metalxr_xrStructureTypeToString },
+    { "xrStringToPath", (PFN_xrVoidFunction)metalxr_xrStringToPath },
+    { "xrPathToString", (PFN_xrVoidFunction)metalxr_xrPathToString },
     { "xrGetSystem", (PFN_xrVoidFunction)metalxr_xrGetSystem },
     { "xrGetSystemProperties", (PFN_xrVoidFunction)metalxr_xrGetSystemProperties },
     { "xrEnumerateViewConfigurations", (PFN_xrVoidFunction)metalxr_xrEnumerateViewConfigurations },
@@ -2011,6 +2667,20 @@ static const MetalXrProc kProcTable[] = {
     { "xrGetReferenceSpaceBoundsRect", (PFN_xrVoidFunction)metalxr_xrGetReferenceSpaceBoundsRect },
     { "xrLocateSpace", (PFN_xrVoidFunction)metalxr_xrLocateSpace },
     { "xrDestroySpace", (PFN_xrVoidFunction)metalxr_xrDestroySpace },
+    { "xrCreateActionSet", (PFN_xrVoidFunction)metalxr_xrCreateActionSet },
+    { "xrDestroyActionSet", (PFN_xrVoidFunction)metalxr_xrDestroyActionSet },
+    { "xrCreateAction", (PFN_xrVoidFunction)metalxr_xrCreateAction },
+    { "xrDestroyAction", (PFN_xrVoidFunction)metalxr_xrDestroyAction },
+    { "xrSuggestInteractionProfileBindings", (PFN_xrVoidFunction)metalxr_xrSuggestInteractionProfileBindings },
+    { "xrAttachSessionActionSets", (PFN_xrVoidFunction)metalxr_xrAttachSessionActionSets },
+    { "xrSyncActions", (PFN_xrVoidFunction)metalxr_xrSyncActions },
+    { "xrGetActionStateBoolean", (PFN_xrVoidFunction)metalxr_xrGetActionStateBoolean },
+    { "xrGetActionStateFloat", (PFN_xrVoidFunction)metalxr_xrGetActionStateFloat },
+    { "xrGetActionStateVector2f", (PFN_xrVoidFunction)metalxr_xrGetActionStateVector2f },
+    { "xrGetActionStatePose", (PFN_xrVoidFunction)metalxr_xrGetActionStatePose },
+    { "xrCreateActionSpace", (PFN_xrVoidFunction)metalxr_xrCreateActionSpace },
+    { "xrApplyHapticFeedback", (PFN_xrVoidFunction)metalxr_xrApplyHapticFeedback },
+    { "xrStopHapticFeedback", (PFN_xrVoidFunction)metalxr_xrStopHapticFeedback },
     { "xrEnumerateSwapchainFormats", (PFN_xrVoidFunction)metalxr_xrEnumerateSwapchainFormats },
     { "xrCreateSwapchain", (PFN_xrVoidFunction)metalxr_xrCreateSwapchain },
     { "xrDestroySwapchain", (PFN_xrVoidFunction)metalxr_xrDestroySwapchain },

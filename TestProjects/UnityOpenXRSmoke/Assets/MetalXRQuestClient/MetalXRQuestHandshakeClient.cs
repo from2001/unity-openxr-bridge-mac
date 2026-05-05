@@ -13,10 +13,15 @@ namespace MetalXR.QuestClient
         private const int RetryDelayMs = 2500;
         private const int MaxPayloadBytes = 8 * 1024 * 1024;
         private const int MaxQueuedFrames = 8;
+        private const int MaxQueuedOutgoingPackets = 32;
+        private const int MaxQueuedHaptics = 8;
         private readonly MetalXRQuestEndpoint _endpoint;
         private readonly ConcurrentQueue<string> _logs = new ConcurrentQueue<string>();
         private readonly ConcurrentQueue<MetalXRQuestEncodedVideoFrame> _frames = new ConcurrentQueue<MetalXRQuestEncodedVideoFrame>();
+        private readonly ConcurrentQueue<byte[]> _outgoingPackets = new ConcurrentQueue<byte[]>();
+        private readonly ConcurrentQueue<MetalXRQuestHapticCommand> _hapticCommands = new ConcurrentQueue<MetalXRQuestHapticCommand>();
         private readonly object _lifecycleLock = new object();
+        private readonly object _sequenceLock = new object();
         private Thread _thread;
         private bool _stopRequested;
         private ulong _sequence = 1;
@@ -76,6 +81,90 @@ namespace MetalXR.QuestClient
             return drained;
         }
 
+        public int DrainHapticCommands(Action<MetalXRQuestHapticCommand> sink, int maxCommands)
+        {
+            if (sink == null || maxCommands <= 0)
+            {
+                return 0;
+            }
+
+            int drained = 0;
+            MetalXRQuestHapticCommand command;
+            while (drained < maxCommands && _hapticCommands.TryDequeue(out command))
+            {
+                sink(command);
+                drained++;
+            }
+
+            return drained;
+        }
+
+        public void EnqueueOutgoingPacket(byte[] packet)
+        {
+            if (packet == null || packet.Length == 0)
+            {
+                return;
+            }
+
+            _outgoingPackets.Enqueue(packet);
+            while (_outgoingPackets.Count > MaxQueuedOutgoingPackets)
+            {
+                byte[] dropped;
+                if (!_outgoingPackets.TryDequeue(out dropped))
+                {
+                    break;
+                }
+            }
+        }
+
+        public void EnqueuePoseSample(
+            ulong sampleId,
+            ulong timestampNs,
+            ulong predictedDisplayTimeNs,
+            float[] position,
+            float[] orientation,
+            uint trackingFlags)
+        {
+            EnqueueOutgoingPacket(MetalXRQuestProtocol.CreatePoseSamplePacket(
+                NextSequence(),
+                sampleId,
+                timestampNs,
+                predictedDisplayTimeNs,
+                position,
+                orientation,
+                trackingFlags));
+        }
+
+        public void EnqueueControllerInput(
+            ulong sampleId,
+            ulong timestampNs,
+            uint hand,
+            uint buttons,
+            float trigger,
+            float grip,
+            float[] thumbstick,
+            uint trackingFlags,
+            float[] aimPosition,
+            float[] aimOrientation,
+            float[] gripPosition,
+            float[] gripOrientation)
+        {
+            EnqueueOutgoingPacket(MetalXRQuestProtocol.CreateControllerInputPacket(
+                NextSequence(),
+                sampleId,
+                timestampNs,
+                hand,
+                buttons,
+                trigger,
+                grip,
+                thumbstick,
+                trackingFlags,
+                aimPosition,
+                aimOrientation,
+                gripPosition,
+                gripOrientation));
+        }
+
         public void Dispose()
         {
             lock (_lifecycleLock)
@@ -129,7 +218,7 @@ namespace MetalXR.QuestClient
                     using (NetworkStream stream = client.GetStream())
                     {
                         stream.ReadTimeout = ReadTimeoutMs;
-                        byte[] hello = MetalXRQuestProtocol.CreateHelloPacket(_sequence++);
+                        byte[] hello = MetalXRQuestProtocol.CreateHelloPacket(NextSequence());
                         stream.Write(hello, 0, hello.Length);
                         _logs.Enqueue("sent HELLO to " + _endpoint.Host + ":" + _endpoint.Port);
 
@@ -219,6 +308,20 @@ namespace MetalXR.QuestClient
                 {
                     _logs.Enqueue("received ERROR packet from host");
                 }
+                else if (header.Type == MetalXRQuestProtocol.PacketHapticCommand)
+                {
+                    MetalXRQuestHapticCommand command;
+                    if (MetalXRQuestProtocol.TryParseHapticCommandPayload(payload, out command))
+                    {
+                        EnqueueHaptic(command);
+                    }
+                    else
+                    {
+                        _logs.Enqueue("dropped malformed HAPTIC_COMMAND packet bytes=" + header.PayloadSize);
+                    }
+                }
+
+                FlushOutgoingPackets(stream);
             }
         }
 
@@ -243,6 +346,35 @@ namespace MetalXR.QuestClient
                     " eye=" + eyeName +
                     " bytes=" + frame.EncodedBytes.Length +
                     " keyframe=" + frame.IsKeyframe);
+            }
+        }
+
+        private void EnqueueHaptic(MetalXRQuestHapticCommand command)
+        {
+            _hapticCommands.Enqueue(command);
+            while (_hapticCommands.Count > MaxQueuedHaptics)
+            {
+                MetalXRQuestHapticCommand dropped;
+                if (!_hapticCommands.TryDequeue(out dropped))
+                {
+                    break;
+                }
+            }
+
+            string handName = command.IsLeftHand ? "left" : "right";
+            _logs.Enqueue(
+                "received HAPTIC_COMMAND id=" + command.CommandId +
+                " hand=" + handName +
+                " amplitude=" + command.Amplitude +
+                " duration_us=" + command.DurationUs);
+        }
+
+        private void FlushOutgoingPackets(Stream stream)
+        {
+            byte[] packet;
+            while (_outgoingPackets.TryDequeue(out packet))
+            {
+                stream.Write(packet, 0, packet.Length);
             }
         }
 
@@ -301,6 +433,16 @@ namespace MetalXR.QuestClient
             if (_failureCount <= 3 || (_failureCount % 10) == 0)
             {
                 _logs.Enqueue("host stream unavailable at " + _endpoint.Host + ":" + _endpoint.Port + " (" + reason + ")");
+            }
+        }
+
+        private ulong NextSequence()
+        {
+            lock (_sequenceLock)
+            {
+                ulong sequence = _sequence;
+                _sequence++;
+                return sequence;
             }
         }
     }

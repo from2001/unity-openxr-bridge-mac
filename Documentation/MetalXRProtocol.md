@@ -1,6 +1,6 @@
 # MetalXR Protocol
 
-This document defines the initial host/client protocol for issue #6.
+This document defines the initial host/client protocol added across the streaming and input bridge milestones.
 
 ## Transport Choice
 
@@ -77,7 +77,42 @@ payloadBytes of H.264 Annex B data
 
 `METALXR_PACKET_TIMING_SAMPLE` separates timing telemetry from media payloads and includes host capture, predicted display, encode start/end, client receive, and client display timestamps. All timing fields are monotonic nanoseconds in the sender's local clock domain unless a later clock-sync packet defines a shared mapping.
 
-Pose, controller, haptic, and log packet structs are declared in the shared header so host and Quest code can agree on binary layout before those subsystems are implemented.
+## Pose, Controller, And Haptic Packets
+
+`METALXR_PACKET_POSE_SAMPLE` carries one Quest HMD sample:
+
+- `sampleId`
+- `timestampNs`
+- `predictedDisplayTimeNs`
+- `position[3]`
+- `orientation[4]`
+- `trackingFlags`
+
+`trackingFlags` uses `METALXR_TRACKING_ORIENTATION_VALID`, `METALXR_TRACKING_POSITION_VALID`, `METALXR_TRACKING_ORIENTATION_TRACKED`, and `METALXR_TRACKING_POSITION_TRACKED`.
+
+`METALXR_PACKET_CONTROLLER_INPUT` carries one controller sample:
+
+- `sampleId`
+- `timestampNs`
+- `hand`: `METALXR_CONTROLLER_HAND_LEFT` or `METALXR_CONTROLLER_HAND_RIGHT`
+- `buttons`: primary, secondary, menu, and thumbstick button flags
+- `trigger`, `grip`, and `thumbstick[2]`
+- `trackingFlags`
+- `aimPosition[3]` and `aimOrientation[4]`
+- `gripPosition[3]` and `gripOrientation[4]`
+
+The current Quest client fills aim and grip poses from the tracked XR device pose when separate aim/grip data is not available through the simple Unity XR device path.
+
+`METALXR_PACKET_HAPTIC_COMMAND` flows from host to Quest:
+
+- `commandId`
+- `timestampNs`
+- `hand`
+- `amplitude`
+- `frequencyHz`
+- `durationUs`
+
+The development host bridge writes the latest HMD/controller state to `METALXR_TRACKING_STATE_PATH` and polls `METALXR_HAPTIC_COMMAND_PATH` for haptic commands emitted by the OpenXR runtime. These files are a local integration bridge, not the final transport format.
 
 ## Probe
 
@@ -93,10 +128,12 @@ The probe verifies:
 - Client heartbeat to host.
 - Host heartbeat reply to client.
 - Major protocol version mismatch returns a clear `VERSION_MISMATCH` error.
+- Runtime-side HMD pose, action state, action-space, and haptic output are covered by `Scripts/probe-metalxr-input-bridge.sh`.
 
 ## Current Limitations
 
 - The loopback uses an in-process socket pair, not adb or Wi-Fi.
-- Packet structs are fixed-layout C structs; cross-language bindings for Quest Android are still needed.
+- Packet structs are fixed-layout C structs with matching Unity C# packing helpers; generated bindings are still needed.
 - There is no clock synchronization packet yet; timing fields are explicit but remain in local monotonic clock domains.
 - TCP media transport is a development path. Datagram transport, adaptive pacing, and retransmission policy are not defined yet.
+- Tracking and haptics use state-file handoff between the host streamer and runtime while the real host/runtime integration is still being built.

@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -33,6 +34,8 @@ typedef struct StreamerOptions {
     int frames;
     int bitrate;
     int realtime;
+    char trackingStatePath[1024];
+    char hapticCommandPath[1024];
 } StreamerOptions;
 
 typedef struct ByteBuffer {
@@ -55,7 +58,40 @@ typedef struct StreamSession {
     uint64_t sequence;
     volatile int failed;
     pthread_mutex_t sendLock;
+    char trackingStatePath[1024];
+    char hapticCommandPath[1024];
+    uint64_t lastHapticCommandId;
 } StreamSession;
+
+typedef struct HostPoseState {
+    uint64_t sampleId;
+    uint64_t timestampNs;
+    uint32_t trackingFlags;
+    float position[3];
+    float orientation[4];
+} HostPoseState;
+
+typedef struct HostControllerState {
+    uint64_t sampleId;
+    uint64_t timestampNs;
+    uint32_t hand;
+    uint32_t buttons;
+    uint32_t trackingFlags;
+    float trigger;
+    float grip;
+    float thumbstick[2];
+    float aimPosition[3];
+    float aimOrientation[4];
+    float gripPosition[3];
+    float gripOrientation[4];
+} HostControllerState;
+
+typedef struct HostInputState {
+    HostPoseState hmd;
+    HostControllerState controllers[2];
+    uint64_t poseSamples;
+    uint64_t controllerSamples;
+} HostInputState;
 
 typedef struct EncoderContext {
     const char* eyeName;
@@ -105,7 +141,8 @@ static void print_usage(const char* argv0)
 {
     fprintf(stderr,
             "Usage: %s [--bind-host HOST] [--port N] [--frames N] [--fps N] "
-            "[--width N] [--height N] [--bitrate BPS] [--no-realtime]\n\n"
+            "[--width N] [--height N] [--bitrate BPS] [--tracking-state-path PATH] "
+            "[--haptic-command-path PATH] [--no-realtime]\n\n"
             "frames=0 streams until the client disconnects. The default bind host is 127.0.0.1,\n"
             "which is suitable for adb reverse. Use --bind-host 0.0.0.0 for Wi-Fi tests.\n",
             argv0);
@@ -135,6 +172,8 @@ static StreamerOptions parse_options(int argc, char** argv)
     options.frames = 0;
     options.bitrate = 8000000;
     options.realtime = 1;
+    snprintf(options.trackingStatePath, sizeof(options.trackingStatePath), "%s", "/tmp/metalxr_tracking_state.txt");
+    snprintf(options.hapticCommandPath, sizeof(options.hapticCommandPath), "%s", "/tmp/metalxr_haptic_command.txt");
 
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
@@ -155,6 +194,10 @@ static StreamerOptions parse_options(int argc, char** argv)
             options.height = parse_int_arg(argv[++i], "height", 16, 8192);
         } else if (strcmp(arg, "--bitrate") == 0 && i + 1 < argc) {
             options.bitrate = parse_int_arg(argv[++i], "bitrate", 100000, 200000000);
+        } else if (strcmp(arg, "--tracking-state-path") == 0 && i + 1 < argc) {
+            snprintf(options.trackingStatePath, sizeof(options.trackingStatePath), "%s", argv[++i]);
+        } else if (strcmp(arg, "--haptic-command-path") == 0 && i + 1 < argc) {
+            snprintf(options.hapticCommandPath, sizeof(options.hapticCommandPath), "%s", argv[++i]);
         } else if (strcmp(arg, "--no-realtime") == 0) {
             options.realtime = 0;
         } else {
@@ -649,6 +692,234 @@ static void write_summary(const EncoderContext* context)
            context->stats.maxLatencyUs);
 }
 
+static HostInputState make_default_input_state(void)
+{
+    HostInputState state;
+    memset(&state, 0, sizeof(state));
+    state.hmd.orientation[3] = 1.0f;
+    for (size_t hand = 0; hand < 2; ++hand) {
+        state.controllers[hand].hand = (uint32_t)hand;
+        state.controllers[hand].aimOrientation[3] = 1.0f;
+        state.controllers[hand].gripOrientation[3] = 1.0f;
+    }
+    return state;
+}
+
+static void write_tracking_state_file(const StreamSession* session, const HostInputState* state)
+{
+    if (session == NULL || state == NULL || session->trackingStatePath[0] == '\0') {
+        return;
+    }
+
+    char tempPath[1200];
+    snprintf(tempPath, sizeof(tempPath), "%s.tmp", session->trackingStatePath);
+    FILE* output = fopen(tempPath, "w");
+    if (output == NULL) {
+        return;
+    }
+
+    fprintf(output,
+            "hmd %" PRIu64 " %" PRIu64 " %u %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n",
+            state->hmd.sampleId,
+            state->hmd.timestampNs,
+            state->hmd.trackingFlags,
+            state->hmd.position[0],
+            state->hmd.position[1],
+            state->hmd.position[2],
+            state->hmd.orientation[0],
+            state->hmd.orientation[1],
+            state->hmd.orientation[2],
+            state->hmd.orientation[3]);
+
+    for (size_t hand = 0; hand < 2; ++hand) {
+        const HostControllerState* controller = &state->controllers[hand];
+        fprintf(output,
+                "controller %u %" PRIu64 " %" PRIu64 " %u %u %.9g %.9g %.9g %.9g "
+                "%.9g %.9g %.9g %.9g %.9g %.9g %.9g "
+                "%.9g %.9g %.9g %.9g %.9g %.9g %.9g\n",
+                controller->hand,
+                controller->sampleId,
+                controller->timestampNs,
+                controller->trackingFlags,
+                controller->buttons,
+                controller->trigger,
+                controller->grip,
+                controller->thumbstick[0],
+                controller->thumbstick[1],
+                controller->aimPosition[0],
+                controller->aimPosition[1],
+                controller->aimPosition[2],
+                controller->aimOrientation[0],
+                controller->aimOrientation[1],
+                controller->aimOrientation[2],
+                controller->aimOrientation[3],
+                controller->gripPosition[0],
+                controller->gripPosition[1],
+                controller->gripPosition[2],
+                controller->gripOrientation[0],
+                controller->gripOrientation[1],
+                controller->gripOrientation[2],
+                controller->gripOrientation[3]);
+    }
+
+    fclose(output);
+    (void)rename(tempPath, session->trackingStatePath);
+}
+
+static int socket_has_data(int fd)
+{
+    fd_set readSet;
+    FD_ZERO(&readSet);
+    FD_SET(fd, &readSet);
+
+    struct timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    const int ready = select(fd + 1, &readSet, NULL, NULL, &timeout);
+    return ready > 0 && FD_ISSET(fd, &readSet);
+}
+
+static void handle_pose_sample(StreamSession* session, HostInputState* state, const MetalXRPoseSamplePayload* pose)
+{
+    state->hmd.sampleId = pose->sampleId;
+    state->hmd.timestampNs = pose->timestampNs;
+    state->hmd.trackingFlags = pose->trackingFlags;
+    memcpy(state->hmd.position, pose->position, sizeof(state->hmd.position));
+    memcpy(state->hmd.orientation, pose->orientation, sizeof(state->hmd.orientation));
+    ++state->poseSamples;
+
+    if (state->poseSamples <= 3 || (state->poseSamples % 300) == 0) {
+        printf("{\"event\":\"pose\",\"sample\":%" PRIu64 ",\"flags\":%u,"
+               "\"x\":%.6f,\"y\":%.6f,\"z\":%.6f}\n",
+               pose->sampleId,
+               pose->trackingFlags,
+               pose->position[0],
+               pose->position[1],
+               pose->position[2]);
+        fflush(stdout);
+    }
+
+    write_tracking_state_file(session, state);
+}
+
+static void handle_controller_input(
+    StreamSession* session,
+    HostInputState* state,
+    const MetalXRControllerInputPayload* input)
+{
+    if (input->hand > METALXR_CONTROLLER_HAND_RIGHT) {
+        return;
+    }
+
+    HostControllerState* controller = &state->controllers[input->hand];
+    controller->sampleId = input->sampleId;
+    controller->timestampNs = input->timestampNs;
+    controller->hand = input->hand;
+    controller->buttons = input->buttons;
+    controller->trackingFlags = input->trackingFlags;
+    controller->trigger = input->trigger;
+    controller->grip = input->grip;
+    memcpy(controller->thumbstick, input->thumbstick, sizeof(controller->thumbstick));
+    memcpy(controller->aimPosition, input->aimPosition, sizeof(controller->aimPosition));
+    memcpy(controller->aimOrientation, input->aimOrientation, sizeof(controller->aimOrientation));
+    memcpy(controller->gripPosition, input->gripPosition, sizeof(controller->gripPosition));
+    memcpy(controller->gripOrientation, input->gripOrientation, sizeof(controller->gripOrientation));
+    ++state->controllerSamples;
+
+    if (state->controllerSamples <= 6 || (state->controllerSamples % 600) == 0) {
+        printf("{\"event\":\"controller\",\"sample\":%" PRIu64 ",\"hand\":%u,"
+               "\"buttons\":%u,\"trigger\":%.4f,\"grip\":%.4f}\n",
+               input->sampleId,
+               input->hand,
+               input->buttons,
+               input->trigger,
+               input->grip);
+        fflush(stdout);
+    }
+
+    write_tracking_state_file(session, state);
+}
+
+static void drain_client_input_packets(StreamSession* session, HostInputState* state)
+{
+    while (!session->failed && socket_has_data(session->clientFd)) {
+        MetalXRPacketHeader header;
+        uint8_t payload[sizeof(MetalXRControllerInputPayload)];
+        if (!metalxr_protocol_recv_packet(session->clientFd, &header, payload, sizeof(payload))) {
+            session->failed = 1;
+            return;
+        }
+
+        if (header.type == METALXR_PACKET_POSE_SAMPLE &&
+            header.payloadSize == sizeof(MetalXRPoseSamplePayload)) {
+            MetalXRPoseSamplePayload pose;
+            memcpy(&pose, payload, sizeof(pose));
+            handle_pose_sample(session, state, &pose);
+        } else if (header.type == METALXR_PACKET_CONTROLLER_INPUT &&
+                   header.payloadSize == sizeof(MetalXRControllerInputPayload)) {
+            MetalXRControllerInputPayload input;
+            memcpy(&input, payload, sizeof(input));
+            handle_controller_input(session, state, &input);
+        }
+    }
+}
+
+static int send_haptic_command(StreamSession* session, const MetalXRHapticCommandPayload* command)
+{
+    pthread_mutex_lock(&session->sendLock);
+    MetalXRPacketHeader header = metalxr_make_header(
+        METALXR_PACKET_HAPTIC_COMMAND,
+        session->sequence++,
+        metalxr_protocol_now_ns(),
+        sizeof(*command));
+    const int sent = metalxr_protocol_send_packet(session->clientFd, &header, command);
+    if (!sent) {
+        session->failed = 1;
+    }
+    pthread_mutex_unlock(&session->sendLock);
+    return sent;
+}
+
+static void poll_haptic_command_file(StreamSession* session)
+{
+    if (session == NULL || session->hapticCommandPath[0] == '\0') {
+        return;
+    }
+
+    FILE* input = fopen(session->hapticCommandPath, "r");
+    if (input == NULL) {
+        return;
+    }
+
+    MetalXRHapticCommandPayload command;
+    memset(&command, 0, sizeof(command));
+    const int scanned = fscanf(input,
+                               "%" SCNu64 " %" SCNu64 " %u %f %f %u",
+                               &command.commandId,
+                               &command.timestampNs,
+                               &command.hand,
+                               &command.amplitude,
+                               &command.frequencyHz,
+                               &command.durationUs);
+    fclose(input);
+
+    if (scanned != 6 || command.commandId == session->lastHapticCommandId ||
+        command.hand > METALXR_CONTROLLER_HAND_RIGHT) {
+        return;
+    }
+
+    session->lastHapticCommandId = command.commandId;
+    if (send_haptic_command(session, &command)) {
+        printf("{\"event\":\"haptic\",\"command\":%" PRIu64 ",\"hand\":%u,"
+               "\"amplitude\":%.4f,\"duration_us\":%u}\n",
+               command.commandId,
+               command.hand,
+               command.amplitude,
+               command.durationUs);
+        fflush(stdout);
+    }
+}
+
 static int create_server_socket(const StreamerOptions* options)
 {
     char portBuffer[16];
@@ -816,7 +1087,11 @@ static int stream_client(int clientFd, const StreamerOptions* options)
     memset(&stream, 0, sizeof(stream));
     stream.clientFd = clientFd;
     stream.sequence = firstSequence + 1;
+    snprintf(stream.trackingStatePath, sizeof(stream.trackingStatePath), "%s", options->trackingStatePath);
+    snprintf(stream.hapticCommandPath, sizeof(stream.hapticCommandPath), "%s", options->hapticCommandPath);
     pthread_mutex_init(&stream.sendLock, NULL);
+    HostInputState inputState = make_default_input_state();
+    write_tracking_state_file(&stream, &inputState);
 
     if (!send_hello_ack(clientFd, &stream, options)) {
         pthread_mutex_destroy(&stream.sendLock);
@@ -835,6 +1110,9 @@ static int stream_client(int clientFd, const StreamerOptions* options)
     const uint64_t startNs = host_time_ns();
     const uint64_t framePeriodNs = 1000000000ull / (uint64_t)options->fps;
     for (int frame = 0; ok && !stream.failed && (options->frames == 0 || frame < options->frames); ++frame) {
+        drain_client_input_packets(&stream, &inputState);
+        poll_haptic_command_file(&stream);
+
         const uint64_t captureTimeNs = host_time_ns();
         const uint64_t predictedDisplayTimeNs = captureTimeNs + framePeriodNs;
 
@@ -878,14 +1156,16 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d\n",
+    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d tracking=%s haptics=%s\n",
            options.bindHost,
            options.port,
            options.width,
            options.height,
            options.fps,
            options.bitrate,
-           options.frames);
+           options.frames,
+           options.trackingStatePath,
+           options.hapticCommandPath);
     fflush(stdout);
 
     int exitCode = 0;
