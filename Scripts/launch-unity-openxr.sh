@@ -25,11 +25,16 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
+metalxr_runtime_manifest="$repo_root/Runtime/MetalXRRuntime/metalxr_runtime.json"
+metalxr_runtime_dylib="$repo_root/Runtime/MetalXRRuntime/build/libmetalxr_runtime.dylib"
 meta_simulator_manifest="/Applications/MetaXRSimulator.app/Contents/Resources/MetaXRSimulator/meta_openxr_simulator.json"
 system_runtime_manifest="/usr/local/share/openxr/1/active_runtime.json"
 user_runtime_manifest="${HOME}/.config/openxr/1/active_runtime.json"
 
 runtime_json="${METALXR_RUNTIME_JSON:-}"
+if [[ -z "$runtime_json" && -f "$metalxr_runtime_manifest" && -f "$metalxr_runtime_dylib" ]]; then
+  runtime_json="$metalxr_runtime_manifest"
+fi
 if [[ -z "$runtime_json" && -f "$meta_simulator_manifest" ]]; then
   runtime_json="$meta_simulator_manifest"
 fi

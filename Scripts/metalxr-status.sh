@@ -41,6 +41,12 @@ fi
 echo
 echo "OpenXR runtime manifests"
 echo "XR_RUNTIME_JSON: ${XR_RUNTIME_JSON:-not set}"
+print_runtime "MetalXR runtime" "$repo_root/Runtime/MetalXRRuntime/metalxr_runtime.json"
+if [[ -f "$repo_root/Runtime/MetalXRRuntime/build/libmetalxr_runtime.dylib" ]]; then
+  echo "MetalXR runtime dylib: $repo_root/Runtime/MetalXRRuntime/build/libmetalxr_runtime.dylib"
+else
+  echo "MetalXR runtime dylib: not built"
+fi
 print_runtime "User active runtime" "${HOME}/.config/openxr/1/active_runtime.json"
 print_runtime "System active runtime" "/usr/local/share/openxr/1/active_runtime.json"
 print_runtime "Meta XR Simulator" "/Applications/MetaXRSimulator.app/Contents/Resources/MetaXRSimulator/meta_openxr_simulator.json"
