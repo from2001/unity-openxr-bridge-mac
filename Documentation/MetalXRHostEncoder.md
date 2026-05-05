@@ -61,4 +61,4 @@ At shutdown, each eye emits a summary record with submitted frames, encoded fram
 
 ## Next Step
 
-Issue #6 should define the shared transport protocol and handshake. In parallel, the runtime and host encoder can be joined by adding a frame-source abstraction that accepts runtime-owned Metal textures through an IOSurface-backed path or a Metal blit into VideoToolbox-compatible pixel buffers.
+Issue #6 defines the shared transport protocol and handshake. In parallel, the runtime and host encoder can be joined by adding a frame-source abstraction that accepts runtime-owned Metal textures through an IOSurface-backed path or a Metal blit into VideoToolbox-compatible pixel buffers.

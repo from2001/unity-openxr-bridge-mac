@@ -52,6 +52,11 @@ if [[ -x "$repo_root/Runtime/MetalXRHost/build/metalxr_host_encoder" ]]; then
 else
   echo "MetalXR host encoder: not built"
 fi
+if [[ -x "$repo_root/Runtime/MetalXRProtocol/build/metalxr_protocol_loopback" ]]; then
+  echo "MetalXR protocol loopback: $repo_root/Runtime/MetalXRProtocol/build/metalxr_protocol_loopback"
+else
+  echo "MetalXR protocol loopback: not built"
+fi
 print_runtime "User active runtime" "${HOME}/.config/openxr/1/active_runtime.json"
 print_runtime "System active runtime" "/usr/local/share/openxr/1/active_runtime.json"
 print_runtime "Meta XR Simulator" "/Applications/MetaXRSimulator.app/Contents/Resources/MetaXRSimulator/meta_openxr_simulator.json"
