@@ -450,16 +450,17 @@ namespace MetalXR.QuestClient
         {
             Color32[] pixels = frame.IsLeftEye ? _leftPixels : _rightPixels;
             Texture2D texture = frame.IsLeftEye ? _leftTexture : _rightTexture;
-            if (pixels == null || texture == null || frame.LumaBytes == null)
+            if (pixels == null || texture == null || frame.RgbaBytes == null)
             {
                 return;
             }
 
             int sourceWidth = frame.Width > 0 ? frame.Width : 1;
             int sourceHeight = frame.Height > 0 ? frame.Height : 1;
-            int stride = frame.Stride >= sourceWidth ? frame.Stride : sourceWidth;
-            int requiredBytes = ((sourceHeight - 1) * stride) + sourceWidth;
-            if (frame.LumaBytes.Length < requiredBytes)
+            int sourceRowBytes = sourceWidth * 4;
+            int strideBytes = frame.RgbaStrideBytes >= sourceRowBytes ? frame.RgbaStrideBytes : sourceRowBytes;
+            int requiredBytes = ((sourceHeight - 1) * strideBytes) + sourceRowBytes;
+            if (frame.RgbaBytes.Length < requiredBytes)
             {
                 return;
             }
@@ -467,12 +468,16 @@ namespace MetalXR.QuestClient
             for (int y = 0; y < TextureHeight; y++)
             {
                 int sourceY = (y * sourceHeight) / TextureHeight;
-                int sourceRow = sourceY * stride;
+                int sourceRow = sourceY * strideBytes;
                 for (int x = 0; x < TextureWidth; x++)
                 {
                     int sourceX = (x * sourceWidth) / TextureWidth;
-                    byte luma = frame.LumaBytes[sourceRow + sourceX];
-                    pixels[y * TextureWidth + x] = StreamColor(frame.IsLeftEye, luma);
+                    int sourceIndex = sourceRow + (sourceX * 4);
+                    pixels[y * TextureWidth + x] = new Color32(
+                        frame.RgbaBytes[sourceIndex],
+                        frame.RgbaBytes[sourceIndex + 1],
+                        frame.RgbaBytes[sourceIndex + 2],
+                        frame.RgbaBytes[sourceIndex + 3]);
                 }
             }
 
@@ -509,13 +514,13 @@ namespace MetalXR.QuestClient
                     displayTimeNs >= frame.DecodeEndTimeNs ?
                         (displayTimeNs - frame.DecodeEndTimeNs) / 1000ul :
                         0ul;
-                string decoderName = frame.DecodedByMediaCodec ? "MediaCodec" : "compressed-preview";
                 string eyeName = frame.IsLeftEye ? "left" : "right";
                 Debug.Log(
                     LogPrefix +
                     " displayed VIDEO_FRAME frame=" + frame.FrameId +
                     " eye=" + eyeName +
-                    " decoder=" + decoderName +
+                    " decoder=" + frame.DecoderMode +
+                    " output_format=" + frame.OutputFormat +
                     " host_encoder_us=" + frame.EncoderLatencyUs +
                     " client_receive_to_display_us=" + receiveToDisplayUs +
                     " client_decode_us=" + decodeUs +
@@ -557,16 +562,6 @@ namespace MetalXR.QuestClient
         private int CurrentQueuedFrameCount()
         {
             return _handshakeClient != null ? _handshakeClient.QueuedFrameCount : 0;
-        }
-
-        private static Color32 StreamColor(bool leftEye, byte luma)
-        {
-            if (leftEye)
-            {
-                return new Color32((byte)(luma / 3), (byte)((luma * 2) / 3), luma, 255);
-            }
-
-            return new Color32(luma, (byte)((luma * 2) / 3), (byte)(luma / 3), 255);
         }
 
         private static Color32 DiagnosticColor(bool leftEye, int x, int y, int frameIndex)
@@ -633,9 +628,11 @@ namespace MetalXR.QuestClient
     {
         public MetalXRQuestDecodedVideoFrame(
             MetalXRQuestEncodedVideoFrame source,
-            byte[] lumaBytes,
-            int stride,
-            bool decodedByMediaCodec)
+            byte[] rgbaBytes,
+            int rgbaStrideBytes,
+            bool decodedByMediaCodec,
+            string decoderMode,
+            string outputFormat)
         {
             FrameId = source.FrameId;
             IsLeftEye = source.IsLeftEye;
@@ -647,9 +644,11 @@ namespace MetalXR.QuestClient
             EncoderLatencyUs = source.EncoderLatencyUs;
             ReceiveTimeNs = source.ReceiveTimeNs;
             EncodedBytes = source.EncodedBytes.Length;
-            LumaBytes = lumaBytes;
-            Stride = stride;
+            RgbaBytes = rgbaBytes;
+            RgbaStrideBytes = rgbaStrideBytes;
             DecodedByMediaCodec = decodedByMediaCodec;
+            DecoderMode = string.IsNullOrEmpty(decoderMode) ? "unknown" : decoderMode;
+            OutputFormat = string.IsNullOrEmpty(outputFormat) ? "unknown" : outputFormat;
         }
 
         public ulong FrameId { get; }
@@ -664,9 +663,11 @@ namespace MetalXR.QuestClient
         public ulong DecodeStartTimeNs { get; private set; }
         public ulong DecodeEndTimeNs { get; private set; }
         public int EncodedBytes { get; }
-        public byte[] LumaBytes { get; }
-        public int Stride { get; }
+        public byte[] RgbaBytes { get; }
+        public int RgbaStrideBytes { get; }
         public bool DecodedByMediaCodec { get; }
+        public string DecoderMode { get; }
+        public string OutputFormat { get; }
 
         public void SetDecodeTiming(ulong decodeStartTimeNs, ulong decodeEndTimeNs)
         {
@@ -717,12 +718,22 @@ namespace MetalXR.QuestClient
         private bool _fallbackLogged;
 
 #if UNITY_ANDROID && !UNITY_EDITOR
+        private struct ImagePlaneData
+        {
+            public byte[] Bytes;
+            public int RowStride;
+            public int PixelStride;
+        }
+
         private AndroidJavaObject _codec;
         private AndroidJavaObject _bufferInfo;
         private int _configuredWidth;
         private int _configuredHeight;
         private int _outputStride;
+        private int _outputSliceHeight;
+        private int _outputColorFormat;
         private bool _nearBlackOutputLogged;
+        private bool _outputImageFallbackLogged;
 #endif
 
         public MetalXRQuestEyeDecoder(bool leftEye, Action<string> log)
@@ -879,8 +890,6 @@ namespace MetalXR.QuestClient
                 return false;
             }
 
-            int size = _bufferInfo.Get<int>("size");
-            int offset = _bufferInfo.Get<int>("offset");
             long presentationTimeUs = _bufferInfo.Get<long>("presentationTimeUs");
             MetalXRQuestEncodedVideoFrame sourceFrame;
             bool hasSourceFrame = _pendingFrames.TryGetValue(presentationTimeUs, out sourceFrame);
@@ -895,52 +904,67 @@ namespace MetalXR.QuestClient
                 return false;
             }
 
-            byte[] bytes;
-            int stride;
-            bool readImage = TryReadOutputImage(outputIndex, sourceFrame, out bytes, out stride);
-            if (!readImage)
-            {
-                bytes = ReadOutputBuffer(outputIndex, offset, size);
-                stride = _outputStride >= sourceFrame.Width ? _outputStride : sourceFrame.Width;
-            }
+            byte[] rgbaBytes;
+            int rgbaStrideBytes;
+            string outputFormat;
+            bool readImage = TryReadOutputImage(outputIndex, sourceFrame, out rgbaBytes, out rgbaStrideBytes, out outputFormat);
 
             _codec.Call("releaseOutputBuffer", outputIndex, false);
 
-            int requiredBytes = ((sourceFrame.Height - 1) * stride) + sourceFrame.Width;
-            if (bytes == null || bytes.Length < requiredBytes)
+            if (!readImage)
             {
-                decodedFrame = CreateCompressedPreview(sourceFrame);
-                return true;
-            }
-
-            if (!HasVisibleLuma(bytes, stride, sourceFrame.Width, sourceFrame.Height))
-            {
-                if (!_nearBlackOutputLogged)
+                if (!_outputImageFallbackLogged)
                 {
-                    _nearBlackOutputLogged = true;
-                    Log("MediaCodec output for " + _eyeName + " eye was near-black; using compressed payload preview");
+                    _outputImageFallbackLogged = true;
+                    Log("MediaCodec output image unavailable for " + _eyeName + " eye; using compressed payload preview");
                 }
 
                 decodedFrame = CreateCompressedPreview(sourceFrame);
                 return true;
             }
 
-            decodedFrame = new MetalXRQuestDecodedVideoFrame(sourceFrame, bytes, stride, true);
+            int requiredBytes = ((sourceFrame.Height - 1) * rgbaStrideBytes) + (sourceFrame.Width * 4);
+            if (rgbaBytes == null || rgbaBytes.Length < requiredBytes)
+            {
+                decodedFrame = CreateCompressedPreview(sourceFrame);
+                return true;
+            }
+
+            if (!HasVisibleColor(rgbaBytes, rgbaStrideBytes, sourceFrame.Width, sourceFrame.Height))
+            {
+                if (!_nearBlackOutputLogged)
+                {
+                    _nearBlackOutputLogged = true;
+                    Log("MediaCodec color output for " + _eyeName + " eye was near-black; using compressed payload preview");
+                }
+
+                decodedFrame = CreateCompressedPreview(sourceFrame);
+                return true;
+            }
+
+            decodedFrame = new MetalXRQuestDecodedVideoFrame(
+                sourceFrame,
+                rgbaBytes,
+                rgbaStrideBytes,
+                true,
+                "mediacodec-yuv420",
+                outputFormat);
             return true;
         }
 
         private bool TryReadOutputImage(
             int outputIndex,
             MetalXRQuestEncodedVideoFrame sourceFrame,
-            out byte[] lumaBytes,
-            out int stride)
+            out byte[] rgbaBytes,
+            out int rgbaStrideBytes,
+            out string outputFormat)
         {
-            lumaBytes = null;
-            stride = 0;
+            rgbaBytes = null;
+            rgbaStrideBytes = 0;
+            outputFormat = "unknown";
 
             AndroidJavaObject image = null;
-            AndroidJavaObject lumaPlane = null;
-            AndroidJavaObject buffer = null;
+            AndroidJavaObject[] planes = null;
             try
             {
                 image = _codec.Call<AndroidJavaObject>("getOutputImage", outputIndex);
@@ -949,61 +973,47 @@ namespace MetalXR.QuestClient
                     return false;
                 }
 
-                AndroidJavaObject[] planes = image.Call<AndroidJavaObject[]>("getPlanes");
-                if (planes == null || planes.Length == 0 || planes[0] == null)
+                planes = image.Call<AndroidJavaObject[]>("getPlanes");
+                if (planes == null || planes.Length < 3 ||
+                    planes[0] == null || planes[1] == null || planes[2] == null)
                 {
                     return false;
                 }
 
-                lumaPlane = planes[0];
-                buffer = lumaPlane.Call<AndroidJavaObject>("getBuffer");
-                if (buffer == null)
+                ImagePlaneData yPlane;
+                ImagePlaneData uPlane;
+                ImagePlaneData vPlane;
+                if (!TryReadImagePlane(planes[0], out yPlane) ||
+                    !TryReadImagePlane(planes[1], out uPlane) ||
+                    !TryReadImagePlane(planes[2], out vPlane))
                 {
                     return false;
                 }
 
-                int rowStride = lumaPlane.Call<int>("getRowStride");
-                int pixelStride = lumaPlane.Call<int>("getPixelStride");
-                if (rowStride < sourceFrame.Width || pixelStride <= 0)
-                {
-                    return false;
-                }
-
-                int remaining = buffer.Call<int>("remaining");
-                if (remaining <= 0)
-                {
-                    return false;
-                }
-
-                sbyte[] signedBytes = new sbyte[remaining];
-                buffer.Call<AndroidJavaObject>("position", 0);
-                buffer.Call<AndroidJavaObject>("get", signedBytes, 0, remaining);
-                byte[] bytes = new byte[remaining];
-                Buffer.BlockCopy(signedBytes, 0, bytes, 0, remaining);
-
-                if (pixelStride == 1)
-                {
-                    lumaBytes = bytes;
-                    stride = rowStride;
-                    return true;
-                }
-
-                lumaBytes = new byte[sourceFrame.Width * sourceFrame.Height];
-                stride = sourceFrame.Width;
+                rgbaStrideBytes = sourceFrame.Width * 4;
+                rgbaBytes = new byte[rgbaStrideBytes * sourceFrame.Height];
                 for (int y = 0; y < sourceFrame.Height; y++)
                 {
-                    int sourceRow = y * rowStride;
-                    int targetRow = y * sourceFrame.Width;
+                    int targetRow = y * rgbaStrideBytes;
+                    int chromaY = y / 2;
                     for (int x = 0; x < sourceFrame.Width; x++)
                     {
-                        int sourceIndex = sourceRow + (x * pixelStride);
-                        if (sourceIndex < bytes.Length)
-                        {
-                            lumaBytes[targetRow + x] = bytes[sourceIndex];
-                        }
+                        int chromaX = x / 2;
+                        byte yValue = ReadPlaneSample(yPlane, x, y, 16);
+                        byte uValue = ReadPlaneSample(uPlane, chromaX, chromaY, 128);
+                        byte vValue = ReadPlaneSample(vPlane, chromaX, chromaY, 128);
+                        int targetIndex = targetRow + (x * 4);
+                        WriteYuvAsRgba(rgbaBytes, targetIndex, yValue, uValue, vValue);
                     }
                 }
 
+                outputFormat =
+                    "YUV_420_888" +
+                    ":y_stride=" + yPlane.RowStride +
+                    ":u_stride=" + uPlane.RowStride +
+                    ":v_stride=" + vPlane.RowStride +
+                    ":u_pixel_stride=" + uPlane.PixelStride +
+                    ":v_pixel_stride=" + vPlane.PixelStride;
                 return true;
             }
             catch (Exception exception)
@@ -1013,14 +1023,15 @@ namespace MetalXR.QuestClient
             }
             finally
             {
-                if (buffer != null)
+                if (planes != null)
                 {
-                    buffer.Dispose();
-                }
-
-                if (lumaPlane != null)
-                {
-                    lumaPlane.Dispose();
+                    for (int i = 0; i < planes.Length; i++)
+                    {
+                        if (planes[i] != null)
+                        {
+                            planes[i].Dispose();
+                        }
+                    }
                 }
 
                 if (image != null)
@@ -1038,43 +1049,129 @@ namespace MetalXR.QuestClient
             }
         }
 
-        private byte[] ReadOutputBuffer(int outputIndex, int offset, int size)
+        private bool TryReadImagePlane(AndroidJavaObject plane, out ImagePlaneData planeData)
         {
-            byte[] bytes = new byte[size];
-            AndroidJavaObject outputBuffer = _codec.Call<AndroidJavaObject>("getOutputBuffer", outputIndex);
-            if (outputBuffer == null || size <= 0)
+            planeData = new ImagePlaneData();
+            AndroidJavaObject buffer = null;
+            try
             {
-                return bytes;
-            }
+                buffer = plane.Call<AndroidJavaObject>("getBuffer");
+                if (buffer == null)
+                {
+                    return false;
+                }
 
-            sbyte[] signedBytes = new sbyte[size];
-            outputBuffer.Call<AndroidJavaObject>("position", offset);
-            outputBuffer.Call<AndroidJavaObject>("limit", offset + size);
-            outputBuffer.Call<AndroidJavaObject>("get", signedBytes, 0, size);
-            Buffer.BlockCopy(signedBytes, 0, bytes, 0, size);
-            outputBuffer.Dispose();
-            return bytes;
+                int rowStride = plane.Call<int>("getRowStride");
+                int pixelStride = plane.Call<int>("getPixelStride");
+                int remaining = buffer.Call<int>("remaining");
+                if (rowStride <= 0 || pixelStride <= 0 || remaining <= 0)
+                {
+                    return false;
+                }
+
+                sbyte[] signedBytes = new sbyte[remaining];
+                buffer.Call<AndroidJavaObject>("position", 0);
+                buffer.Call<AndroidJavaObject>("get", signedBytes, 0, remaining);
+                byte[] bytes = new byte[remaining];
+                Buffer.BlockCopy(signedBytes, 0, bytes, 0, remaining);
+
+                planeData.Bytes = bytes;
+                planeData.RowStride = rowStride;
+                planeData.PixelStride = pixelStride;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                Log("MediaCodec plane read failed for " + _eyeName + " eye: " + exception.Message);
+                return false;
+            }
+            finally
+            {
+                if (buffer != null)
+                {
+                    buffer.Dispose();
+                }
+            }
         }
 
-        private static bool HasVisibleLuma(byte[] bytes, int stride, int width, int height)
+        private static byte ReadPlaneSample(ImagePlaneData plane, int x, int y, byte fallback)
+        {
+            if (plane.Bytes == null)
+            {
+                return fallback;
+            }
+
+            int index = (y * plane.RowStride) + (x * plane.PixelStride);
+            if (index < 0 || index >= plane.Bytes.Length)
+            {
+                return fallback;
+            }
+
+            return plane.Bytes[index];
+        }
+
+        private static void WriteYuvAsRgba(byte[] rgbaBytes, int targetIndex, byte yValue, byte uValue, byte vValue)
+        {
+            int c = Math.Max(0, yValue - 16);
+            int d = uValue - 128;
+            int e = vValue - 128;
+            int red = (298 * c) + (409 * e) + 128;
+            int green = (298 * c) - (100 * d) - (208 * e) + 128;
+            int blue = (298 * c) + (516 * d) + 128;
+
+            rgbaBytes[targetIndex] = ClampToByte(red >> 8);
+            rgbaBytes[targetIndex + 1] = ClampToByte(green >> 8);
+            rgbaBytes[targetIndex + 2] = ClampToByte(blue >> 8);
+            rgbaBytes[targetIndex + 3] = 255;
+        }
+
+        private static byte ClampToByte(int value)
+        {
+            if (value <= 0)
+            {
+                return 0;
+            }
+
+            return value >= 255 ? (byte)255 : (byte)value;
+        }
+
+        private static bool HasVisibleColor(byte[] rgbaBytes, int strideBytes, int width, int height)
         {
             const int SampleStep = 16;
             const int VisibleThreshold = 12;
+            const int ColorVarianceThreshold = 6;
+            int brightSamples = 0;
+            int colorSamples = 0;
 
             for (int y = 0; y < height; y += SampleStep)
             {
-                int row = y * stride;
+                int row = y * strideBytes;
                 for (int x = 0; x < width; x += SampleStep)
                 {
-                    int index = row + x;
-                    if (index < bytes.Length && bytes[index] > VisibleThreshold)
+                    int index = row + (x * 4);
+                    if (index + 2 >= rgbaBytes.Length)
                     {
-                        return true;
+                        continue;
+                    }
+
+                    int red = rgbaBytes[index];
+                    int green = rgbaBytes[index + 1];
+                    int blue = rgbaBytes[index + 2];
+                    if (red > VisibleThreshold || green > VisibleThreshold || blue > VisibleThreshold)
+                    {
+                        brightSamples++;
+                    }
+
+                    int max = Math.Max(red, Math.Max(green, blue));
+                    int min = Math.Min(red, Math.Min(green, blue));
+                    if (max - min > ColorVarianceThreshold)
+                    {
+                        colorSamples++;
                     }
                 }
             }
 
-            return false;
+            return brightSamples > 0 && colorSamples > 0;
         }
 
         private void UpdateOutputFormat()
@@ -1086,7 +1183,13 @@ namespace MetalXR.QuestClient
             }
 
             _outputStride = GetFormatInt(outputFormat, "stride", _configuredWidth);
-            Log("MediaCodec output format for " + _eyeName + " eye stride=" + _outputStride);
+            _outputSliceHeight = GetFormatInt(outputFormat, "slice-height", _configuredHeight);
+            _outputColorFormat = GetFormatInt(outputFormat, "color-format", 0);
+            Log(
+                "MediaCodec output format for " + _eyeName +
+                " eye color_format=" + _outputColorFormat +
+                " stride=" + _outputStride +
+                " slice_height=" + _outputSliceHeight);
             outputFormat.Dispose();
         }
 
@@ -1136,6 +1239,9 @@ namespace MetalXR.QuestClient
             _configuredWidth = 0;
             _configuredHeight = 0;
             _outputStride = 0;
+            _outputSliceHeight = 0;
+            _outputColorFormat = 0;
+            _outputImageFallbackLogged = false;
         }
 #endif
 
@@ -1154,7 +1260,8 @@ namespace MetalXR.QuestClient
 
         private MetalXRQuestDecodedVideoFrame CreateCompressedPreview(MetalXRQuestEncodedVideoFrame frame)
         {
-            byte[] luma = new byte[frame.Width * frame.Height];
+            int strideBytes = frame.Width * 4;
+            byte[] rgba = new byte[strideBytes * frame.Height];
             byte[] encoded = frame.EncodedBytes;
             int encodedLength = encoded.Length > 0 ? encoded.Length : 1;
             for (int y = 0; y < frame.Height; y++)
@@ -1167,11 +1274,31 @@ namespace MetalXR.QuestClient
                     bool grid = (x % 96) < 4 || (y % 72) < 4;
                     bool movingLine = ((x + (int)(frame.FrameId * 11ul)) % 192) < 8;
                     int visible = grid || movingLine ? 240 : 96 + (mixed & 0x7f);
-                    luma[(y * frame.Width) + x] = (byte)visible;
+                    int targetIndex = (y * strideBytes) + (x * 4);
+                    if (frame.IsLeftEye)
+                    {
+                        rgba[targetIndex] = (byte)(visible / 3);
+                        rgba[targetIndex + 1] = (byte)((visible * 2) / 3);
+                        rgba[targetIndex + 2] = (byte)visible;
+                    }
+                    else
+                    {
+                        rgba[targetIndex] = (byte)visible;
+                        rgba[targetIndex + 1] = (byte)((visible * 2) / 3);
+                        rgba[targetIndex + 2] = (byte)(visible / 3);
+                    }
+
+                    rgba[targetIndex + 3] = 255;
                 }
             }
 
-            return new MetalXRQuestDecodedVideoFrame(frame, luma, frame.Width, false);
+            return new MetalXRQuestDecodedVideoFrame(
+                frame,
+                rgba,
+                strideBytes,
+                false,
+                "compressed-preview",
+                "generated-rgba");
         }
 
         private void Log(string message)

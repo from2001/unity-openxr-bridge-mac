@@ -17,7 +17,7 @@ Working:
 - Build and probe a macOS VideoToolbox host encoder that converts synthetic stereo frames or exported Unity BGRA eye frames into H.264 elementary streams with per-frame latency/drop metadata.
 - Build and probe shared host/client protocol packet definitions with loopback handshake, heartbeat, and version-mismatch handling.
 - Build a Quest/Android Unity OpenXR client shell that displays generated stereo diagnostic frames in-headset and attempts the shared HELLO handshake over an adb-reversed host endpoint.
-- Stream synthetic or Unity-exported macOS VideoToolbox H.264 stereo frames over the shared TCP protocol to the Quest client, with MediaCodec decode attempted on-device and receive-to-display timing logged from Unity.
+- Stream synthetic or Unity-exported macOS VideoToolbox H.264 stereo frames over the shared TCP protocol to the Quest client, with MediaCodec YUV-to-RGBA color decode attempted on-device and receive-to-display timing logged from Unity.
 - Bridge Quest HMD pose and controller samples back to the macOS host, expose them to the native runtime through a development state file, and map them into minimal OpenXR view, action-state, action-space, and haptic APIs.
 - Exchange timing samples for development clock sync, log encode/network/decode/submit/total latency breakdowns, and feed measured Quest display timing into runtime `xrWaitFrame` predictions.
 
@@ -67,6 +67,12 @@ Build and locally compile-probe the Quest client shell:
 ```sh
 Scripts/build-quest-client-apk.sh
 Scripts/probe-quest-client-unity.sh
+```
+
+Capture and analyze a Quest screenshot during a device stream smoke test:
+
+```sh
+Scripts/probe-quest-client-screenshot.sh
 ```
 
 Launch Unity with the default runtime. If Meta XR Simulator is installed, it is selected automatically:
@@ -153,6 +159,7 @@ The macOS app is a SwiftUI dashboard around bundled adb platform-tools and the r
 - `Scripts/build-quest-client-apk.sh` builds the Unity OpenXR smoke project as a Quest APK.
 - `Scripts/install-run-quest-client.sh` installs, launches, configures adb reverse, and prints client logcat entries.
 - `Scripts/run-metalxr-frame-stream.sh` runs the host streamer for USB adb reverse or Wi-Fi transport tests, using `METALXR_FRAME_SOURCE=synthetic|unity-export`.
+- `Scripts/probe-quest-client-screenshot.sh` captures a Quest screenshot over adb and fails when sampled pixels are too dark or have too little color variation.
 - `Scripts/probe-quest-client-unity.sh` compiles the Unity Quest client scripts through uloop.
 
 The next major engineering step is rendering the decoded color video on Quest without diagnostic fallback, then wiring the full Unity Play Mode workflow and improving adaptive frame pacing, input prediction, loss recovery, and timing control.
