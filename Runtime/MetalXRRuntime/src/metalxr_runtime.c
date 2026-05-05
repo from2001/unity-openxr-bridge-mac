@@ -10,16 +10,41 @@
 #include <time.h>
 
 static const XrVersion kSupportedApiVersion = XR_MAKE_VERSION(1, 0, 0);
-static const XrVersion kRuntimeVersion = XR_MAKE_VERSION(0, 2, 0);
+static const XrVersion kRuntimeVersion = XR_MAKE_VERSION(0, 3, 0);
 static const XrSystemId kDummySystemId = 1;
 static const XrDuration kFramePeriodNs = 11111111;
-static const uint32_t kViewCount = 2;
 static const uint32_t kRecommendedEyeWidth = 1832;
 static const uint32_t kRecommendedEyeHeight = 1920;
+
+enum {
+    kViewCount = 2,
+    kSwapchainImageCount = 3,
+    kMaxSessionSwapchains = 16,
+};
 
 static const uint32_t kInstanceMagic = 0x4d584931;
 static const uint32_t kSessionMagic = 0x4d585331;
 static const uint32_t kSpaceMagic = 0x4d585850;
+static const uint32_t kSwapchainMagic = 0x4d585343;
+
+enum {
+    kMetalPixelFormatRGBA8Unorm = 70,
+    kMetalPixelFormatRGBA8UnormSrgb = 71,
+    kMetalPixelFormatBGRA8Unorm = 80,
+    kMetalPixelFormatBGRA8UnormSrgb = 81,
+    kMetalPixelFormatRGB10A2Unorm = 90,
+    kMetalPixelFormatRGBA16Float = 115,
+};
+
+enum {
+    kMetalTextureType2D = 2,
+    kMetalTextureType2DArray = 3,
+    kMetalStorageModePrivate = 2,
+    kMetalTextureUsageShaderRead = 0x0001,
+    kMetalTextureUsageShaderWrite = 0x0002,
+    kMetalTextureUsageRenderTarget = 0x0004,
+    kMetalTextureUsagePixelFormatView = 0x0010,
+};
 
 typedef struct MetalXrExtension {
     const char* name;
@@ -49,12 +74,16 @@ struct XrSession_T {
     XrInstance instance;
     XrSystemId systemId;
     XrSessionState state;
+    void* metalCommandQueue;
+    void* metalDevice;
     XrBool32 running;
     XrBool32 frameBegun;
     uint64_t frameIndex;
     XrTime nextFrameTime;
     XrSpace spaces[16];
     uint32_t spaceCount;
+    XrSwapchain swapchains[kMaxSessionSwapchains];
+    uint32_t swapchainCount;
 };
 
 struct XrSpace_T {
@@ -65,12 +94,61 @@ struct XrSpace_T {
     XrPosef poseInReferenceSpace;
 };
 
+struct XrSwapchain_T {
+    uint32_t magic;
+    uint64_t id;
+    XrSession session;
+    XrSwapchainUsageFlags usageFlags;
+    int64_t format;
+    uint32_t width;
+    uint32_t height;
+    uint32_t faceCount;
+    uint32_t arraySize;
+    uint32_t mipCount;
+    uint32_t sampleCount;
+    void* textures[kSwapchainImageCount];
+    uint32_t imageCount;
+    uint32_t acquiredImageIndex;
+    XrBool32 imageAcquired;
+    XrBool32 imageWaited;
+    uint64_t acquireCount;
+    uint64_t releaseCount;
+};
+
+typedef void* MetalXrObjcId;
+typedef void* MetalXrObjcClass;
+typedef void* MetalXrSel;
+
+typedef MetalXrObjcClass (*PFN_objc_getClass)(const char* name);
+typedef MetalXrSel (*PFN_sel_registerName)(const char* name);
+
+typedef MetalXrObjcId (*PFN_objc_msgSend_id)(MetalXrObjcId receiver, MetalXrSel selector);
+typedef MetalXrObjcId (*PFN_objc_msgSend_id_id)(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    MetalXrObjcId value);
+typedef void (*PFN_objc_msgSend_void)(MetalXrObjcId receiver, MetalXrSel selector);
+typedef void (*PFN_objc_msgSend_void_uint)(MetalXrObjcId receiver, MetalXrSel selector, uint64_t value);
+
+typedef struct MetalXrObjcBridge {
+    void* library;
+    PFN_objc_getClass objc_getClass;
+    PFN_sel_registerName sel_registerName;
+    void* objc_msgSend;
+    XrBool32 loaded;
+    XrBool32 available;
+} MetalXrObjcBridge;
+
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static MetalXrEventQueue g_eventQueue;
 static uint64_t g_nextInstanceId = 1;
 static uint64_t g_nextSessionId = 1;
 static uint64_t g_nextSpaceId = 1;
+static uint64_t g_nextSwapchainId = 1;
 static void* g_metalDevice;
+static MetalXrObjcBridge g_objcBridge;
+
+static void metalxr_release_objc(void* object);
 
 static void metalxr_log(const char* format, ...)
 {
@@ -170,6 +248,13 @@ static int metalxr_is_space(XrSpace space)
     return space != NULL && space->magic == kSpaceMagic && metalxr_is_session(space->session);
 }
 
+static int metalxr_is_swapchain(XrSwapchain swapchain)
+{
+    return swapchain != NULL &&
+           swapchain->magic == kSwapchainMagic &&
+           metalxr_is_session(swapchain->session);
+}
+
 static const char* metalxr_session_state_name(XrSessionState state)
 {
     switch (state) {
@@ -208,11 +293,14 @@ static const char* metalxr_result_name(XrResult result)
         case XR_ERROR_SESSION_NOT_RUNNING: return "XR_ERROR_SESSION_NOT_RUNNING";
         case XR_ERROR_SESSION_LOST: return "XR_ERROR_SESSION_LOST";
         case XR_ERROR_SYSTEM_INVALID: return "XR_ERROR_SYSTEM_INVALID";
+        case XR_ERROR_SWAPCHAIN_RECT_INVALID: return "XR_ERROR_SWAPCHAIN_RECT_INVALID";
+        case XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED: return "XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED";
         case XR_ERROR_SESSION_NOT_READY: return "XR_ERROR_SESSION_NOT_READY";
         case XR_ERROR_SESSION_NOT_STOPPING: return "XR_ERROR_SESSION_NOT_STOPPING";
         case XR_ERROR_REFERENCE_SPACE_UNSUPPORTED: return "XR_ERROR_REFERENCE_SPACE_UNSUPPORTED";
         case XR_ERROR_FORM_FACTOR_UNSUPPORTED: return "XR_ERROR_FORM_FACTOR_UNSUPPORTED";
         case XR_ERROR_FORM_FACTOR_UNAVAILABLE: return "XR_ERROR_FORM_FACTOR_UNAVAILABLE";
+        case XR_ERROR_CALL_ORDER_INVALID: return "XR_ERROR_CALL_ORDER_INVALID";
         case XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED: return "XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED";
         case XR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED: return "XR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED";
         case XR_ERROR_RUNTIME_UNAVAILABLE: return "XR_ERROR_RUNTIME_UNAVAILABLE";
@@ -232,6 +320,7 @@ static const char* metalxr_structure_type_name(XrStructureType type)
         case XR_TYPE_VIEW_LOCATE_INFO: return "XR_TYPE_VIEW_LOCATE_INFO";
         case XR_TYPE_VIEW: return "XR_TYPE_VIEW";
         case XR_TYPE_SESSION_CREATE_INFO: return "XR_TYPE_SESSION_CREATE_INFO";
+        case XR_TYPE_SWAPCHAIN_CREATE_INFO: return "XR_TYPE_SWAPCHAIN_CREATE_INFO";
         case XR_TYPE_SESSION_BEGIN_INFO: return "XR_TYPE_SESSION_BEGIN_INFO";
         case XR_TYPE_VIEW_STATE: return "XR_TYPE_VIEW_STATE";
         case XR_TYPE_FRAME_END_INFO: return "XR_TYPE_FRAME_END_INFO";
@@ -239,12 +328,17 @@ static const char* metalxr_structure_type_name(XrStructureType type)
         case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED: return "XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED";
         case XR_TYPE_INSTANCE_PROPERTIES: return "XR_TYPE_INSTANCE_PROPERTIES";
         case XR_TYPE_FRAME_WAIT_INFO: return "XR_TYPE_FRAME_WAIT_INFO";
+        case XR_TYPE_COMPOSITION_LAYER_PROJECTION: return "XR_TYPE_COMPOSITION_LAYER_PROJECTION";
         case XR_TYPE_REFERENCE_SPACE_CREATE_INFO: return "XR_TYPE_REFERENCE_SPACE_CREATE_INFO";
         case XR_TYPE_VIEW_CONFIGURATION_VIEW: return "XR_TYPE_VIEW_CONFIGURATION_VIEW";
         case XR_TYPE_SPACE_LOCATION: return "XR_TYPE_SPACE_LOCATION";
         case XR_TYPE_FRAME_STATE: return "XR_TYPE_FRAME_STATE";
         case XR_TYPE_VIEW_CONFIGURATION_PROPERTIES: return "XR_TYPE_VIEW_CONFIGURATION_PROPERTIES";
         case XR_TYPE_FRAME_BEGIN_INFO: return "XR_TYPE_FRAME_BEGIN_INFO";
+        case XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW: return "XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW";
+        case XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO: return "XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO";
+        case XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO: return "XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO";
+        case XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO: return "XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO";
         case XR_TYPE_GRAPHICS_BINDING_METAL_KHR: return "XR_TYPE_GRAPHICS_BINDING_METAL_KHR";
         case XR_TYPE_SWAPCHAIN_IMAGE_METAL_KHR: return "XR_TYPE_SWAPCHAIN_IMAGE_METAL_KHR";
         case XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR: return "XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR";
@@ -292,6 +386,34 @@ static void metalxr_clear_events_for_session(XrSession session)
     pthread_mutex_unlock(&g_mutex);
 }
 
+static void metalxr_release_swapchain(XrSwapchain swapchain)
+{
+    if (!metalxr_is_swapchain(swapchain)) {
+        return;
+    }
+
+    XrSession session = swapchain->session;
+    if (metalxr_is_session(session)) {
+        for (uint32_t i = 0; i < session->swapchainCount; ++i) {
+            if (session->swapchains[i] == swapchain) {
+                for (uint32_t j = i; j + 1 < session->swapchainCount; ++j) {
+                    session->swapchains[j] = session->swapchains[j + 1];
+                }
+                --session->swapchainCount;
+                break;
+            }
+        }
+    }
+
+    for (uint32_t i = 0; i < swapchain->imageCount; ++i) {
+        metalxr_release_objc(swapchain->textures[i]);
+        swapchain->textures[i] = NULL;
+    }
+
+    swapchain->magic = 0;
+    free(swapchain);
+}
+
 static void metalxr_release_session(XrSession session)
 {
     if (!metalxr_is_session(session)) {
@@ -306,6 +428,12 @@ static void metalxr_release_session(XrSession session)
             free(session->spaces[i]);
         }
     }
+
+    while (session->swapchainCount > 0) {
+        metalxr_release_swapchain(session->swapchains[session->swapchainCount - 1]);
+    }
+
+    metalxr_release_objc(session->metalDevice);
 
     if (metalxr_is_instance(session->instance) && session->instance->session == session) {
         session->instance->session = NULL;
@@ -380,6 +508,222 @@ static XrResult metalxr_fill_view_configuration_views(
     }
 
     return XR_SUCCESS;
+}
+
+static const int64_t* metalxr_supported_swapchain_formats(uint32_t* formatCount)
+{
+    static const int64_t formats[] = {
+        kMetalPixelFormatBGRA8Unorm,
+        kMetalPixelFormatBGRA8UnormSrgb,
+        kMetalPixelFormatRGBA8Unorm,
+        kMetalPixelFormatRGBA8UnormSrgb,
+        kMetalPixelFormatRGB10A2Unorm,
+        kMetalPixelFormatRGBA16Float,
+    };
+
+    if (formatCount != NULL) {
+        *formatCount = (uint32_t)(sizeof(formats) / sizeof(formats[0]));
+    }
+
+    return formats;
+}
+
+static int metalxr_is_supported_swapchain_format(int64_t format)
+{
+    uint32_t formatCount = 0;
+    const int64_t* formats = metalxr_supported_swapchain_formats(&formatCount);
+    for (uint32_t i = 0; i < formatCount; ++i) {
+        if (formats[i] == format) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static uint64_t metalxr_metal_texture_usage(XrSwapchainUsageFlags usageFlags)
+{
+    uint64_t metalUsage = 0;
+
+    if ((usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0 ||
+        (usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+        metalUsage |= kMetalTextureUsageRenderTarget;
+    }
+
+    if ((usageFlags & XR_SWAPCHAIN_USAGE_SAMPLED_BIT) != 0 ||
+        (usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT) != 0) {
+        metalUsage |= kMetalTextureUsageShaderRead;
+    }
+
+    if ((usageFlags & XR_SWAPCHAIN_USAGE_UNORDERED_ACCESS_BIT) != 0 ||
+        (usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) != 0) {
+        metalUsage |= kMetalTextureUsageShaderWrite;
+    }
+
+    if ((usageFlags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) != 0) {
+        metalUsage |= kMetalTextureUsagePixelFormatView;
+    }
+
+    return metalUsage != 0 ? metalUsage : kMetalTextureUsageRenderTarget;
+}
+
+static MetalXrObjcBridge* metalxr_objc_bridge(void)
+{
+    if (g_objcBridge.loaded) {
+        return g_objcBridge.available ? &g_objcBridge : NULL;
+    }
+
+    g_objcBridge.loaded = XR_TRUE;
+    g_objcBridge.library = dlopen("/usr/lib/libobjc.A.dylib", RTLD_LAZY | RTLD_LOCAL);
+    if (g_objcBridge.library == NULL) {
+        metalxr_log("libobjc dlopen failed: %s", dlerror());
+        return NULL;
+    }
+
+    g_objcBridge.objc_getClass = (PFN_objc_getClass)dlsym(g_objcBridge.library, "objc_getClass");
+    g_objcBridge.sel_registerName = (PFN_sel_registerName)dlsym(g_objcBridge.library, "sel_registerName");
+    g_objcBridge.objc_msgSend = dlsym(g_objcBridge.library, "objc_msgSend");
+    if (g_objcBridge.objc_getClass == NULL ||
+        g_objcBridge.sel_registerName == NULL ||
+        g_objcBridge.objc_msgSend == NULL) {
+        metalxr_log("libobjc symbol lookup failed");
+        return NULL;
+    }
+
+    g_objcBridge.available = XR_TRUE;
+    return &g_objcBridge;
+}
+
+static MetalXrSel metalxr_sel(MetalXrObjcBridge* bridge, const char* name)
+{
+    return bridge->sel_registerName(name);
+}
+
+static MetalXrObjcId metalxr_objc_send_id(MetalXrObjcId receiver, MetalXrSel selector)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || receiver == NULL || selector == NULL) {
+        return NULL;
+    }
+
+    PFN_objc_msgSend_id send = (PFN_objc_msgSend_id)bridge->objc_msgSend;
+    return send(receiver, selector);
+}
+
+static MetalXrObjcId metalxr_objc_send_id_id(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    MetalXrObjcId value)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || receiver == NULL || selector == NULL) {
+        return NULL;
+    }
+
+    PFN_objc_msgSend_id_id send = (PFN_objc_msgSend_id_id)bridge->objc_msgSend;
+    return send(receiver, selector, value);
+}
+
+static void metalxr_objc_send_void(MetalXrObjcId receiver, MetalXrSel selector)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || receiver == NULL || selector == NULL) {
+        return;
+    }
+
+    PFN_objc_msgSend_void send = (PFN_objc_msgSend_void)bridge->objc_msgSend;
+    send(receiver, selector);
+}
+
+static void metalxr_objc_send_void_uint(MetalXrObjcId receiver, MetalXrSel selector, uint64_t value)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || receiver == NULL || selector == NULL) {
+        return;
+    }
+
+    PFN_objc_msgSend_void_uint send = (PFN_objc_msgSend_void_uint)bridge->objc_msgSend;
+    send(receiver, selector, value);
+}
+
+static void* metalxr_retain_objc(void* object)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || object == NULL) {
+        return object;
+    }
+
+    return metalxr_objc_send_id((MetalXrObjcId)object, metalxr_sel(bridge, "retain"));
+}
+
+static void metalxr_release_objc(void* object)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || object == NULL) {
+        return;
+    }
+
+    metalxr_objc_send_void((MetalXrObjcId)object, metalxr_sel(bridge, "release"));
+}
+
+static void* metalxr_get_command_queue_device(void* commandQueue)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || commandQueue == NULL) {
+        return NULL;
+    }
+
+    return metalxr_objc_send_id((MetalXrObjcId)commandQueue, metalxr_sel(bridge, "device"));
+}
+
+static void* metalxr_create_metal_texture(
+    void* metalDevice,
+    int64_t format,
+    uint32_t width,
+    uint32_t height,
+    uint32_t arraySize,
+    uint32_t mipCount,
+    XrSwapchainUsageFlags usageFlags)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || metalDevice == NULL) {
+        return NULL;
+    }
+
+    MetalXrObjcClass descriptorClass = bridge->objc_getClass("MTLTextureDescriptor");
+    if (descriptorClass == NULL) {
+        metalxr_log("MTLTextureDescriptor class unavailable");
+        return NULL;
+    }
+
+    MetalXrObjcId descriptor =
+        metalxr_objc_send_id((MetalXrObjcId)descriptorClass, metalxr_sel(bridge, "alloc"));
+    descriptor = metalxr_objc_send_id(descriptor, metalxr_sel(bridge, "init"));
+    if (descriptor == NULL) {
+        return NULL;
+    }
+
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setTextureType:"),
+                                arraySize > 1 ? kMetalTextureType2DArray : kMetalTextureType2D);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setPixelFormat:"), (uint64_t)format);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setWidth:"), width);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setHeight:"), height);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setDepth:"), 1);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setMipmapLevelCount:"), mipCount);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setSampleCount:"), 1);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setArrayLength:"), arraySize);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setUsage:"),
+                                metalxr_metal_texture_usage(usageFlags));
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setStorageMode:"),
+                                kMetalStorageModePrivate);
+
+    MetalXrObjcId texture = metalxr_objc_send_id_id(
+        (MetalXrObjcId)metalDevice,
+        metalxr_sel(bridge, "newTextureWithDescriptor:"),
+        descriptor);
+    metalxr_release_objc(descriptor);
+
+    return texture;
 }
 
 static void* metalxr_get_metal_device(void)
@@ -835,12 +1179,25 @@ static XrResult XRAPI_CALL metalxr_xrCreateSession(
 
     const XrGraphicsBindingMetalKHR* metalBinding =
         (const XrGraphicsBindingMetalKHR*)createInfo->next;
+    void* commandQueue = NULL;
+    void* metalDevice = NULL;
     if (metalBinding != NULL && metalBinding->type == XR_TYPE_GRAPHICS_BINDING_METAL_KHR) {
         metalxr_log("xrCreateSession received Metal commandQueue=%p", metalBinding->commandQueue);
+        commandQueue = metalBinding->commandQueue;
+        metalDevice = metalxr_get_command_queue_device(commandQueue);
     } else if (createInfo->next != NULL) {
         const XrStructureType* nextType = (const XrStructureType*)createInfo->next;
         metalxr_log("xrCreateSession ignoring unsupported next struct %s",
                     metalxr_structure_type_name(*nextType));
+    }
+
+    if (metalDevice == NULL) {
+        metalDevice = metalxr_get_metal_device();
+    }
+
+    if (metalDevice == NULL) {
+        metalxr_log("xrCreateSession failed: no Metal device available");
+        return XR_ERROR_RUNTIME_FAILURE;
     }
 
     XrSession created = (XrSession)calloc(1, sizeof(*created));
@@ -856,6 +1213,8 @@ static XrResult XRAPI_CALL metalxr_xrCreateSession(
     created->instance = instance;
     created->systemId = kDummySystemId;
     created->state = XR_SESSION_STATE_IDLE;
+    created->metalCommandQueue = commandQueue;
+    created->metalDevice = metalxr_retain_objc(metalDevice);
     created->nextFrameTime = metalxr_now_ns() + kFramePeriodNs;
     instance->session = created;
     *session = created;
@@ -1097,6 +1456,260 @@ static XrResult XRAPI_CALL metalxr_xrDestroySpace(XrSpace space)
     return XR_SUCCESS;
 }
 
+static XrResult XRAPI_CALL metalxr_xrEnumerateSwapchainFormats(
+    XrSession session,
+    uint32_t formatCapacityInput,
+    uint32_t* formatCountOutput,
+    int64_t* formats)
+{
+    metalxr_log("xrEnumerateSwapchainFormats");
+
+    if (!metalxr_is_session(session) || formatCountOutput == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    uint32_t formatCount = 0;
+    const int64_t* supportedFormats = metalxr_supported_swapchain_formats(&formatCount);
+    *formatCountOutput = formatCount;
+
+    if (formatCapacityInput == 0) {
+        return XR_SUCCESS;
+    }
+
+    if (formats == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    if (formatCapacityInput < formatCount) {
+        return XR_ERROR_SIZE_INSUFFICIENT;
+    }
+
+    for (uint32_t i = 0; i < formatCount; ++i) {
+        formats[i] = supportedFormats[i];
+    }
+
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrCreateSwapchain(
+    XrSession session,
+    const XrSwapchainCreateInfo* createInfo,
+    XrSwapchain* swapchain)
+{
+    metalxr_log("xrCreateSwapchain");
+
+    if (!metalxr_is_session(session) || createInfo == NULL || swapchain == NULL ||
+        createInfo->type != XR_TYPE_SWAPCHAIN_CREATE_INFO) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    *swapchain = XR_NULL_HANDLE;
+
+    if (session->swapchainCount >= kMaxSessionSwapchains) {
+        return XR_ERROR_LIMIT_REACHED;
+    }
+
+    if (createInfo->width == 0 || createInfo->height == 0 ||
+        createInfo->width > kRecommendedEyeWidth || createInfo->height > kRecommendedEyeHeight) {
+        return XR_ERROR_SWAPCHAIN_RECT_INVALID;
+    }
+
+    if (createInfo->faceCount != 1 || createInfo->arraySize == 0 ||
+        createInfo->mipCount == 0 || createInfo->sampleCount != 1) {
+        metalxr_log("xrCreateSwapchain unsupported dimensions: face=%u array=%u mip=%u samples=%u",
+                    createInfo->faceCount,
+                    createInfo->arraySize,
+                    createInfo->mipCount,
+                    createInfo->sampleCount);
+        return XR_ERROR_FEATURE_UNSUPPORTED;
+    }
+
+    if (!metalxr_is_supported_swapchain_format(createInfo->format)) {
+        metalxr_log("xrCreateSwapchain unsupported Metal format=%" PRId64, createInfo->format);
+        return XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
+    }
+
+    XrSwapchain created = (XrSwapchain)calloc(1, sizeof(*created));
+    if (created == NULL) {
+        return XR_ERROR_OUT_OF_MEMORY;
+    }
+
+    pthread_mutex_lock(&g_mutex);
+    created->id = g_nextSwapchainId++;
+    pthread_mutex_unlock(&g_mutex);
+
+    created->magic = kSwapchainMagic;
+    created->session = session;
+    created->usageFlags = createInfo->usageFlags;
+    created->format = createInfo->format;
+    created->width = createInfo->width;
+    created->height = createInfo->height;
+    created->faceCount = createInfo->faceCount;
+    created->arraySize = createInfo->arraySize;
+    created->mipCount = createInfo->mipCount;
+    created->sampleCount = createInfo->sampleCount;
+    created->imageCount = kSwapchainImageCount;
+
+    for (uint32_t i = 0; i < created->imageCount; ++i) {
+        created->textures[i] = metalxr_create_metal_texture(
+            session->metalDevice,
+            createInfo->format,
+            createInfo->width,
+            createInfo->height,
+            createInfo->arraySize,
+            createInfo->mipCount,
+            createInfo->usageFlags);
+        if (created->textures[i] == NULL) {
+            metalxr_log("xrCreateSwapchain failed: Metal texture allocation failed");
+            metalxr_release_swapchain(created);
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
+    }
+
+    session->swapchains[session->swapchainCount++] = created;
+    *swapchain = created;
+
+    metalxr_log("swapchain %" PRIu64 " created format=%" PRId64
+                " %ux%u array=%u images=%u usage=0x%llx",
+                created->id,
+                created->format,
+                created->width,
+                created->height,
+                created->arraySize,
+                created->imageCount,
+                (unsigned long long)created->usageFlags);
+
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrDestroySwapchain(XrSwapchain swapchain)
+{
+    metalxr_log("xrDestroySwapchain");
+
+    if (!metalxr_is_swapchain(swapchain)) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
+    metalxr_log("swapchain %" PRIu64 " destroyed acquired=%" PRIu64 " released=%" PRIu64,
+                swapchain->id,
+                swapchain->acquireCount,
+                swapchain->releaseCount);
+    metalxr_release_swapchain(swapchain);
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrEnumerateSwapchainImages(
+    XrSwapchain swapchain,
+    uint32_t imageCapacityInput,
+    uint32_t* imageCountOutput,
+    XrSwapchainImageBaseHeader* images)
+{
+    if (!metalxr_is_swapchain(swapchain) || imageCountOutput == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    *imageCountOutput = swapchain->imageCount;
+
+    if (imageCapacityInput == 0) {
+        return XR_SUCCESS;
+    }
+
+    if (images == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    if (imageCapacityInput < swapchain->imageCount) {
+        return XR_ERROR_SIZE_INSUFFICIENT;
+    }
+
+    XrSwapchainImageMetalKHR* metalImages = (XrSwapchainImageMetalKHR*)images;
+    for (uint32_t i = 0; i < swapchain->imageCount; ++i) {
+        metalImages[i].type = XR_TYPE_SWAPCHAIN_IMAGE_METAL_KHR;
+        metalImages[i].texture = swapchain->textures[i];
+    }
+
+    metalxr_log("xrEnumerateSwapchainImages swapchain=%" PRIu64 " images=%u",
+                swapchain->id,
+                swapchain->imageCount);
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrAcquireSwapchainImage(
+    XrSwapchain swapchain,
+    const XrSwapchainImageAcquireInfo* acquireInfo,
+    uint32_t* index)
+{
+    (void)acquireInfo;
+
+    if (!metalxr_is_swapchain(swapchain) || index == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    if (swapchain->imageAcquired) {
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+
+    swapchain->acquiredImageIndex = (uint32_t)(swapchain->acquireCount % swapchain->imageCount);
+    swapchain->imageAcquired = XR_TRUE;
+    swapchain->imageWaited = XR_FALSE;
+    ++swapchain->acquireCount;
+    *index = swapchain->acquiredImageIndex;
+
+    if (swapchain->acquireCount <= 5 || (swapchain->acquireCount % 300) == 0) {
+        metalxr_log("xrAcquireSwapchainImage swapchain=%" PRIu64 " image=%u",
+                    swapchain->id,
+                    swapchain->acquiredImageIndex);
+    }
+
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrWaitSwapchainImage(
+    XrSwapchain swapchain,
+    const XrSwapchainImageWaitInfo* waitInfo)
+{
+    (void)waitInfo;
+
+    if (!metalxr_is_swapchain(swapchain)) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
+    if (!swapchain->imageAcquired) {
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+
+    swapchain->imageWaited = XR_TRUE;
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrReleaseSwapchainImage(
+    XrSwapchain swapchain,
+    const XrSwapchainImageReleaseInfo* releaseInfo)
+{
+    (void)releaseInfo;
+
+    if (!metalxr_is_swapchain(swapchain)) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
+    if (!swapchain->imageAcquired) {
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+
+    ++swapchain->releaseCount;
+
+    if (swapchain->releaseCount <= 5 || (swapchain->releaseCount % 300) == 0) {
+        metalxr_log("xrReleaseSwapchainImage swapchain=%" PRIu64 " image=%u",
+                    swapchain->id,
+                    swapchain->acquiredImageIndex);
+    }
+
+    swapchain->imageAcquired = XR_FALSE;
+    swapchain->imageWaited = XR_FALSE;
+
+    return XR_SUCCESS;
+}
+
 static XrResult XRAPI_CALL metalxr_xrWaitFrame(
     XrSession session,
     const XrFrameWaitInfo* frameWaitInfo,
@@ -1152,6 +1765,136 @@ static XrResult XRAPI_CALL metalxr_xrBeginFrame(
     return XR_SUCCESS;
 }
 
+static void metalxr_write_frame_metadata(
+    XrSession session,
+    const XrFrameEndInfo* frameEndInfo,
+    const XrCompositionLayerProjection* projectionLayer)
+{
+    const char* dumpDirectory = getenv("METALXR_FRAME_DUMP_DIR");
+    if (dumpDirectory == NULL || dumpDirectory[0] == '\0') {
+        return;
+    }
+
+    char path[1024];
+    snprintf(path,
+             sizeof(path),
+             "%s/frame_%06" PRIu64 ".txt",
+             dumpDirectory,
+             session->frameIndex);
+
+    FILE* output = fopen(path, "w");
+    if (output == NULL) {
+        metalxr_log("frame metadata dump failed: %s", path);
+        return;
+    }
+
+    fprintf(output, "frame=%" PRIu64 "\n", session->frameIndex);
+    fprintf(output, "displayTime=%" PRId64 "\n", frameEndInfo->displayTime);
+    fprintf(output, "layerCount=%u\n", frameEndInfo->layerCount);
+    fprintf(output, "projectionViewCount=%u\n",
+            projectionLayer != NULL ? projectionLayer->viewCount : 0);
+
+    if (projectionLayer != NULL && projectionLayer->views != NULL) {
+        for (uint32_t viewIndex = 0; viewIndex < projectionLayer->viewCount; ++viewIndex) {
+            const XrCompositionLayerProjectionView* view = &projectionLayer->views[viewIndex];
+            XrSwapchain swapchain = view->subImage.swapchain;
+            if (!metalxr_is_swapchain(swapchain)) {
+                fprintf(output, "view[%u].swapchain=invalid\n", viewIndex);
+                continue;
+            }
+
+            const uint32_t imageIndex = swapchain->acquiredImageIndex;
+            void* texture = imageIndex < swapchain->imageCount ? swapchain->textures[imageIndex] : NULL;
+            fprintf(output, "view[%u].swapchain=%" PRIu64 "\n", viewIndex, swapchain->id);
+            fprintf(output, "view[%u].imageIndex=%u\n", viewIndex, imageIndex);
+            fprintf(output, "view[%u].texture=%p\n", viewIndex, texture);
+            fprintf(output, "view[%u].format=%" PRId64 "\n", viewIndex, swapchain->format);
+            fprintf(output, "view[%u].size=%ux%u\n", viewIndex, swapchain->width, swapchain->height);
+            fprintf(output, "view[%u].arrayIndex=%u\n", viewIndex, view->subImage.imageArrayIndex);
+            fprintf(output,
+                    "view[%u].rect=%d,%d %dx%d\n",
+                    viewIndex,
+                    view->subImage.imageRect.offset.x,
+                    view->subImage.imageRect.offset.y,
+                    view->subImage.imageRect.extent.width,
+                    view->subImage.imageRect.extent.height);
+        }
+    }
+
+    fclose(output);
+    metalxr_log("frame metadata dumped: %s", path);
+}
+
+static void metalxr_capture_frame_metadata(XrSession session, const XrFrameEndInfo* frameEndInfo)
+{
+    const XrCompositionLayerProjection* firstProjectionLayer = NULL;
+    const int shouldSampleFrame = session->frameIndex <= 5 || (session->frameIndex % 300) == 0;
+
+    if (frameEndInfo->layerCount == 0 || frameEndInfo->layers == NULL) {
+        return;
+    }
+
+    for (uint32_t layerIndex = 0; layerIndex < frameEndInfo->layerCount; ++layerIndex) {
+        const XrCompositionLayerBaseHeader* layer = frameEndInfo->layers[layerIndex];
+        if (layer == NULL) {
+            continue;
+        }
+
+        if (layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+            if (shouldSampleFrame) {
+                metalxr_log("xrEndFrame layer[%u] type=%s ignored",
+                            layerIndex,
+                            metalxr_structure_type_name(layer->type));
+            }
+            continue;
+        }
+
+        const XrCompositionLayerProjection* projectionLayer =
+            (const XrCompositionLayerProjection*)layer;
+        if (firstProjectionLayer == NULL) {
+            firstProjectionLayer = projectionLayer;
+        }
+
+        if (shouldSampleFrame) {
+            metalxr_log("xrEndFrame projection layer[%u] views=%u space=%p",
+                        layerIndex,
+                        projectionLayer->viewCount,
+                        (void*)projectionLayer->space);
+        }
+
+        if (projectionLayer->views == NULL) {
+            continue;
+        }
+
+        for (uint32_t viewIndex = 0; viewIndex < projectionLayer->viewCount; ++viewIndex) {
+            const XrCompositionLayerProjectionView* view = &projectionLayer->views[viewIndex];
+            XrSwapchain swapchain = view->subImage.swapchain;
+            if (!metalxr_is_swapchain(swapchain)) {
+                if (shouldSampleFrame) {
+                    metalxr_log("projection view[%u] has invalid swapchain", viewIndex);
+                }
+                continue;
+            }
+
+            const uint32_t imageIndex = swapchain->acquiredImageIndex;
+            void* texture = imageIndex < swapchain->imageCount ? swapchain->textures[imageIndex] : NULL;
+            if (shouldSampleFrame) {
+                metalxr_log("projection view[%u] swapchain=%" PRIu64 " image=%u texture=%p rect=%dx%d",
+                            viewIndex,
+                            swapchain->id,
+                            imageIndex,
+                            texture,
+                            view->subImage.imageRect.extent.width,
+                            view->subImage.imageRect.extent.height);
+            }
+        }
+    }
+
+    if (shouldSampleFrame) {
+        metalxr_write_frame_metadata(session, frameEndInfo, firstProjectionLayer);
+    }
+}
+
 static XrResult XRAPI_CALL metalxr_xrEndFrame(
     XrSession session,
     const XrFrameEndInfo* frameEndInfo)
@@ -1169,6 +1912,7 @@ static XrResult XRAPI_CALL metalxr_xrEndFrame(
     }
 
     session->frameBegun = XR_FALSE;
+    metalxr_capture_frame_metadata(session, frameEndInfo);
 
     if (session->frameIndex <= 5 || (session->frameIndex % 300) == 0) {
         metalxr_log("xrEndFrame frame=%" PRIu64 " layers=%u display=%" PRId64,
@@ -1267,6 +2011,13 @@ static const MetalXrProc kProcTable[] = {
     { "xrGetReferenceSpaceBoundsRect", (PFN_xrVoidFunction)metalxr_xrGetReferenceSpaceBoundsRect },
     { "xrLocateSpace", (PFN_xrVoidFunction)metalxr_xrLocateSpace },
     { "xrDestroySpace", (PFN_xrVoidFunction)metalxr_xrDestroySpace },
+    { "xrEnumerateSwapchainFormats", (PFN_xrVoidFunction)metalxr_xrEnumerateSwapchainFormats },
+    { "xrCreateSwapchain", (PFN_xrVoidFunction)metalxr_xrCreateSwapchain },
+    { "xrDestroySwapchain", (PFN_xrVoidFunction)metalxr_xrDestroySwapchain },
+    { "xrEnumerateSwapchainImages", (PFN_xrVoidFunction)metalxr_xrEnumerateSwapchainImages },
+    { "xrAcquireSwapchainImage", (PFN_xrVoidFunction)metalxr_xrAcquireSwapchainImage },
+    { "xrWaitSwapchainImage", (PFN_xrVoidFunction)metalxr_xrWaitSwapchainImage },
+    { "xrReleaseSwapchainImage", (PFN_xrVoidFunction)metalxr_xrReleaseSwapchainImage },
     { "xrWaitFrame", (PFN_xrVoidFunction)metalxr_xrWaitFrame },
     { "xrBeginFrame", (PFN_xrVoidFunction)metalxr_xrBeginFrame },
     { "xrEndFrame", (PFN_xrVoidFunction)metalxr_xrEndFrame },

@@ -11,10 +11,11 @@ Working:
 - Launch Unity with `XR_RUNTIME_JSON` set to an installed macOS OpenXR runtime, without changing system-wide OpenXR runtime registration.
 - Use Meta XR Simulator as the default macOS OpenXR runtime when it is installed at `/Applications/MetaXRSimulator.app`.
 - Build and probe a native MetalXR OpenXR runtime that can create an instance, report a dummy stereo HMD system, create a session, emit lifecycle events, create reference spaces, and run a deterministic frame loop.
+- Create runtime-owned Metal swapchain textures for Unity OpenXR Play Mode, accept stereo projection layers, and dump per-frame metadata proving which textures were submitted.
 
 Not implemented yet:
 
-- A MetalXR swapchain implementation that gives the runtime access to Unity-rendered stereo frames.
+- CPU pixel readback, IOSurface export, or VideoToolbox encoding of the submitted Metal textures.
 - A Quest PCVR transport layer for video, tracking, input, audio, and timing.
 - A Quest client that pairs with a native MetalXR streamer.
 - SteamVR/OpenComposite compatibility on macOS.
@@ -71,6 +72,11 @@ For Meta XR Simulator:
 
 The script sets `XR_RUNTIME_JSON` only for the Unity process it launches. It follows the [OpenXR loader override mechanism](https://registry.khronos.org/OpenXR/specs/1.1/loader.html#overriding-the-default-runtime-usage) and does not overwrite `/usr/local/share/openxr/1/active_runtime.json`.
 
+When the MetalXR runtime is selected, the script also sets:
+
+- `METALXR_RUNTIME_LOG` for runtime lifecycle and swapchain logs.
+- `METALXR_FRAME_DUMP_DIR` for per-frame metadata files written from `xrEndFrame`.
+
 ## How does it work?
 
 The macOS app is a SwiftUI wrapper around bundled adb platform-tools. The scripts provide a lower-friction development path:
@@ -79,9 +85,9 @@ The macOS app is a SwiftUI wrapper around bundled adb platform-tools. The script
 - `Scripts/install-quest-apk.sh` installs an APK through adb with device-state checks.
 - `Scripts/launch-unity-openxr.sh` launches Unity with `XR_RUNTIME_JSON` pointing at a runtime manifest.
 - `Scripts/build-metalxr-runtime.sh` builds the native runtime.
-- `Scripts/probe-metalxr-runtime.sh` verifies OpenXR loader/runtime negotiation plus the dummy HMD lifecycle and frame loop.
+- `Scripts/probe-metalxr-runtime.sh` verifies OpenXR loader/runtime negotiation, the dummy HMD lifecycle, Metal swapchain creation, and projection frame metadata dumps.
 
-The next major engineering step is proving Unity's macOS graphics binding and implementing a MetalXR swapchain path that gives the runtime access to submitted stereo frames. After that, a Quest client and low-latency transport must be implemented.
+The next major engineering step is turning the submitted Metal textures into encoded frames, likely through a blit/readback or IOSurface-backed path suitable for VideoToolbox. After that, a Quest client and low-latency transport must be implemented.
 
 ## How can I install it?
 

@@ -38,6 +38,7 @@ typedef int64_t XrDuration;
 typedef struct XrInstance_T* XrInstance;
 typedef struct XrSession_T* XrSession;
 typedef struct XrSpace_T* XrSpace;
+typedef struct XrSwapchain_T* XrSwapchain;
 typedef int32_t XrResult;
 typedef void (XRAPI_PTR *PFN_xrVoidFunction)(void);
 typedef XrResult (XRAPI_PTR *PFN_xrGetInstanceProcAddr)(
@@ -93,12 +94,15 @@ enum {
     XR_ERROR_SESSION_NOT_RUNNING = -16,
     XR_ERROR_SESSION_LOST = -17,
     XR_ERROR_SYSTEM_INVALID = -18,
+    XR_ERROR_SWAPCHAIN_RECT_INVALID = -25,
+    XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED = -26,
     XR_ERROR_SESSION_NOT_READY = -28,
     XR_ERROR_SESSION_NOT_STOPPING = -29,
     XR_ERROR_REFERENCE_SPACE_UNSUPPORTED = -31,
     XR_ERROR_FORM_FACTOR_UNSUPPORTED = -34,
     XR_ERROR_FORM_FACTOR_UNAVAILABLE = -35,
     XR_ERROR_API_LAYER_NOT_PRESENT = -36,
+    XR_ERROR_CALL_ORDER_INVALID = -37,
     XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED = -41,
     XR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED = -42,
     XR_ERROR_RUNTIME_UNAVAILABLE = -51
@@ -114,6 +118,7 @@ typedef enum XrStructureType {
     XR_TYPE_VIEW_LOCATE_INFO = 6,
     XR_TYPE_VIEW = 7,
     XR_TYPE_SESSION_CREATE_INFO = 8,
+    XR_TYPE_SWAPCHAIN_CREATE_INFO = 9,
     XR_TYPE_SESSION_BEGIN_INFO = 10,
     XR_TYPE_VIEW_STATE = 11,
     XR_TYPE_FRAME_END_INFO = 12,
@@ -121,12 +126,17 @@ typedef enum XrStructureType {
     XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED = 18,
     XR_TYPE_INSTANCE_PROPERTIES = 32,
     XR_TYPE_FRAME_WAIT_INFO = 33,
+    XR_TYPE_COMPOSITION_LAYER_PROJECTION = 35,
     XR_TYPE_REFERENCE_SPACE_CREATE_INFO = 37,
     XR_TYPE_VIEW_CONFIGURATION_VIEW = 41,
     XR_TYPE_SPACE_LOCATION = 42,
     XR_TYPE_FRAME_STATE = 44,
     XR_TYPE_VIEW_CONFIGURATION_PROPERTIES = 45,
     XR_TYPE_FRAME_BEGIN_INFO = 46,
+    XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW = 48,
+    XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO = 55,
+    XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO = 56,
+    XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO = 57,
     XR_TYPE_GRAPHICS_BINDING_METAL_KHR = 1000029000,
     XR_TYPE_SWAPCHAIN_IMAGE_METAL_KHR = 1000029001,
     XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR = 1000029002,
@@ -177,6 +187,8 @@ typedef XrFlags64 XrSessionCreateFlags;
 typedef XrFlags64 XrSpaceLocationFlags;
 typedef XrFlags64 XrViewStateFlags;
 typedef XrFlags64 XrCompositionLayerFlags;
+typedef XrFlags64 XrSwapchainCreateFlags;
+typedef XrFlags64 XrSwapchainUsageFlags;
 
 static const XrSpaceLocationFlags XR_SPACE_LOCATION_ORIENTATION_VALID_BIT = 0x00000001;
 static const XrSpaceLocationFlags XR_SPACE_LOCATION_POSITION_VALID_BIT = 0x00000002;
@@ -187,6 +199,17 @@ static const XrViewStateFlags XR_VIEW_STATE_ORIENTATION_VALID_BIT = 0x00000001;
 static const XrViewStateFlags XR_VIEW_STATE_POSITION_VALID_BIT = 0x00000002;
 static const XrViewStateFlags XR_VIEW_STATE_ORIENTATION_TRACKED_BIT = 0x00000004;
 static const XrViewStateFlags XR_VIEW_STATE_POSITION_TRACKED_BIT = 0x00000008;
+
+static const XrSwapchainCreateFlags XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT = 0x00000001;
+static const XrSwapchainCreateFlags XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT = 0x00000002;
+
+static const XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT = 0x00000001;
+static const XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT = 0x00000002;
+static const XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_UNORDERED_ACCESS_BIT = 0x00000004;
+static const XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT = 0x00000008;
+static const XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT = 0x00000010;
+static const XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_SAMPLED_BIT = 0x00000020;
+static const XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT = 0x00000040;
 
 typedef struct XrApiLayerProperties {
     XrStructureType type;
@@ -282,6 +305,47 @@ typedef struct XrGraphicsRequirementsMetalKHR {
     void* metalDevice;
 } XrGraphicsRequirementsMetalKHR;
 
+typedef struct XrSwapchainCreateInfo {
+    XrStructureType type;
+    const void* next;
+    XrSwapchainCreateFlags createFlags;
+    XrSwapchainUsageFlags usageFlags;
+    int64_t format;
+    uint32_t sampleCount;
+    uint32_t width;
+    uint32_t height;
+    uint32_t faceCount;
+    uint32_t arraySize;
+    uint32_t mipCount;
+} XrSwapchainCreateInfo;
+
+typedef struct XrSwapchainImageBaseHeader {
+    XrStructureType type;
+    void* next;
+} XrSwapchainImageBaseHeader;
+
+typedef struct XrSwapchainImageMetalKHR {
+    XrStructureType type;
+    void* next;
+    void* texture;
+} XrSwapchainImageMetalKHR;
+
+typedef struct XrSwapchainImageAcquireInfo {
+    XrStructureType type;
+    const void* next;
+} XrSwapchainImageAcquireInfo;
+
+typedef struct XrSwapchainImageWaitInfo {
+    XrStructureType type;
+    const void* next;
+    XrDuration timeout;
+} XrSwapchainImageWaitInfo;
+
+typedef struct XrSwapchainImageReleaseInfo {
+    XrStructureType type;
+    const void* next;
+} XrSwapchainImageReleaseInfo;
+
 typedef struct XrVector3f {
     float x;
     float y;
@@ -311,6 +375,21 @@ typedef struct XrExtent2Df {
     float width;
     float height;
 } XrExtent2Df;
+
+typedef struct XrOffset2Di {
+    int32_t x;
+    int32_t y;
+} XrOffset2Di;
+
+typedef struct XrExtent2Di {
+    int32_t width;
+    int32_t height;
+} XrExtent2Di;
+
+typedef struct XrRect2Di {
+    XrOffset2Di offset;
+    XrExtent2Di extent;
+} XrRect2Di;
 
 typedef struct XrSpaceLocation {
     XrStructureType type;
@@ -404,6 +483,29 @@ typedef struct XrView {
     XrPosef pose;
     XrFovf fov;
 } XrView;
+
+typedef struct XrSwapchainSubImage {
+    XrSwapchain swapchain;
+    XrRect2Di imageRect;
+    uint32_t imageArrayIndex;
+} XrSwapchainSubImage;
+
+typedef struct XrCompositionLayerProjectionView {
+    XrStructureType type;
+    const void* next;
+    XrPosef pose;
+    XrFovf fov;
+    XrSwapchainSubImage subImage;
+} XrCompositionLayerProjectionView;
+
+typedef struct XrCompositionLayerProjection {
+    XrStructureType type;
+    const void* next;
+    XrCompositionLayerFlags layerFlags;
+    XrSpace space;
+    uint32_t viewCount;
+    const XrCompositionLayerProjectionView* views;
+} XrCompositionLayerProjection;
 
 typedef struct XrEventDataSessionStateChanged {
     XrStructureType type;
