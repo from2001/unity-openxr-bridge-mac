@@ -14,8 +14,9 @@ namespace MetalXR.QuestClient
         private const int TextureWidth = 640;
         private const int TextureHeight = 360;
         private const float FrameUpdateIntervalSeconds = 1.0f / 12.0f;
-        private const float InputSampleIntervalSeconds = 1.0f / 30.0f;
-        private const int MaxStreamFramesPerUpdate = 8;
+        private const float InputSampleIntervalSeconds = 1.0f / 72.0f;
+        private const int MaxStreamFrameSetsPerUpdate = 4;
+        private const int MaxDecodedFrameSets = 8;
         private const int MaxHapticCommandsPerUpdate = 4;
 
         private Texture2D _leftTexture;
@@ -39,6 +40,9 @@ namespace MetalXR.QuestClient
         private MetalXRQuestDecodedVideoFrame _lastFreshLeftFrame;
         private MetalXRQuestDecodedVideoFrame _lastFreshRightFrame;
         private bool _reusedDecodedFrameLogged;
+        private readonly Dictionary<ulong, DecodedStereoFrameSet> _decodedFrameSets = new Dictionary<ulong, DecodedStereoFrameSet>();
+        private ulong _displayedFrameSetId;
+        private ulong _displayedStereoFrameSets;
 
         private void Start()
         {
@@ -62,7 +66,7 @@ namespace MetalXR.QuestClient
             if (_handshakeClient != null)
             {
                 _handshakeClient.DrainLogs(LogClientMessage);
-                _handshakeClient.DrainFrames(HandleEncodedFrame, MaxStreamFramesPerUpdate);
+                _handshakeClient.DrainFrameSets(HandleEncodedFrameSet, MaxStreamFrameSetsPerUpdate);
                 _handshakeClient.DrainHapticCommands(HandleHapticCommand, MaxHapticCommandsPerUpdate);
                 EnqueueTrackingSamples();
             }
@@ -102,15 +106,37 @@ namespace MetalXR.QuestClient
             Debug.Log(LogPrefix + " " + message);
         }
 
-        private void HandleEncodedFrame(MetalXRQuestEncodedVideoFrame encodedFrame)
+        private void HandleEncodedFrameSet(MetalXRQuestEncodedStereoFrameSet frameSet)
         {
-            if (_videoDecoder == null)
+            if (frameSet == null || !frameSet.IsComplete)
             {
                 return;
             }
 
+            MetalXRQuestDecodedVideoFrame leftFrame;
+            MetalXRQuestDecodedVideoFrame rightFrame;
+            if (TryDecodeFrame(frameSet.Left, out leftFrame))
+            {
+                StoreDecodedFrame(leftFrame);
+            }
+
+            if (TryDecodeFrame(frameSet.Right, out rightFrame))
+            {
+                StoreDecodedFrame(rightFrame);
+            }
+
+            DisplayLatestCompleteDecodedFrameSet();
+        }
+
+        private bool TryDecodeFrame(MetalXRQuestEncodedVideoFrame encodedFrame, out MetalXRQuestDecodedVideoFrame decodedFrame)
+        {
+            decodedFrame = null;
+            if (_videoDecoder == null)
+            {
+                return false;
+            }
+
             ulong decodeStartTimeNs = MetalXRQuestProtocol.NowNs();
-            MetalXRQuestDecodedVideoFrame decodedFrame;
             if (_videoDecoder.TryDecode(encodedFrame, out decodedFrame) && decodedFrame != null)
             {
                 ulong decodeEndTimeNs = MetalXRQuestProtocol.NowNs();
@@ -129,7 +155,113 @@ namespace MetalXR.QuestClient
                     RememberFreshMediaCodecFrame(decodedFrame);
                 }
 
-                UpdateStreamTexture(decodedFrame);
+                return true;
+            }
+
+            return false;
+        }
+
+        private void StoreDecodedFrame(MetalXRQuestDecodedVideoFrame decodedFrame)
+        {
+            if (decodedFrame == null)
+            {
+                return;
+            }
+
+            DecodedStereoFrameSet frameSet;
+            if (!_decodedFrameSets.TryGetValue(decodedFrame.FrameId, out frameSet))
+            {
+                frameSet = new DecodedStereoFrameSet(decodedFrame.FrameId);
+                _decodedFrameSets[decodedFrame.FrameId] = frameSet;
+            }
+
+            if (decodedFrame.IsLeftEye)
+            {
+                frameSet.Left = decodedFrame;
+            }
+            else
+            {
+                frameSet.Right = decodedFrame;
+            }
+
+            DropStaleDecodedFrameSets();
+        }
+
+        private void DisplayLatestCompleteDecodedFrameSet()
+        {
+            DecodedStereoFrameSet latestComplete = null;
+            foreach (DecodedStereoFrameSet frameSet in _decodedFrameSets.Values)
+            {
+                if (!frameSet.IsComplete || frameSet.FrameId <= _displayedFrameSetId)
+                {
+                    continue;
+                }
+
+                if (latestComplete == null || frameSet.FrameId > latestComplete.FrameId)
+                {
+                    latestComplete = frameSet;
+                }
+            }
+
+            if (latestComplete == null)
+            {
+                return;
+            }
+
+            bool updatedLeft = UpdateStreamTexture(latestComplete.Left);
+            bool updatedRight = UpdateStreamTexture(latestComplete.Right);
+            if (updatedLeft && updatedRight)
+            {
+                _displayedFrameSetId = latestComplete.FrameId;
+                _displayedStereoFrameSets++;
+                if (_displayedStereoFrameSets <= 4 || (_displayedStereoFrameSets % 120) == 0)
+                {
+                    LogClientMessage(
+                        "displayed stereo FrameSet frame=" + latestComplete.FrameId +
+                        " left_decoder=" + latestComplete.Left.DecoderMode +
+                        " right_decoder=" + latestComplete.Right.DecoderMode);
+                }
+            }
+
+            RemoveDecodedFrameSetsAtOrBefore(latestComplete.FrameId);
+        }
+
+        private void DropStaleDecodedFrameSets()
+        {
+            while (_decodedFrameSets.Count > MaxDecodedFrameSets)
+            {
+                ulong oldestFrameId = ulong.MaxValue;
+                foreach (ulong frameId in _decodedFrameSets.Keys)
+                {
+                    if (frameId < oldestFrameId)
+                    {
+                        oldestFrameId = frameId;
+                    }
+                }
+
+                if (oldestFrameId == ulong.MaxValue)
+                {
+                    break;
+                }
+
+                _decodedFrameSets.Remove(oldestFrameId);
+            }
+        }
+
+        private void RemoveDecodedFrameSetsAtOrBefore(ulong frameId)
+        {
+            List<ulong> frameIdsToRemove = new List<ulong>();
+            foreach (ulong pendingFrameId in _decodedFrameSets.Keys)
+            {
+                if (pendingFrameId <= frameId)
+                {
+                    frameIdsToRemove.Add(pendingFrameId);
+                }
+            }
+
+            for (int i = 0; i < frameIdsToRemove.Count; i++)
+            {
+                _decodedFrameSets.Remove(frameIdsToRemove[i]);
             }
         }
 
@@ -162,13 +294,8 @@ namespace MetalXR.QuestClient
                 return null;
             }
 
-            MetalXRQuestDecodedVideoFrame preferred = encodedFrame.IsLeftEye ? _lastFreshLeftFrame : _lastFreshRightFrame;
-            MetalXRQuestDecodedVideoFrame alternate = encodedFrame.IsLeftEye ? _lastFreshRightFrame : _lastFreshLeftFrame;
-            MetalXRQuestDecodedVideoFrame source = IsCompatibleReuseFrame(preferred, encodedFrame) ? preferred : null;
-            if (source == null && IsCompatibleReuseFrame(alternate, encodedFrame))
-            {
-                source = alternate;
-            }
+            MetalXRQuestDecodedVideoFrame source = encodedFrame.IsLeftEye ? _lastFreshLeftFrame : _lastFreshRightFrame;
+            source = IsCompatibleReuseFrame(source, encodedFrame) ? source : null;
 
             if (source == null)
             {
@@ -240,7 +367,7 @@ namespace MetalXR.QuestClient
             _handshakeClient.EnqueuePoseSample(
                 sampleId,
                 timestampNs,
-                timestampNs,
+                0,
                 VectorToArray(position),
                 QuaternionToArray(rotation),
                 trackingFlags);
@@ -533,13 +660,13 @@ namespace MetalXR.QuestClient
             texture.Apply(false);
         }
 
-        private void UpdateStreamTexture(MetalXRQuestDecodedVideoFrame frame)
+        private bool UpdateStreamTexture(MetalXRQuestDecodedVideoFrame frame)
         {
             Color32[] pixels = frame.IsLeftEye ? _leftPixels : _rightPixels;
             Texture2D texture = frame.IsLeftEye ? _leftTexture : _rightTexture;
             if (pixels == null || texture == null || frame.RgbaBytes == null)
             {
-                return;
+                return false;
             }
 
             int sourceWidth = frame.Width > 0 ? frame.Width : 1;
@@ -549,7 +676,7 @@ namespace MetalXR.QuestClient
             int requiredBytes = ((sourceHeight - 1) * strideBytes) + sourceRowBytes;
             if (frame.RgbaBytes.Length < requiredBytes)
             {
-                return;
+                return false;
             }
 
             for (int y = 0; y < TextureHeight; y++)
@@ -615,6 +742,8 @@ namespace MetalXR.QuestClient
                     " queue_depth=" + CurrentQueuedFrameCount() +
                     " bytes=" + frame.EncodedBytes);
             }
+
+            return true;
         }
 
         private void SendFrameTimingSample(MetalXRQuestDecodedVideoFrame frame, ulong displayTimeNs)
@@ -708,6 +837,19 @@ namespace MetalXR.QuestClient
             }
 
             Destroy(unityObject);
+        }
+
+        private sealed class DecodedStereoFrameSet
+        {
+            public DecodedStereoFrameSet(ulong frameId)
+            {
+                FrameId = frameId;
+            }
+
+            public ulong FrameId { get; private set; }
+            public MetalXRQuestDecodedVideoFrame Left { get; set; }
+            public MetalXRQuestDecodedVideoFrame Right { get; set; }
+            public bool IsComplete { get { return Left != null && Right != null; } }
         }
     }
 

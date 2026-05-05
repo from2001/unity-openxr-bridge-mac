@@ -18,10 +18,35 @@ Working:
 Not MVP-ready yet:
 
 - Production zero-copy or IOSurface frame handoff.
+- Production runtime-host IPC or shared-memory state. Frame transfer currently uses CPU readback and file-based export.
+- Production Quest presentation. The Quest APK is currently a diagnostic Unity OpenXR client that displays streamed eye textures through an in-headset debug presentation path.
+- Frame pose/FOV transport, rotational reprojection, or compositor-layer style presentation.
+- Runtime-host tracking, timing, and haptics still have development text-file boundaries.
 - Datagram transport, packet loss recovery, audio, foveation, or automatic bitrate adaptation.
 - Full OpenXR interaction profile/action binding coverage.
 - SteamVR/OpenComposite compatibility.
 - Signed/notarized release packaging.
+
+## Architecture Direction
+
+The intended long-term model is still OpenXR-runtime-first:
+
+```text
+Unity Editor
+  -> MetalXR macOS OpenXR runtime
+  -> MetalXR host service
+  -> Quest/OpenXR headset client
+```
+
+Unity camera data should not become a separate bridge API. The runtime should carry the OpenXR projection-layer metadata that Unity actually submitted: predicted display time, per-eye pose, FOV, image rect, swapchain identity, and reference-space context. That keeps the bridge aligned with OpenXR instead of adding Unity-specific camera coupling.
+
+The current implementation deliberately keeps several development-only boundaries because they are easy to probe and debug:
+
+- Unity-submitted Metal frames are exported through CPU readback and files before the host encoder reads them.
+- Runtime-host tracking, timing, and haptics use debug text files.
+- The Quest client uses a Unity diagnostic presentation path and keeps a CPU MediaCodec Image-plane fallback.
+
+The next production-oriented milestones are to replace those boundaries with timestamped IPC/shared state, shared GPU or encoder-compatible frame resources, explicit projection metadata, and a Quest presentation path that is aware of frame pose/FOV rather than just showing diagnostic panels.
 
 ## Repository Layout
 
