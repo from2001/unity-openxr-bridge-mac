@@ -93,6 +93,7 @@ struct XrSession_T {
     XrSystemId systemId;
     XrSessionState state;
     void* metalCommandQueue;
+    XrBool32 ownsMetalCommandQueue;
     void* metalDevice;
     XrBool32 running;
     XrBool32 frameBegun;
@@ -1145,6 +1146,9 @@ static void metalxr_release_session(XrSession session)
         metalxr_release_swapchain(session->swapchains[session->swapchainCount - 1]);
     }
 
+    if (session->ownsMetalCommandQueue) {
+        metalxr_release_objc(session->metalCommandQueue);
+    }
     metalxr_release_objc(session->metalDevice);
 
     if (metalxr_is_instance(session->instance) && session->instance->session == session) {
@@ -1594,6 +1598,16 @@ static void* metalxr_get_command_queue_device(void* commandQueue)
     }
 
     return metalxr_objc_send_id((MetalXrObjcId)commandQueue, metalxr_sel(bridge, "device"));
+}
+
+static void* metalxr_create_command_queue(void* metalDevice)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || metalDevice == NULL) {
+        return NULL;
+    }
+
+    return metalxr_objc_send_id((MetalXrObjcId)metalDevice, metalxr_sel(bridge, "newCommandQueue"));
 }
 
 static void* metalxr_create_metal_texture(
@@ -2244,9 +2258,18 @@ static XrResult XRAPI_CALL metalxr_xrCreateSession(
         metalxr_log("xrCreateSession failed: no Metal device available");
         return XR_ERROR_RUNTIME_FAILURE;
     }
+    XrBool32 ownsCommandQueue = XR_FALSE;
+    if (commandQueue == NULL) {
+        commandQueue = metalxr_create_command_queue(metalDevice);
+        ownsCommandQueue = commandQueue != NULL ? XR_TRUE : XR_FALSE;
+        metalxr_log("xrCreateSession created internal Metal commandQueue=%p", commandQueue);
+    }
 
     XrSession created = (XrSession)calloc(1, sizeof(*created));
     if (created == NULL) {
+        if (ownsCommandQueue) {
+            metalxr_release_objc(commandQueue);
+        }
         return XR_ERROR_OUT_OF_MEMORY;
     }
 
@@ -2259,6 +2282,7 @@ static XrResult XRAPI_CALL metalxr_xrCreateSession(
     created->systemId = kDummySystemId;
     created->state = XR_SESSION_STATE_IDLE;
     created->metalCommandQueue = commandQueue;
+    created->ownsMetalCommandQueue = ownsCommandQueue;
     created->metalDevice = metalxr_retain_objc(metalDevice);
     created->nextFrameTime = metalxr_now_ns() + metalxr_configured_frame_period_ns();
     instance->session = created;
