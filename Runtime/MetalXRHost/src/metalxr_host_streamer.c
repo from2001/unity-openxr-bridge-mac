@@ -23,6 +23,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -50,6 +51,7 @@ typedef struct StreamerOptions {
     int reconnectAttempts;
     FrameSourceMode frameSource;
     char frameExportDir[1024];
+    char frameExportSocketPath[1024];
     int clockSyncIntervalMs;
     int64_t predictionOffsetNs;
     char trackingStatePath[1024];
@@ -89,6 +91,8 @@ typedef struct UnityExportFramePair {
 
 typedef struct UnityExportFrameSource {
     char exportDir[1024];
+    char socketPath[1024];
+    int socketFd;
     long indexOffset;
     int hasLatestEye[2];
     UnityExportRecord latestEye[2];
@@ -249,6 +253,7 @@ static void print_usage(const char* argv0)
             "[--width N] [--height N] [--bitrate BPS] [--tracking-state-path PATH] "
             "[--haptic-command-path PATH] [--timing-state-path PATH] [--queue-depth N] "
             "[--frame-source synthetic|unity-export] [--frame-export-dir PATH] "
+            "[--frame-export-socket PATH] "
             "[--shared-state-name NAME] [--no-shared-state] "
             "[--prediction-offset-ms N] [--clock-sync-interval-ms N] "
             "[--reconnect-attempts N] [--no-realtime]\n\n"
@@ -285,6 +290,7 @@ static StreamerOptions parse_options(int argc, char** argv)
     options.reconnectAttempts = 0;
     options.frameSource = FRAME_SOURCE_SYNTHETIC;
     options.frameExportDir[0] = '\0';
+    options.frameExportSocketPath[0] = '\0';
     snprintf(options.sharedStateName, sizeof(options.sharedStateName), "%s", metalxr_shared_state_default_name());
     options.useSharedState = 1;
     options.clockSyncIntervalMs = 500;
@@ -337,6 +343,8 @@ static StreamerOptions parse_options(int argc, char** argv)
             }
         } else if (strcmp(arg, "--frame-export-dir") == 0 && i + 1 < argc) {
             snprintf(options.frameExportDir, sizeof(options.frameExportDir), "%s", argv[++i]);
+        } else if (strcmp(arg, "--frame-export-socket") == 0 && i + 1 < argc) {
+            snprintf(options.frameExportSocketPath, sizeof(options.frameExportSocketPath), "%s", argv[++i]);
         } else if (strcmp(arg, "--shared-state-name") == 0 && i + 1 < argc) {
             snprintf(options.sharedStateName, sizeof(options.sharedStateName), "%s", argv[++i]);
         } else if (strcmp(arg, "--no-shared-state") == 0) {
@@ -353,8 +361,10 @@ static StreamerOptions parse_options(int argc, char** argv)
         }
     }
 
-    if (options.frameSource == FRAME_SOURCE_UNITY_EXPORT && options.frameExportDir[0] == '\0') {
-        fprintf(stderr, "--frame-export-dir is required for --frame-source unity-export\n");
+    if (options.frameSource == FRAME_SOURCE_UNITY_EXPORT &&
+        options.frameExportDir[0] == '\0' &&
+        options.frameExportSocketPath[0] == '\0') {
+        fprintf(stderr, "--frame-export-dir or --frame-export-socket is required for --frame-source unity-export\n");
         exit(2);
     }
 
@@ -634,10 +644,101 @@ static int parse_unity_export_record(const char* line, UnityExportRecord* record
     return 1;
 }
 
-static void unity_export_source_init(UnityExportFrameSource* source, const char* exportDir)
+static void update_unity_export_source(UnityExportFrameSource* source, const UnityExportRecord* record);
+
+static int unity_export_source_open_socket(UnityExportFrameSource* source)
+{
+    if (source == NULL || source->socketPath[0] == '\0') {
+        return 1;
+    }
+    if (strlen(source->socketPath) >= sizeof(((struct sockaddr_un*)0)->sun_path)) {
+        fprintf(stderr, "Unity export socket path is too long: %s\n", source->socketPath);
+        return 0;
+    }
+
+    const int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        perror("socket(AF_UNIX, SOCK_DGRAM)");
+        return 0;
+    }
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", source->socketPath);
+
+    (void)unlink(source->socketPath);
+    if (bind(fd, (struct sockaddr*)&address, sizeof(address)) != 0) {
+        perror("bind(frame export socket)");
+        close(fd);
+        return 0;
+    }
+
+    source->socketFd = fd;
+    return 1;
+}
+
+static void unity_export_source_close(UnityExportFrameSource* source)
+{
+    if (source == NULL) {
+        return;
+    }
+    if (source->socketPath[0] != '\0' && source->socketFd >= 0) {
+        close(source->socketFd);
+        source->socketFd = -1;
+    }
+    if (source->socketPath[0] != '\0') {
+        (void)unlink(source->socketPath);
+    }
+}
+
+static void unity_export_source_poll_socket(UnityExportFrameSource* source, int* parsedRecords)
+{
+    if (source == NULL || source->socketFd < 0) {
+        return;
+    }
+
+    for (;;) {
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(source->socketFd, &readSet);
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 0;
+        const int ready = select(source->socketFd + 1, &readSet, NULL, NULL, &timeout);
+        if (ready <= 0 || !FD_ISSET(source->socketFd, &readSet)) {
+            return;
+        }
+
+        char line[8192];
+        const ssize_t received = recvfrom(source->socketFd, line, sizeof(line) - 1, 0, NULL, NULL);
+        if (received <= 0) {
+            return;
+        }
+        line[received] = '\0';
+        UnityExportRecord record;
+        if (parse_unity_export_record(line, &record)) {
+            update_unity_export_source(source, &record);
+            if (parsedRecords != NULL) {
+                ++(*parsedRecords);
+            }
+        }
+    }
+}
+
+static void unity_export_source_init(
+    UnityExportFrameSource* source,
+    const char* exportDir,
+    const char* socketPath)
 {
     memset(source, 0, sizeof(*source));
-    snprintf(source->exportDir, sizeof(source->exportDir), "%s", exportDir);
+    source->socketFd = -1;
+    if (exportDir != NULL) {
+        snprintf(source->exportDir, sizeof(source->exportDir), "%s", exportDir);
+    }
+    if (socketPath != NULL) {
+        snprintf(source->socketPath, sizeof(source->socketPath), "%s", socketPath);
+    }
 }
 
 static void update_unity_export_source(UnityExportFrameSource* source, const UnityExportRecord* record)
@@ -659,47 +760,48 @@ static void update_unity_export_source(UnityExportFrameSource* source, const Uni
 
 static int poll_unity_export_frame_source(UnityExportFrameSource* source, UnityExportFramePair* pair)
 {
-    if (source == NULL || source->exportDir[0] == '\0') {
+    if (source == NULL) {
         return 0;
     }
 
-    char indexPath[1024];
-    snprintf(indexPath, sizeof(indexPath), "%s/frames.jsonl", source->exportDir);
-
-    FILE* input = fopen(indexPath, "r");
-    if (input == NULL) {
-        ++source->missingPolls;
-        return source->hasLatestPair && pair != NULL ? (*pair = source->latestPair, 1) : 0;
-    }
-
-    if (source->indexOffset > 0) {
-        if (fseek(input, 0, SEEK_END) == 0) {
-            const long indexSize = ftell(input);
-            if (indexSize >= 0 && indexSize < source->indexOffset) {
-                source->indexOffset = 0;
-            }
-        }
-    }
-
-    if (source->indexOffset > 0) {
-        (void)fseek(input, source->indexOffset, SEEK_SET);
-    }
-
     int parsedRecords = 0;
-    char line[8192];
-    while (fgets(line, sizeof(line), input) != NULL) {
-        UnityExportRecord record;
-        if (parse_unity_export_record(line, &record)) {
-            update_unity_export_source(source, &record);
-            ++parsedRecords;
+    unity_export_source_poll_socket(source, &parsedRecords);
+
+    if (source->exportDir[0] != '\0') {
+        char indexPath[1024];
+        snprintf(indexPath, sizeof(indexPath), "%s/frames.jsonl", source->exportDir);
+
+        FILE* input = fopen(indexPath, "r");
+        if (input != NULL) {
+            if (source->indexOffset > 0) {
+                if (fseek(input, 0, SEEK_END) == 0) {
+                    const long indexSize = ftell(input);
+                    if (indexSize >= 0 && indexSize < source->indexOffset) {
+                        source->indexOffset = 0;
+                    }
+                }
+            }
+
+            if (source->indexOffset > 0) {
+                (void)fseek(input, source->indexOffset, SEEK_SET);
+            }
+
+            char line[8192];
+            while (fgets(line, sizeof(line), input) != NULL) {
+                UnityExportRecord record;
+                if (parse_unity_export_record(line, &record)) {
+                    update_unity_export_source(source, &record);
+                    ++parsedRecords;
+                }
+            }
+
+            const long nextOffset = ftell(input);
+            if (nextOffset >= 0) {
+                source->indexOffset = nextOffset;
+            }
+            fclose(input);
         }
     }
-
-    const long nextOffset = ftell(input);
-    if (nextOffset >= 0) {
-        source->indexOffset = nextOffset;
-    }
-    fclose(input);
 
     if (!source->hasLatestPair) {
         ++source->missingPolls;
@@ -2565,12 +2667,29 @@ static int configure_unity_export_stream(
         return 1;
     }
 
-    unity_export_source_init(source, activeOptions->frameExportDir);
-    if (!poll_unity_export_frame_source(source, initialPair)) {
+    unity_export_source_init(source, activeOptions->frameExportDir, activeOptions->frameExportSocketPath);
+    if (!unity_export_source_open_socket(source)) {
+        return 0;
+    }
+
+    const uint64_t waitStartNs = host_time_ns();
+    const uint64_t waitDeadlineNs = waitStartNs + 3000000000ull;
+    while (!poll_unity_export_frame_source(source, initialPair) &&
+           source->socketPath[0] != '\0' &&
+           host_time_ns() < waitDeadlineNs) {
+        struct timespec sleepTime;
+        sleepTime.tv_sec = 0;
+        sleepTime.tv_nsec = 10000000;
+        (void)nanosleep(&sleepTime, NULL);
+    }
+
+    if (!source->hasLatestPair) {
         fprintf(stderr,
-                "No complete Unity frame export pair found in %s. "
-                "Start Unity Play Mode with METALXR_FRAME_EXPORT_DIR set before using unity-export source.\n",
-                activeOptions->frameExportDir);
+                "No complete Unity frame export pair found in dir=%s socket=%s. "
+                "Start Unity Play Mode with METALXR_FRAME_EXPORT_DIR or METALXR_FRAME_EXPORT_SOCKET set before using unity-export source.\n",
+                activeOptions->frameExportDir[0] != '\0' ? activeOptions->frameExportDir : "-",
+                activeOptions->frameExportSocketPath[0] != '\0' ? activeOptions->frameExportSocketPath : "-");
+        unity_export_source_close(source);
         return 0;
     }
 
@@ -2582,6 +2701,7 @@ static int configure_unity_export_stream(
                 initialPair->eyes[0].height,
                 initialPair->eyes[1].width,
                 initialPair->eyes[1].height);
+        unity_export_source_close(source);
         return 0;
     }
 
@@ -2589,12 +2709,14 @@ static int configure_unity_export_stream(
     activeOptions->height = initialPair->eyes[0].height;
     printf("{\"event\":\"frame_source\",\"source\":\"unity-export\","
            "\"state\":\"ready\",\"source_frame\":%" PRIu64 ",\"width\":%d,"
-           "\"height\":%d,\"age_ms\":%" PRIu64 ",\"export_dir\":\"%s\"}\n",
+           "\"height\":%d,\"age_ms\":%" PRIu64 ",\"export_dir\":\"%s\","
+           "\"export_socket\":\"%s\"}\n",
            initialPair->sourceFrameId,
            activeOptions->width,
            activeOptions->height,
            unity_export_pair_age_ms(initialPair),
-           activeOptions->frameExportDir);
+           activeOptions->frameExportDir[0] != '\0' ? activeOptions->frameExportDir : "-",
+           activeOptions->frameExportSocketPath[0] != '\0' ? activeOptions->frameExportSocketPath : "-");
     fflush(stdout);
     return 1;
 }
@@ -2610,6 +2732,7 @@ static int stream_client(int clientFd, const StreamerOptions* options)
     StreamerOptions activeOptions = *options;
     UnityExportFrameSource unityExportSource;
     memset(&unityExportSource, 0, sizeof(unityExportSource));
+    unityExportSource.socketFd = -1;
     UnityExportFramePair initialUnityPair;
     memset(&initialUnityPair, 0, sizeof(initialUnityPair));
 
@@ -2647,6 +2770,7 @@ static int stream_client(int clientFd, const StreamerOptions* options)
         if (stream.hasSharedState) {
             metalxr_shared_state_close(&stream.sharedState);
         }
+        unity_export_source_close(&unityExportSource);
         pthread_mutex_destroy(&stream.sendLock);
         return 0;
     }
@@ -2667,6 +2791,7 @@ static int stream_client(int clientFd, const StreamerOptions* options)
         if (stream.hasSharedState) {
             metalxr_shared_state_close(&stream.sharedState);
         }
+        unity_export_source_close(&unityExportSource);
         pthread_mutex_destroy(&stream.sendLock);
         return 0;
     }
@@ -2782,6 +2907,7 @@ static int stream_client(int clientFd, const StreamerOptions* options)
 
     destroy_encoder(&left);
     destroy_encoder(&right);
+    unity_export_source_close(&unityExportSource);
     pthread_mutex_destroy(&stream.sendLock);
     if (stream.hasSharedState) {
         metalxr_shared_state_close(&stream.sharedState);
@@ -2800,7 +2926,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d reconnect_attempts=%d source=%s export_dir=%s prediction_offset_ns=%" PRId64 " shared_state=%s tracking=%s haptics=%s timing=%s\n",
+    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d reconnect_attempts=%d source=%s export_dir=%s export_socket=%s prediction_offset_ns=%" PRId64 " shared_state=%s tracking=%s haptics=%s timing=%s\n",
            options.bindHost,
            options.port,
            options.width,
@@ -2812,6 +2938,7 @@ int main(int argc, char** argv)
            options.reconnectAttempts,
            frame_source_name(options.frameSource),
            options.frameExportDir[0] != '\0' ? options.frameExportDir : "-",
+           options.frameExportSocketPath[0] != '\0' ? options.frameExportSocketPath : "-",
            options.predictionOffsetNs,
            options.useSharedState ? options.sharedStateName : "disabled",
            options.trackingStatePath,

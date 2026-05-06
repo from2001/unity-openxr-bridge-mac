@@ -6,6 +6,7 @@
 #include <IOSurface/IOSurface.h>
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -13,8 +14,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
+#include <unistd.h>
 
 static const XrVersion kSupportedApiVersion = XR_MAKE_VERSION(1, 0, 0);
 static const XrVersion kRuntimeVersion = XR_MAKE_VERSION(0, 3, 0);
@@ -3570,6 +3574,33 @@ static int metalxr_write_binary_file(const char* path, const uint8_t* bytes, siz
 
 static void metalxr_append_frame_export_record(const char* exportDirectory, const char* record)
 {
+    const char* socketPath = getenv("METALXR_FRAME_EXPORT_SOCKET");
+    if (socketPath != NULL && socketPath[0] != '\0') {
+        if (strlen(socketPath) >= sizeof(((struct sockaddr_un*)0)->sun_path)) {
+            metalxr_log("frame export socket path too long: %s", socketPath);
+        } else {
+            const int socketFd = socket(AF_UNIX, SOCK_DGRAM, 0);
+            if (socketFd >= 0) {
+                struct sockaddr_un address;
+                memset(&address, 0, sizeof(address));
+                address.sun_family = AF_UNIX;
+                snprintf(address.sun_path, sizeof(address.sun_path), "%s", socketPath);
+                const size_t recordLength = strlen(record);
+                if (sendto(socketFd,
+                           record,
+                           recordLength,
+                           0,
+                           (struct sockaddr*)&address,
+                           sizeof(address)) < 0 &&
+                    errno != ENOENT &&
+                    errno != ECONNREFUSED) {
+                    metalxr_log("frame export socket send failed: %s errno=%d", socketPath, errno);
+                }
+                close(socketFd);
+            }
+        }
+    }
+
     char indexPath[1024];
     snprintf(indexPath, sizeof(indexPath), "%s/frames.jsonl", exportDirectory);
 
