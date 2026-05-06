@@ -117,7 +117,7 @@ namespace MetalXR.QuestClient
 
             float refreshRate = 0.0f;
             List<XRDisplaySubsystem> displays = new List<XRDisplaySubsystem>();
-            SubsystemManager.GetInstances(displays);
+            SubsystemManager.GetSubsystems(displays);
             for (int i = 0; i < displays.Count; i++)
             {
                 XRDisplaySubsystem display = displays[i];
