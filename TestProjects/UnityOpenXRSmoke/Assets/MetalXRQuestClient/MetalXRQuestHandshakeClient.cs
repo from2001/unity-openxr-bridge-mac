@@ -19,6 +19,7 @@ namespace MetalXR.QuestClient
         private const int MaxQueuedHaptics = 8;
         private readonly MetalXRQuestEndpoint _endpoint;
         private readonly MetalXRQuestDeviceProfile _deviceProfile;
+        private readonly uint _capabilities;
         private readonly ConcurrentQueue<string> _logs = new ConcurrentQueue<string>();
         private readonly ConcurrentQueue<MetalXRQuestEncodedStereoFrameSet> _frameSets = new ConcurrentQueue<MetalXRQuestEncodedStereoFrameSet>();
         private readonly ConcurrentQueue<byte[]> _outgoingPackets = new ConcurrentQueue<byte[]>();
@@ -33,9 +34,18 @@ namespace MetalXR.QuestClient
         private ulong _receivedFrameSets;
 
         public MetalXRQuestHandshakeClient(MetalXRQuestEndpoint endpoint, MetalXRQuestDeviceProfile deviceProfile)
+            : this(endpoint, deviceProfile, MetalXRQuestProtocol.DefaultClientCapabilities)
+        {
+        }
+
+        public MetalXRQuestHandshakeClient(
+            MetalXRQuestEndpoint endpoint,
+            MetalXRQuestDeviceProfile deviceProfile,
+            uint capabilities)
         {
             _endpoint = endpoint;
             _deviceProfile = deviceProfile ?? MetalXRQuestDeviceProfile.Default;
+            _capabilities = capabilities == 0 ? MetalXRQuestProtocol.DefaultClientCapabilities : capabilities;
         }
 
         public int QueuedFrameCount { get { return _frameSets.Count * 2; } }
@@ -235,10 +245,11 @@ namespace MetalXR.QuestClient
                     using (NetworkStream stream = client.GetStream())
                     {
                         stream.ReadTimeout = ReadTimeoutMs;
-                        byte[] hello = MetalXRQuestProtocol.CreateHelloPacket(NextSequence(), _deviceProfile);
+                        byte[] hello = MetalXRQuestProtocol.CreateHelloPacket(NextSequence(), _deviceProfile, _capabilities);
                         stream.Write(hello, 0, hello.Length);
                         _logs.Enqueue(
                             "sent HELLO to " + _endpoint.Host + ":" + _endpoint.Port +
+                            " caps=0x" + _capabilities.ToString("x8") +
                             " max=" + _deviceProfile.MaxVideoWidth + "x" + _deviceProfile.MaxVideoHeight +
                             " fps=" + _deviceProfile.PreferredFps);
 

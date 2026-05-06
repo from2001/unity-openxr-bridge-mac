@@ -45,6 +45,14 @@ namespace MetalXR.QuestClient
         public const uint CapabilityLogStream = 0x00000080;
         public const uint CapabilitySurfaceDecode = 0x00000100;
         public const uint CapabilityProjectionPresentation = 0x00000200;
+        public const uint DefaultClientCapabilities =
+            CapabilityH264 |
+            CapabilityStereoSeparateEyes |
+            CapabilityPoseInput |
+            CapabilityControllerInput |
+            CapabilityHaptics |
+            CapabilityLogStream |
+            CapabilityProjectionPresentation;
         private const int HelloPayloadSize = 96;
         private const int VideoFramePayloadSize = 132;
         private const int PoseSamplePayloadSize = 60;
@@ -95,7 +103,13 @@ namespace MetalXR.QuestClient
 
         public static byte[] CreateHelloPacket(ulong sequence, MetalXRQuestDeviceProfile profile)
         {
+            return CreateHelloPacket(sequence, profile, DefaultClientCapabilities);
+        }
+
+        public static byte[] CreateHelloPacket(ulong sequence, MetalXRQuestDeviceProfile profile, uint capabilities)
+        {
             MetalXRQuestDeviceProfile activeProfile = profile ?? MetalXRQuestDeviceProfile.Default;
+            uint advertisedCapabilities = capabilities == 0 ? DefaultClientCapabilities : capabilities;
             byte[] packet = new byte[HeaderSize + HelloPayloadSize];
             int offset = 0;
             WriteUInt32(packet, ref offset, Magic);
@@ -110,16 +124,7 @@ namespace MetalXR.QuestClient
             WriteUInt32(packet, ref offset, 0);
 
             WriteUInt32(packet, ref offset, RoleQuestClient);
-            WriteUInt32(
-                packet,
-                ref offset,
-                CapabilityH264 |
-                CapabilityStereoSeparateEyes |
-                CapabilityPoseInput |
-                CapabilityControllerInput |
-                CapabilityHaptics |
-                CapabilityLogStream |
-                CapabilityProjectionPresentation);
+            WriteUInt32(packet, ref offset, advertisedCapabilities);
             WriteUInt32(packet, ref offset, activeProfile.MaxVideoWidth);
             WriteUInt32(packet, ref offset, activeProfile.MaxVideoHeight);
             WriteUInt32(packet, ref offset, activeProfile.PreferredFps);
