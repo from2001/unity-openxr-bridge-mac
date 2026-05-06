@@ -30,6 +30,21 @@ Expected outputs:
 - `Runtime/MetalXRHost/build/metalxr_host_encoder`
 - `Runtime/MetalXRProtocol/build/metalxr_protocol_loopback`
 
+Validate the runtime lifecycle and fixture export path:
+
+```sh
+Scripts/probe-metalxr-runtime.sh
+```
+
+Validate the experimental runtime IOSurface export path outside Unity:
+
+```sh
+METALXR_PROBE_FRAME_EXPORT_MODE=iosurface \
+METALXR_PROBE_SWAPCHAIN_RESOURCE_MODE=iosurface \
+METALXR_PROBE_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1 \
+Scripts/probe-metalxr-runtime.sh
+```
+
 ## 3. Build And Install The Quest Client
 
 ```sh

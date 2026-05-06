@@ -13,6 +13,9 @@ probe_log="${TMPDIR:-/tmp}/metalxr_runtime_probe.log"
 probe_dump_dir="${TMPDIR:-/tmp}/metalxr_frame_dump"
 probe_export_dir="${TMPDIR:-/tmp}/metalxr_frame_export"
 probe_timing_state="${TMPDIR:-/tmp}/metalxr_runtime_probe_timing_state.txt"
+probe_export_mode="${METALXR_PROBE_FRAME_EXPORT_MODE:-fixture}"
+probe_swapchain_resource_mode="${METALXR_PROBE_SWAPCHAIN_RESOURCE_MODE:-}"
+probe_enable_iosurface_export="${METALXR_PROBE_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT:-0}"
 
 if [[ ! -f "$runtime_dylib" ]]; then
   "$repo_root/Scripts/build-metalxr-runtime.sh"
@@ -634,13 +637,16 @@ mkdir -p "$probe_export_dir"
 METALXR_RUNTIME_LOG="$probe_log" \
 METALXR_FRAME_DUMP_DIR="$probe_dump_dir" \
 METALXR_FRAME_EXPORT_DIR="$probe_export_dir" \
-METALXR_FRAME_EXPORT_MODE=fixture \
+METALXR_FRAME_EXPORT_MODE="$probe_export_mode" \
+METALXR_SWAPCHAIN_RESOURCE_MODE="$probe_swapchain_resource_mode" \
+METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT="$probe_enable_iosurface_export" \
 METALXR_TIMING_STATE_PATH="$probe_timing_state" \
 METALXR_VIEW_WIDTH=64 \
 METALXR_VIEW_HEIGHT=64 \
 "$probe_binary" "$runtime_dylib"
 
 echo "Runtime log: $probe_log"
+echo "Frame export mode: $probe_export_mode"
 sed -n '1,180p' "$probe_log"
 
 metadata_file="$probe_dump_dir/frame_000001.txt"
@@ -661,23 +667,28 @@ fi
 for eye in 0 1; do
   payload_file="$probe_export_dir/frame_000001_eye_${eye}.bgra"
   record_file="$probe_export_dir/frame_000001_eye_${eye}.json"
-  if [[ ! -s "$payload_file" ]]; then
-    echo "Expected non-empty frame export payload was not written: $payload_file" >&2
-    exit 1
-  fi
   if [[ ! -f "$record_file" ]]; then
     echo "Expected frame export record was not written: $record_file" >&2
     exit 1
   fi
-  first_byte="$(od -An -tu1 -N1 "$payload_file" | tr -d ' ')"
-  if [[ -z "$first_byte" || "$first_byte" == "0" ]]; then
-    echo "Expected deterministic non-zero fixture pixel in $payload_file" >&2
-    exit 1
-  fi
   grep -q "\"frame\":1" "$record_file"
   grep -q "\"eye\":$eye" "$record_file"
-  grep -q "\"payloadFormat\":\"BGRA8\"" "$record_file"
-  grep -q "\"payloadPath\":\"$payload_file\"" "$record_file"
+  if [[ "$probe_export_mode" == "iosurface" ]]; then
+    grep -q "\"payloadFormat\":\"IOSurface" "$record_file"
+    grep -q "\"ioSurfaceId\":" "$record_file"
+  else
+    if [[ ! -s "$payload_file" ]]; then
+      echo "Expected non-empty frame export payload was not written: $payload_file" >&2
+      exit 1
+    fi
+    first_byte="$(od -An -tu1 -N1 "$payload_file" | tr -d ' ')"
+    if [[ "$probe_export_mode" == "fixture" && ( -z "$first_byte" || "$first_byte" == "0" ) ]]; then
+      echo "Expected deterministic non-zero fixture pixel in $payload_file" >&2
+      exit 1
+    fi
+    grep -q "\"payloadFormat\":\"BGRA8\"" "$record_file"
+    grep -q "\"payloadPath\":\"$payload_file\"" "$record_file"
+  fi
 done
 
 grep -q "\"eye\":0" "$export_index"
