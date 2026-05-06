@@ -19,6 +19,7 @@ Environment:
   METALXR_WORKFLOW_KEEP_RUNNING        Keep Unity and streamer running after smoke checks. Defaults to 1.
   METALXR_QUEST_ACTIVITY               Android activity class. Defaults to UnityPlayerGameActivity.
   METALXR_QUEST_LAUNCH_CATEGORY        Android launch category. Defaults to Quest VR category.
+  METALXR_QUEST_SURFACE_DECODE         Pass the experimental Surface decode opt-in to Quest. Defaults to 0.
   METALXR_WORKFLOW_EXPORT_WAIT_SECONDS Seconds to wait for Unity frame exports. Defaults to 120.
   METALXR_WORKFLOW_STREAM_WAIT_SECONDS Seconds to wait for streamer/client logs. Defaults to 60.
   METALXR_FRAME_EXPORT_DIR             Shared frame export directory. Defaults to TMPDIR/metalxr_frame_export.
@@ -48,6 +49,7 @@ project_path="${UNITY_PROJECT_PATH:-$repo_root/TestProjects/UnityOpenXRSmoke}"
 package_name="${METALXR_QUEST_PACKAGE:-com.metalxr.questclient}"
 quest_activity="${METALXR_QUEST_ACTIVITY:-com.unity3d.player.UnityPlayerGameActivity}"
 quest_launch_category="${METALXR_QUEST_LAUNCH_CATEGORY:-com.oculus.intent.category.VR}"
+quest_surface_decode="${METALXR_QUEST_SURFACE_DECODE:-0}"
 host_port="${METALXR_HOST_PORT:-47000}"
 build_missing="${METALXR_WORKFLOW_BUILD_MISSING:-1}"
 install_apk="${METALXR_WORKFLOW_INSTALL_APK:-1}"
@@ -250,6 +252,17 @@ prepare_quest_client() {
 }
 
 start_quest_client_activity() {
+  if [[ "$quest_surface_decode" == "1" ]]; then
+    "$adb_path" shell am force-stop "$package_name" >/dev/null 2>&1 || true
+    "$adb_path" logcat -c >/dev/null 2>&1 || true
+    "$adb_path" shell am start -W \
+      -a android.intent.action.MAIN \
+      -c "$quest_launch_category" \
+      -n "$package_name/$quest_activity" \
+      --ez metalxr_surface_decode true >/dev/null
+    return
+  fi
+
   "$adb_path" shell am force-stop "$package_name" >/dev/null 2>&1 || true
   "$adb_path" logcat -c >/dev/null 2>&1 || true
   "$adb_path" shell am start -W \
