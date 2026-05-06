@@ -66,9 +66,9 @@ METALXR_FRAME_EXPORT_DIR=/tmp/metalxr_frame_export \
 Scripts/run-metalxr-frame-stream.sh
 ```
 
-The streamer reads `<export-dir>/frames.jsonl`, selects the latest complete left/right BGRA eye pair, auto-configures the encoder dimensions from that pair, and logs frame age plus repeated-frame counts. If no complete pair is available when the client connects, it exits with a setup error instead of silently falling back to synthetic content.
+The streamer reads `<export-dir>/frames.jsonl`, selects the latest complete left/right BGRA eye pair, auto-configures the encoder dimensions from that pair, validates those dimensions against the Quest HELLO device profile, and logs frame age plus repeated-frame counts. If no complete pair is available when the client connects, it exits with a setup error instead of silently falling back to synthetic content.
 
-For normal Play Mode sessions, `METALXR_STREAM_FRAMES=0` keeps the streamer alive and waits for a Quest client to reconnect after the app restarts or USB transport drops. Finite smoke tests can set `METALXR_STREAM_RECONNECT_ATTEMPTS=N`; the streamer logs `client_disconnect` and `reconnect_wait` records before accepting the next client. `METALXR_STREAM_QUEUE_DEPTH`, `METALXR_STREAM_BITRATE`, resolution, frame rate, `METALXR_PREDICTION_OFFSET_MS`, and `METALXR_CLOCK_SYNC_INTERVAL_MS` remain the primary tuning controls for latency and backlog.
+For normal Play Mode sessions, `METALXR_STREAM_FRAMES=0` keeps the streamer alive and waits for a Quest client to reconnect after the app restarts or USB transport drops. Finite smoke tests can set `METALXR_STREAM_RECONNECT_ATTEMPTS=N`; the streamer logs `client_disconnect` and `reconnect_wait` records before accepting the next client. When `METALXR_STREAM_FPS` is not set, the host uses the Quest HELLO `preferredFps`; explicit FPS values are capped to the client preferred rate. `METALXR_STREAM_QUEUE_DEPTH`, `METALXR_STREAM_BITRATE`, resolution, frame rate, `METALXR_PREDICTION_OFFSET_MS`, and `METALXR_CLOCK_SYNC_INTERVAL_MS` remain the primary tuning controls for latency and backlog.
 
 ## Metadata
 

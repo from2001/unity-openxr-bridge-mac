@@ -17,7 +17,7 @@ Environment:
                               USB adb reverse refresh interval. Defaults to 5, set 0 to disable.
   METALXR_STREAM_WIDTH        Encoded eye width. Defaults to 640.
   METALXR_STREAM_HEIGHT       Encoded eye height. Defaults to 360.
-  METALXR_STREAM_FPS          Stream frame rate. Defaults to 60.
+  METALXR_STREAM_FPS          Stream frame rate override. Defaults to the Quest HELLO preferred FPS, with host fallback 60.
   METALXR_STREAM_BITRATE      H.264 bitrate in bits per second. Defaults to 8000000.
   METALXR_STREAM_FRAMES       Frame count. Defaults to 0, which streams until disconnect.
   METALXR_STREAM_QUEUE_DEPTH  Max pending encoder frames per eye. Defaults to 3.
@@ -47,7 +47,7 @@ port="${METALXR_HOST_PORT:-47000}"
 adb_reverse_refresh_seconds="${METALXR_ADB_REVERSE_REFRESH_SECONDS:-5}"
 width="${METALXR_STREAM_WIDTH:-640}"
 height="${METALXR_STREAM_HEIGHT:-360}"
-fps="${METALXR_STREAM_FPS:-60}"
+fps="${METALXR_STREAM_FPS:-}"
 bitrate="${METALXR_STREAM_BITRATE:-8000000}"
 frames="${METALXR_STREAM_FRAMES:-0}"
 queue_depth="${METALXR_STREAM_QUEUE_DEPTH:-3}"
@@ -129,7 +129,6 @@ streamer_args=(
   --bind-host "$bind_host"
   --port "$port"
   --frames "$frames"
-  --fps "$fps"
   --width "$width"
   --height "$height"
   --bitrate "$bitrate"
@@ -142,6 +141,10 @@ streamer_args=(
   --haptic-command-path "$haptic_command_path"
   --timing-state-path "$timing_state_path"
 )
+
+if [[ -n "$fps" ]]; then
+  streamer_args+=(--fps "$fps")
+fi
 
 if [[ -n "$frame_export_dir" ]]; then
   streamer_args+=(--frame-export-dir "$frame_export_dir")

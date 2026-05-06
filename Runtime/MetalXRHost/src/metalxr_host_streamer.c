@@ -38,6 +38,9 @@ typedef struct StreamerOptions {
     int width;
     int height;
     int fps;
+    int widthExplicit;
+    int heightExplicit;
+    int fpsExplicit;
     int frames;
     int bitrate;
     int realtime;
@@ -291,10 +294,13 @@ static StreamerOptions parse_options(int argc, char** argv)
             options.frames = parse_int_arg(argv[++i], "frames", 0, 1000000);
         } else if (strcmp(arg, "--fps") == 0 && i + 1 < argc) {
             options.fps = parse_int_arg(argv[++i], "fps", 1, 240);
+            options.fpsExplicit = 1;
         } else if (strcmp(arg, "--width") == 0 && i + 1 < argc) {
             options.width = parse_int_arg(argv[++i], "width", 16, 8192);
+            options.widthExplicit = 1;
         } else if (strcmp(arg, "--height") == 0 && i + 1 < argc) {
             options.height = parse_int_arg(argv[++i], "height", 16, 8192);
+            options.heightExplicit = 1;
         } else if (strcmp(arg, "--bitrate") == 0 && i + 1 < argc) {
             options.bitrate = parse_int_arg(argv[++i], "bitrate", 100000, 200000000);
         } else if (strcmp(arg, "--tracking-state-path") == 0 && i + 1 < argc) {
@@ -2085,6 +2091,103 @@ static int send_hello_ack(int fd, StreamSession* session, const StreamerOptions*
     return metalxr_protocol_send_packet(fd, &ackHeader, &ack);
 }
 
+static int client_dimension_limit(uint32_t value)
+{
+    if (value == 0 || value > 8192u) {
+        return 0;
+    }
+    return (int)value;
+}
+
+static int client_preferred_fps(uint32_t value)
+{
+    if (value == 0) {
+        return 0;
+    }
+    if (value > 240u) {
+        return 240;
+    }
+    return (int)value;
+}
+
+static int apply_client_device_profile(
+    StreamerOptions* activeOptions,
+    const MetalXRHelloPayload* clientHello,
+    int dimensionsCanResize,
+    char* errorMessage,
+    size_t errorMessageSize)
+{
+    if (activeOptions == NULL || clientHello == NULL) {
+        return 0;
+    }
+
+    const int maxWidth = client_dimension_limit(clientHello->maxVideoWidth);
+    const int maxHeight = client_dimension_limit(clientHello->maxVideoHeight);
+    const int preferredFps = client_preferred_fps(clientHello->preferredFps);
+    int resizedWidth = 0;
+    int resizedHeight = 0;
+    int fpsFromClient = 0;
+    int fpsCapped = 0;
+
+    if (maxWidth > 0 && activeOptions->width > maxWidth) {
+        if (dimensionsCanResize && !activeOptions->widthExplicit) {
+            activeOptions->width = maxWidth;
+            resizedWidth = 1;
+        } else {
+            snprintf(errorMessage,
+                     errorMessageSize,
+                     "Stream width %d exceeds Quest device profile max width %d",
+                     activeOptions->width,
+                     maxWidth);
+            return 0;
+        }
+    }
+
+    if (maxHeight > 0 && activeOptions->height > maxHeight) {
+        if (dimensionsCanResize && !activeOptions->heightExplicit) {
+            activeOptions->height = maxHeight;
+            resizedHeight = 1;
+        } else {
+            snprintf(errorMessage,
+                     errorMessageSize,
+                     "Stream height %d exceeds Quest device profile max height %d",
+                     activeOptions->height,
+                     maxHeight);
+            return 0;
+        }
+    }
+
+    if (preferredFps > 0) {
+        if (!activeOptions->fpsExplicit) {
+            activeOptions->fps = preferredFps;
+            fpsFromClient = 1;
+        } else if (activeOptions->fps > preferredFps) {
+            activeOptions->fps = preferredFps;
+            fpsCapped = 1;
+        }
+    }
+
+    printf("{\"event\":\"stream_profile\","
+           "\"client_max_width\":%u,\"client_max_height\":%u,"
+           "\"client_preferred_fps\":%u,\"effective_width\":%d,"
+           "\"effective_height\":%d,\"effective_fps\":%d,"
+           "\"resized_width\":%s,\"resized_height\":%s,"
+           "\"fps_from_client\":%s,\"fps_capped\":%s}\n",
+           clientHello->maxVideoWidth,
+           clientHello->maxVideoHeight,
+           clientHello->preferredFps,
+           activeOptions->width,
+           activeOptions->height,
+           activeOptions->fps,
+           resizedWidth ? "true" : "false",
+           resizedHeight ? "true" : "false",
+           fpsFromClient ? "true" : "false",
+           fpsCapped ? "true" : "false");
+    fflush(stdout);
+
+    return 1;
+}
+
 static int configure_unity_export_stream(
     StreamerOptions* activeOptions,
     UnityExportFrameSource* source,
@@ -2159,6 +2262,25 @@ static int stream_client(int clientFd, const StreamerOptions* options)
         pthread_mutex_destroy(&stream.sendLock);
         return 0;
     }
+
+    char profileError[256];
+    profileError[0] = '\0';
+    if (!apply_client_device_profile(&activeOptions,
+                                     &clientHello,
+                                     activeOptions.frameSource == FRAME_SOURCE_SYNTHETIC,
+                                     profileError,
+                                     sizeof(profileError))) {
+        (void)send_error(clientFd,
+                         stream.sequence++,
+                         METALXR_ERROR_UNSUPPORTED_CAPABILITY,
+                         profileError[0] != '\0' ? profileError : "Quest device profile is incompatible with stream options");
+        fprintf(stderr, "Rejected stream profile: %s\n",
+                profileError[0] != '\0' ? profileError : "Quest device profile is incompatible with stream options");
+        pthread_mutex_destroy(&stream.sendLock);
+        return 0;
+    }
+    stream.timing = make_default_timing_state(&activeOptions);
+    write_timing_state_file(&stream);
 
     if (!send_hello_ack(clientFd, &stream, &activeOptions)) {
         pthread_mutex_destroy(&stream.sendLock);
