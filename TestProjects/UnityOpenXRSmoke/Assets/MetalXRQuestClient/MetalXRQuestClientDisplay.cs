@@ -1364,6 +1364,10 @@ namespace MetalXR.QuestClient
         private bool _surfaceTextureCreateRequested;
         private bool _surfaceTextureWaitingLogged;
         private bool _surfaceTextureUpdateFallbackLogged;
+        private bool _surfaceTextureUpdateWaitingLogged;
+        private bool _surfaceTextureUpdateEventRequested;
+        private int _surfaceTextureUpdateTargetSerial;
+        private MetalXRQuestEncodedVideoFrame _surfaceTexturePendingFrame;
         private readonly Dictionary<long, MetalXRQuestEncodedVideoFrame> _surfacePendingFrames = new Dictionary<long, MetalXRQuestEncodedVideoFrame>();
 
         [DllImport("metalxrquestgl")]
@@ -1373,7 +1377,16 @@ namespace MetalXR.QuestClient
         private static extern int MetalXRQuestGL_CreateExternalTextureEventId(int slot);
 
         [DllImport("metalxrquestgl")]
+        private static extern int MetalXRQuestGL_UpdateSurfaceTextureEventId(int slot);
+
+        [DllImport("metalxrquestgl")]
         private static extern int MetalXRQuestGL_GetExternalTexture(int slot);
+
+        [DllImport("metalxrquestgl")]
+        private static extern int MetalXRQuestGL_GetSurfaceUpdateSerial(int slot);
+
+        [DllImport("metalxrquestgl")]
+        private static extern int MetalXRQuestGL_GetSurfaceUpdateSuccess(int slot);
 #endif
 
         public MetalXRQuestEyeDecoder(
@@ -1433,6 +1446,16 @@ namespace MetalXR.QuestClient
         private bool TryDecodeWithSurfaceDecoder(MetalXRQuestEncodedVideoFrame frame, out MetalXRQuestDecodedVideoFrame decodedFrame)
         {
             decodedFrame = null;
+            if (TryConsumeSurfaceTextureUpdate(out decodedFrame))
+            {
+                return true;
+            }
+
+            if (_surfaceTextureUpdateEventRequested)
+            {
+                return false;
+            }
+
             if (!EnsureSurfaceDecoder(frame))
             {
                 return false;
@@ -1469,29 +1492,19 @@ namespace MetalXR.QuestClient
                 }
 
                 _surfacePendingFrames.Remove(decodedPresentationTimeUs);
-                bool textureUpdated = _surfaceDecoder.Call<bool>("updateTexImage");
-                string outputFormat =
-                    "external-oes-texture=" + _surfaceTextureName +
-                    ";updated=" + textureUpdated;
-                if (_enableExperimentalSurfacePresent && !textureUpdated)
+                if (_enableExperimentalSurfacePresent)
                 {
-                    LogSurfaceTextureUpdateFallbackOnce();
+                    _surfaceTexturePendingFrame = sourceFrame;
+                    if (!RequestSurfaceTextureUpdate())
+                    {
+                        LogSurfaceTextureUpdateFallbackOnce();
+                    }
+
                     return false;
                 }
 
-                if (_enableExperimentalSurfacePresent && textureUpdated)
-                {
-                    decodedFrame = new MetalXRQuestDecodedVideoFrame(
-                        sourceFrame,
-                        null,
-                        0,
-                        true,
-                        "surface-external-texture",
-                        outputFormat,
-                        new IntPtr(_surfaceTextureName));
-                    return true;
-                }
-
+                RequestSurfaceTextureUpdate();
+                string outputFormat = "external-oes-texture=" + _surfaceTextureName + ";update_requested=true";
                 decodedFrame = CreateCompressedPreview(
                     sourceFrame,
                     "surface-experimental-preview",
@@ -1529,7 +1542,8 @@ namespace MetalXR.QuestClient
                     return false;
                 }
 
-                _surfaceDecoder = new AndroidJavaObject("com.metalxr.questclient.MetalXRSurfaceDecoder", _eyeName);
+                int slot = _leftEye ? 0 : 1;
+                _surfaceDecoder = new AndroidJavaObject("com.metalxr.questclient.MetalXRSurfaceDecoder", _eyeName, slot);
                 bool configured = _surfaceDecoder.Call<bool>("configure", frame.Width, frame.Height, _surfaceTextureName);
                 if (!configured)
                 {
@@ -1541,6 +1555,9 @@ namespace MetalXR.QuestClient
 
                 _surfaceConfiguredWidth = frame.Width;
                 _surfaceConfiguredHeight = frame.Height;
+                _surfaceTextureUpdateEventRequested = false;
+                _surfaceTextureUpdateTargetSerial = 0;
+                _surfaceTexturePendingFrame = null;
                 _surfaceDecoderUnavailable = false;
                 _surfaceDecoderFallbackLogged = false;
                 if (!_surfaceDecoderLogged)
@@ -1550,7 +1567,7 @@ namespace MetalXR.QuestClient
                         "experimental Surface decoder initialized for " + _eyeName +
                         " eye " + frame.Width + "x" + frame.Height +
                         " texture=" + _surfaceTextureName +
-                        "; native texture presentation is not enabled yet");
+                        "; render-thread texture update path enabled");
                 }
 
                 return true;
@@ -1562,6 +1579,72 @@ namespace MetalXR.QuestClient
                 DisposeSurfaceDecoder();
                 return false;
             }
+        }
+
+        private bool TryConsumeSurfaceTextureUpdate(out MetalXRQuestDecodedVideoFrame decodedFrame)
+        {
+            decodedFrame = null;
+            if (!_surfaceTextureUpdateEventRequested)
+            {
+                return false;
+            }
+
+            int slot = _leftEye ? 0 : 1;
+            int updateSerial;
+            int updateSuccess;
+            try
+            {
+                updateSerial = MetalXRQuestGL_GetSurfaceUpdateSerial(slot);
+                updateSuccess = MetalXRQuestGL_GetSurfaceUpdateSuccess(slot);
+            }
+            catch (Exception exception)
+            {
+                LogSurfaceDecoderErrorOnce("experimental Surface decoder native update status unavailable for " + _eyeName + " eye: " + exception.Message);
+                _surfaceDecoderUnavailable = true;
+                _surfaceTextureUpdateEventRequested = false;
+                _surfaceTexturePendingFrame = null;
+                return false;
+            }
+
+            if (updateSerial < _surfaceTextureUpdateTargetSerial)
+            {
+                if (!_surfaceTextureUpdateWaitingLogged)
+                {
+                    _surfaceTextureUpdateWaitingLogged = true;
+                    Log("waiting for render-thread SurfaceTexture update for " + _eyeName + " eye");
+                }
+
+                return false;
+            }
+
+            MetalXRQuestEncodedVideoFrame sourceFrame = _surfaceTexturePendingFrame;
+            _surfaceTextureUpdateEventRequested = false;
+            _surfaceTextureUpdateTargetSerial = 0;
+            _surfaceTexturePendingFrame = null;
+            _surfaceTextureUpdateWaitingLogged = false;
+            if (sourceFrame == null)
+            {
+                return false;
+            }
+
+            if (updateSuccess == 0)
+            {
+                LogSurfaceTextureUpdateFallbackOnce();
+                return false;
+            }
+
+            string outputFormat =
+                "external-oes-texture=" + _surfaceTextureName +
+                ";updated_on_render_thread=true;serial=" + updateSerial;
+            decodedFrame = new MetalXRQuestDecodedVideoFrame(
+                sourceFrame,
+                null,
+                0,
+                true,
+                "surface-external-texture",
+                outputFormat,
+                new IntPtr(_surfaceTextureName));
+            return true;
         }
 
         private bool EnsureRenderThreadExternalTexture()
@@ -1602,6 +1685,41 @@ namespace MetalXR.QuestClient
             {
                 LogSurfaceDecoderErrorOnce("experimental Surface decoder native plugin unavailable for " + _eyeName + " eye: " + exception.Message);
                 _surfaceDecoderUnavailable = true;
+                return false;
+            }
+        }
+
+        private bool RequestSurfaceTextureUpdate()
+        {
+            if (_surfaceTextureUpdateEventRequested)
+            {
+                return false;
+            }
+
+            int slot = _leftEye ? 0 : 1;
+            try
+            {
+                IntPtr renderEventFunc = MetalXRQuestGL_GetRenderEventFunc();
+                int eventId = MetalXRQuestGL_UpdateSurfaceTextureEventId(slot);
+                if (renderEventFunc == IntPtr.Zero || eventId == 0)
+                {
+                    LogSurfaceDecoderErrorOnce("experimental Surface decoder native update event was unavailable for " + _eyeName + " eye");
+                    _surfaceDecoderUnavailable = true;
+                    return false;
+                }
+
+                int currentSerial = MetalXRQuestGL_GetSurfaceUpdateSerial(slot);
+                _surfaceTextureUpdateTargetSerial = currentSerial + 1;
+                _surfaceTextureUpdateEventRequested = true;
+                GL.IssuePluginEvent(renderEventFunc, eventId);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                LogSurfaceDecoderErrorOnce("experimental Surface decoder native update event failed for " + _eyeName + " eye: " + exception.Message);
+                _surfaceDecoderUnavailable = true;
+                _surfaceTextureUpdateEventRequested = false;
+                _surfaceTexturePendingFrame = null;
                 return false;
             }
         }
@@ -2214,6 +2332,10 @@ namespace MetalXR.QuestClient
             _surfaceConfiguredHeight = 0;
             _surfaceTextureName = 0;
             _surfaceTextureCreateRequested = false;
+            _surfaceTextureUpdateEventRequested = false;
+            _surfaceTextureUpdateTargetSerial = 0;
+            _surfaceTexturePendingFrame = null;
+            _surfaceTextureUpdateWaitingLogged = false;
         }
 #endif
 
