@@ -30,6 +30,7 @@
 
 #define METALXR_DEFAULT_STREAM_PORT 47000
 #define METALXR_MAX_UNITY_EXPORT_PAYLOAD_BYTES (512ull * 1024ull * 1024ull)
+#define METALXR_MAX_PENDING_SHARED_SURFACES 64u
 
 typedef enum FrameSourceMode {
     FRAME_SOURCE_SYNTHETIC = 0,
@@ -200,6 +201,8 @@ typedef struct EncoderContext {
     int queueLockInitialized;
     uint32_t pendingFrames;
     uint32_t maxQueueDepth;
+    uint32_t pendingSharedSurfaceIds[METALXR_MAX_PENDING_SHARED_SURFACES];
+    uint32_t pendingSharedSurfaceCount;
 } EncoderContext;
 
 typedef struct FrameRefcon {
@@ -220,6 +223,7 @@ typedef struct FrameRefcon {
     uint64_t captureTimeNs;
     uint64_t predictedDisplayTimeNs;
     uint64_t encodeStartTimeNs;
+    uint32_t sharedIoSurfaceId;
 } FrameRefcon;
 
 static uint64_t host_time_ns(void)
@@ -229,6 +233,9 @@ static uint64_t host_time_ns(void)
 
 static int reserve_encoder_queue_slot(EncoderContext* context, uint64_t frameId);
 static void release_encoder_queue_slot(EncoderContext* context);
+static int shared_iosurface_is_pending(EncoderContext* context, uint32_t ioSurfaceId);
+static int reserve_shared_iosurface(EncoderContext* context, uint32_t ioSurfaceId);
+static void release_shared_iosurface(EncoderContext* context, uint32_t ioSurfaceId);
 
 static void sleep_until_ns(uint64_t targetNs)
 {
@@ -1102,10 +1109,13 @@ static void compression_output_callback(
             (completeNs - frame->encodeStartTimeNs) / 1000ull :
             0;
 
-    if (context == NULL || context->stream == NULL || context->stream->failed ||
+    if (context == NULL || frame == NULL || context->stream == NULL || context->stream->failed ||
         status != noErr || sampleBuffer == NULL || !CMSampleBufferDataIsReady(sampleBuffer)) {
         if (context != NULL) {
             ++context->stats.droppedFrames;
+            if (frame != NULL) {
+                release_shared_iosurface(context, frame->sharedIoSurfaceId);
+            }
             release_encoder_queue_slot(context);
         }
         if (frame != NULL) {
@@ -1129,6 +1139,7 @@ static void compression_output_callback(
         CMFormatDescriptionRef formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer);
         if (formatDescription != NULL && !append_h264_parameter_sets(&encoded, formatDescription)) {
             ++context->stats.droppedFrames;
+            release_shared_iosurface(context, frame->sharedIoSurfaceId);
             release_encoder_queue_slot(context);
             free_buffer(&encoded);
             free(frame);
@@ -1138,6 +1149,7 @@ static void compression_output_callback(
 
     if (!append_sample_buffer_annex_b(&encoded, sampleBuffer) || encoded.size == 0) {
         ++context->stats.droppedFrames;
+        release_shared_iosurface(context, frame->sharedIoSurfaceId);
         release_encoder_queue_slot(context);
         free_buffer(&encoded);
         free(frame);
@@ -1146,6 +1158,7 @@ static void compression_output_callback(
 
     if (!stream_video_frame(context->stream, frame, &encoded, latencyUs, flags)) {
         ++context->stats.droppedFrames;
+        release_shared_iosurface(context, frame->sharedIoSurfaceId);
         release_encoder_queue_slot(context);
         free_buffer(&encoded);
         free(frame);
@@ -1174,6 +1187,7 @@ static void compression_output_callback(
         fflush(stdout);
     }
 
+    release_shared_iosurface(context, frame->sharedIoSurfaceId);
     release_encoder_queue_slot(context);
     free_buffer(&encoded);
     free(frame);
@@ -1360,9 +1374,72 @@ static int unity_export_record_is_iosurface(const UnityExportRecord* record)
             strcmp(record->payloadFormat, "IOSurfaceRGBA8") == 0);
 }
 
+static CVPixelBufferRef copy_iosurface_to_encoder_pixel_buffer(
+    EncoderContext* context,
+    const UnityExportRecord* record,
+    IOSurfaceRef surface)
+{
+    if (context == NULL || record == NULL || surface == NULL ||
+        (strcmp(record->payloadFormat, "IOSurfaceBGRA8") != 0 &&
+         strcmp(record->payloadFormat, "IOSurfaceRGBA8") != 0) ||
+        (int)IOSurfaceGetWidth(surface) != record->width ||
+        (int)IOSurfaceGetHeight(surface) != record->height ||
+        IOSurfaceGetBytesPerRow(surface) < (size_t)record->width * 4u) {
+        return NULL;
+    }
+
+    CVPixelBufferRef copiedPixelBuffer = create_encoder_pool_pixel_buffer(context);
+    if (copiedPixelBuffer == NULL) {
+        return NULL;
+    }
+
+    if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) {
+        CVPixelBufferRelease(copiedPixelBuffer);
+        return NULL;
+    }
+    if (CVPixelBufferLockBaseAddress(copiedPixelBuffer, 0) != kCVReturnSuccess) {
+        IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+        CVPixelBufferRelease(copiedPixelBuffer);
+        return NULL;
+    }
+
+    const uint8_t* sourceBase = (const uint8_t*)IOSurfaceGetBaseAddress(surface);
+    const size_t sourceBytesPerRow = IOSurfaceGetBytesPerRow(surface);
+    uint8_t* destinationBase = (uint8_t*)CVPixelBufferGetBaseAddress(copiedPixelBuffer);
+    const size_t destinationBytesPerRow = CVPixelBufferGetBytesPerRow(copiedPixelBuffer);
+    int copied = 0;
+    if (strcmp(record->payloadFormat, "IOSurfaceRGBA8") == 0) {
+        copied = swizzle_rgba_to_bgra_rows(
+            sourceBase,
+            sourceBytesPerRow,
+            destinationBase,
+            destinationBytesPerRow,
+            record->width,
+            record->height);
+    } else {
+        const size_t copiedRowBytes = (size_t)record->width * 4u;
+        copied = 1;
+        for (int y = 0; y < record->height; ++y) {
+            const uint8_t* sourceRow = sourceBase + ((size_t)y * sourceBytesPerRow);
+            uint8_t* destinationRow = destinationBase + ((size_t)y * destinationBytesPerRow);
+            memcpy(destinationRow, sourceRow, copiedRowBytes);
+        }
+    }
+
+    CVPixelBufferUnlockBaseAddress(copiedPixelBuffer, 0);
+    IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+    if (!copied) {
+        CVPixelBufferRelease(copiedPixelBuffer);
+        return NULL;
+    }
+
+    return copiedPixelBuffer;
+}
+
 static CVPixelBufferRef create_unity_export_iosurface_pixel_buffer(
     EncoderContext* context,
-    const UnityExportRecord* record)
+    const UnityExportRecord* record,
+    uint32_t* sharedIoSurfaceId)
 {
     if (context == NULL || record == NULL ||
         !unity_export_record_is_iosurface(record) ||
@@ -1377,54 +1454,29 @@ static CVPixelBufferRef create_unity_export_iosurface_pixel_buffer(
     if (surface == NULL) {
         return NULL;
     }
+    if ((int)IOSurfaceGetWidth(surface) != record->width ||
+        (int)IOSurfaceGetHeight(surface) != record->height ||
+        IOSurfaceGetBytesPerRow(surface) < (size_t)record->width * 4u) {
+        CFRelease(surface);
+        return NULL;
+    }
 
-    if (strcmp(record->payloadFormat, "IOSurfaceRGBA8") == 0) {
-        if ((int)IOSurfaceGetWidth(surface) != record->width ||
-            (int)IOSurfaceGetHeight(surface) != record->height ||
-            IOSurfaceGetBytesPerRow(surface) < (size_t)record->width * 4u) {
-            CFRelease(surface);
-            return NULL;
-        }
-
-        CVPixelBufferRef convertedPixelBuffer = create_encoder_pool_pixel_buffer(context);
-        if (convertedPixelBuffer == NULL) {
-            CFRelease(surface);
-            return NULL;
-        }
-
-        if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) {
-            CVPixelBufferRelease(convertedPixelBuffer);
-            CFRelease(surface);
-            return NULL;
-        }
-        if (CVPixelBufferLockBaseAddress(convertedPixelBuffer, 0) != kCVReturnSuccess) {
-            IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
-            CVPixelBufferRelease(convertedPixelBuffer);
-            CFRelease(surface);
-            return NULL;
-        }
-
-        const uint8_t* sourceBase = (const uint8_t*)IOSurfaceGetBaseAddress(surface);
-        const size_t sourceBytesPerRow = IOSurfaceGetBytesPerRow(surface);
-        uint8_t* destinationBase = (uint8_t*)CVPixelBufferGetBaseAddress(convertedPixelBuffer);
-        const size_t destinationBytesPerRow = CVPixelBufferGetBytesPerRow(convertedPixelBuffer);
-        const int converted = swizzle_rgba_to_bgra_rows(
-            sourceBase,
-            sourceBytesPerRow,
-            destinationBase,
-            destinationBytesPerRow,
-            record->width,
-            record->height);
-
-        CVPixelBufferUnlockBaseAddress(convertedPixelBuffer, 0);
-        IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
-        if (!converted) {
-            CVPixelBufferRelease(convertedPixelBuffer);
-            CFRelease(surface);
-            return NULL;
+    const int sourceIsRgba = strcmp(record->payloadFormat, "IOSurfaceRGBA8") == 0;
+    const int reuseHazard = shared_iosurface_is_pending(context, record->ioSurfaceId);
+    if (sourceIsRgba || reuseHazard) {
+        CVPixelBufferRef copiedPixelBuffer =
+            copy_iosurface_to_encoder_pixel_buffer(context, record, surface);
+        if (copiedPixelBuffer != NULL && reuseHazard) {
+            printf("{\"event\":\"iosurface_reuse_guard\",\"eye\":%d,"
+                   "\"source_frame\":%" PRIu64 ",\"io_surface_id\":%u,"
+                   "\"mode\":\"host_copy\"}\n",
+                   record->eye,
+                   record->sourceFrameId,
+                   record->ioSurfaceId);
+            fflush(stdout);
         }
         CFRelease(surface);
-        return convertedPixelBuffer;
+        return copiedPixelBuffer;
     }
 
     CFMutableDictionaryRef attributes = CFDictionaryCreateMutable(
@@ -1439,10 +1491,7 @@ static CVPixelBufferRef create_unity_export_iosurface_pixel_buffer(
 
     set_cf_int(attributes, kCVPixelBufferWidthKey, record->width);
     set_cf_int(attributes, kCVPixelBufferHeightKey, record->height);
-    const OSType pixelFormat =
-        strcmp(record->payloadFormat, "IOSurfaceRGBA8") == 0 ?
-            kCVPixelFormatType_32RGBA :
-            kCVPixelFormatType_32BGRA;
+    const OSType pixelFormat = kCVPixelFormatType_32BGRA;
     set_cf_int(attributes, kCVPixelBufferPixelFormatTypeKey, (int)pixelFormat);
     CFDictionarySetValue(attributes, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
 
@@ -1467,15 +1516,22 @@ static CVPixelBufferRef create_unity_export_iosurface_pixel_buffer(
         return NULL;
     }
 
+    if (sharedIoSurfaceId != NULL) {
+        *sharedIoSurfaceId = record->ioSurfaceId;
+    }
     return pixelBuffer;
 }
 
 static CVPixelBufferRef create_unity_export_pixel_buffer(
     EncoderContext* context,
-    const UnityExportRecord* record)
+    const UnityExportRecord* record,
+    uint32_t* sharedIoSurfaceId)
 {
+    if (sharedIoSurfaceId != NULL) {
+        *sharedIoSurfaceId = 0;
+    }
     if (unity_export_record_is_iosurface(record)) {
-        return create_unity_export_iosurface_pixel_buffer(context, record);
+        return create_unity_export_iosurface_pixel_buffer(context, record, sharedIoSurfaceId);
     }
 
     if (context == NULL || record == NULL ||
@@ -1635,10 +1691,23 @@ static int submit_pixel_buffer_frame(
     uint64_t captureTimeNs,
     uint64_t predictedDisplayTimeNs,
     CVPixelBufferRef pixelBuffer,
+    uint32_t sharedIoSurfaceId,
     const UnityExportRecord* unityRecord)
 {
     if (!reserve_encoder_queue_slot(context, frameId)) {
         return 1;
+    }
+
+    if (sharedIoSurfaceId != 0 && !reserve_shared_iosurface(context, sharedIoSurfaceId)) {
+        fprintf(stderr,
+                "{\"event\":\"drop\",\"reason\":\"shared_iosurface_pending\","
+                "\"frame\":%" PRIu64 ",\"eye\":%d,\"io_surface_id\":%u}\n",
+                frameId,
+                context->eyeIndex,
+                sharedIoSurfaceId);
+        ++context->stats.droppedFrames;
+        release_encoder_queue_slot(context);
+        return 0;
     }
 
     if (pixelBuffer == NULL) {
@@ -1646,13 +1715,14 @@ static int submit_pixel_buffer_frame(
                 context->eyeName,
                 frameId);
         ++context->stats.droppedFrames;
+        release_shared_iosurface(context, sharedIoSurfaceId);
         release_encoder_queue_slot(context);
         return 0;
     }
 
     FrameRefcon* frame = (FrameRefcon*)calloc(1, sizeof(*frame));
     if (frame == NULL) {
-        CVPixelBufferRelease(pixelBuffer);
+        release_shared_iosurface(context, sharedIoSurfaceId);
         release_encoder_queue_slot(context);
         return 0;
     }
@@ -1688,6 +1758,7 @@ static int submit_pixel_buffer_frame(
     frame->captureTimeNs = captureTimeNs;
     frame->predictedDisplayTimeNs = predictedDisplayTimeNs;
     frame->encodeStartTimeNs = host_time_ns();
+    frame->sharedIoSurfaceId = sharedIoSurfaceId;
 
     const CMTime presentationTimeStamp = CMTimeMake((int64_t)frameId, context->fps);
     const CMTime duration = CMTimeMake(1, context->fps);
@@ -1707,6 +1778,7 @@ static int submit_pixel_buffer_frame(
         (int)status);
         ++context->stats.droppedFrames;
         free(frame);
+        release_shared_iosurface(context, sharedIoSurfaceId);
         release_encoder_queue_slot(context);
         return 0;
     }
@@ -1736,6 +1808,7 @@ static int encode_synthetic_eye_frame(
         captureTimeNs,
         predictedDisplayTimeNs,
         pixelBuffer,
+        0,
         NULL);
     CVPixelBufferRelease(pixelBuffer);
     return ok;
@@ -1761,7 +1834,9 @@ static int encode_unity_export_eye_frame(
         return 0;
     }
 
-    CVPixelBufferRef pixelBuffer = create_unity_export_pixel_buffer(context, record);
+    uint32_t sharedIoSurfaceId = 0;
+    CVPixelBufferRef pixelBuffer =
+        create_unity_export_pixel_buffer(context, record, &sharedIoSurfaceId);
     if (pixelBuffer == NULL) {
         fprintf(stderr,
                 "{\"event\":\"drop\",\"reason\":\"unity_export_payload\","
@@ -1782,6 +1857,7 @@ static int encode_unity_export_eye_frame(
         captureTimeNs,
         predictedDisplayTimeNs,
         pixelBuffer,
+        sharedIoSurfaceId,
         record);
     CVPixelBufferRelease(pixelBuffer);
     return ok;
@@ -2020,6 +2096,69 @@ static void release_encoder_queue_slot(EncoderContext* context)
     pthread_mutex_lock(&context->queueLock);
     if (context->pendingFrames > 0) {
         --context->pendingFrames;
+    }
+    pthread_mutex_unlock(&context->queueLock);
+}
+
+static int shared_iosurface_is_pending(EncoderContext* context, uint32_t ioSurfaceId)
+{
+    if (context == NULL || ioSurfaceId == 0) {
+        return 0;
+    }
+
+    int pending = 0;
+    pthread_mutex_lock(&context->queueLock);
+    for (uint32_t i = 0; i < context->pendingSharedSurfaceCount; ++i) {
+        if (context->pendingSharedSurfaceIds[i] == ioSurfaceId) {
+            pending = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&context->queueLock);
+    return pending;
+}
+
+static int reserve_shared_iosurface(EncoderContext* context, uint32_t ioSurfaceId)
+{
+    if (context == NULL || ioSurfaceId == 0) {
+        return 1;
+    }
+
+    int reserved = 0;
+    pthread_mutex_lock(&context->queueLock);
+    for (uint32_t i = 0; i < context->pendingSharedSurfaceCount; ++i) {
+        if (context->pendingSharedSurfaceIds[i] == ioSurfaceId) {
+            pthread_mutex_unlock(&context->queueLock);
+            return 0;
+        }
+    }
+
+    if (context->pendingSharedSurfaceCount < METALXR_MAX_PENDING_SHARED_SURFACES) {
+        context->pendingSharedSurfaceIds[context->pendingSharedSurfaceCount] = ioSurfaceId;
+        ++context->pendingSharedSurfaceCount;
+        reserved = 1;
+    }
+    pthread_mutex_unlock(&context->queueLock);
+    return reserved;
+}
+
+static void release_shared_iosurface(EncoderContext* context, uint32_t ioSurfaceId)
+{
+    if (context == NULL || ioSurfaceId == 0) {
+        return;
+    }
+
+    pthread_mutex_lock(&context->queueLock);
+    for (uint32_t i = 0; i < context->pendingSharedSurfaceCount; ++i) {
+        if (context->pendingSharedSurfaceIds[i] != ioSurfaceId) {
+            continue;
+        }
+
+        const uint32_t last = context->pendingSharedSurfaceCount - 1u;
+        context->pendingSharedSurfaceIds[i] = context->pendingSharedSurfaceIds[last];
+        context->pendingSharedSurfaceIds[last] = 0;
+        --context->pendingSharedSurfaceCount;
+        break;
     }
     pthread_mutex_unlock(&context->queueLock);
 }
