@@ -11,11 +11,26 @@ probe_source="${TMPDIR:-/tmp}/metalxr_runtime_probe.c"
 probe_binary="${TMPDIR:-/tmp}/metalxr_runtime_probe"
 probe_log="${TMPDIR:-/tmp}/metalxr_runtime_probe.log"
 probe_dump_dir="${TMPDIR:-/tmp}/metalxr_frame_dump"
-probe_export_dir="${TMPDIR:-/tmp}/metalxr_frame_export"
+probe_export_dir="${METALXR_PROBE_FRAME_EXPORT_DIR-"${TMPDIR:-/tmp}/metalxr_frame_export"}"
+probe_export_socket="${METALXR_PROBE_FRAME_EXPORT_SOCKET:-}"
+probe_export_socket_capture="${TMPDIR:-/tmp}/metalxr_runtime_probe_socket_records.jsonl"
 probe_timing_state="${TMPDIR:-/tmp}/metalxr_runtime_probe_timing_state.txt"
 probe_export_mode="${METALXR_PROBE_FRAME_EXPORT_MODE:-fixture}"
 probe_swapchain_resource_mode="${METALXR_PROBE_SWAPCHAIN_RESOURCE_MODE:-}"
 probe_enable_iosurface_export="${METALXR_PROBE_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT:-0}"
+probe_socket_listener_pid=""
+
+cleanup_socket_listener() {
+  if [[ -n "$probe_socket_listener_pid" ]] &&
+      kill -0 "$probe_socket_listener_pid" >/dev/null 2>&1; then
+    kill "$probe_socket_listener_pid" >/dev/null 2>&1 || true
+    wait "$probe_socket_listener_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$probe_export_socket" ]]; then
+    rm -f "$probe_export_socket"
+  fi
+}
+trap cleanup_socket_listener EXIT
 
 if [[ ! -f "$runtime_dylib" ]]; then
   "$repo_root/Scripts/build-metalxr-runtime.sh"
@@ -630,13 +645,59 @@ clang -std=c11 -Wall -Wextra -Werror \
 
 rm -f "$probe_log"
 rm -f "$probe_timing_state"
+rm -f "$probe_export_socket_capture"
 rm -rf "$probe_dump_dir"
-rm -rf "$probe_export_dir"
+if [[ -n "$probe_export_dir" ]]; then
+  rm -rf "$probe_export_dir"
+fi
 mkdir -p "$probe_dump_dir"
-mkdir -p "$probe_export_dir"
+if [[ -n "$probe_export_dir" ]]; then
+  mkdir -p "$probe_export_dir"
+fi
+if [[ -n "$probe_export_socket" ]]; then
+  rm -f "$probe_export_socket"
+  python3 - "$probe_export_socket" "$probe_export_socket_capture" <<'PY' &
+import pathlib
+import socket
+import sys
+import time
+
+socket_path = pathlib.Path(sys.argv[1])
+capture_path = pathlib.Path(sys.argv[2])
+try:
+    socket_path.unlink()
+except FileNotFoundError:
+    pass
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+sock.bind(str(socket_path))
+sock.settimeout(0.5)
+deadline = time.time() + 8.0
+expected_count = 6
+captured_count = 0
+with capture_path.open("w", encoding="utf-8") as output:
+    while time.time() < deadline and captured_count < expected_count:
+        try:
+            data, _ = sock.recvfrom(65535)
+        except socket.timeout:
+            continue
+        output.write(data.decode("utf-8") + "\n")
+        output.flush()
+        captured_count += 1
+sock.close()
+PY
+  probe_socket_listener_pid="$!"
+  for _ in $(seq 1 50); do
+    if [[ -S "$probe_export_socket" ]]; then
+      break
+    fi
+    sleep 0.05
+  done
+fi
 METALXR_RUNTIME_LOG="$probe_log" \
 METALXR_FRAME_DUMP_DIR="$probe_dump_dir" \
 METALXR_FRAME_EXPORT_DIR="$probe_export_dir" \
+METALXR_FRAME_EXPORT_SOCKET="$probe_export_socket" \
 METALXR_FRAME_EXPORT_MODE="$probe_export_mode" \
 METALXR_SWAPCHAIN_RESOURCE_MODE="$probe_swapchain_resource_mode" \
 METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT="$probe_enable_iosurface_export" \
@@ -645,8 +706,16 @@ METALXR_VIEW_WIDTH=64 \
 METALXR_VIEW_HEIGHT=64 \
 "$probe_binary" "$runtime_dylib"
 
+if [[ -n "$probe_socket_listener_pid" ]]; then
+  wait "$probe_socket_listener_pid" || true
+  probe_socket_listener_pid=""
+fi
+
 echo "Runtime log: $probe_log"
 echo "Frame export mode: $probe_export_mode"
+if [[ -n "$probe_export_socket" ]]; then
+  echo "Frame export socket: $probe_export_socket"
+fi
 sed -n '1,180p' "$probe_log"
 
 metadata_file="$probe_dump_dir/frame_000001.txt"
@@ -658,24 +727,38 @@ fi
 echo "Frame metadata: $metadata_file"
 sed -n '1,80p' "$metadata_file"
 
-export_index="$probe_export_dir/frames.jsonl"
-if [[ ! -f "$export_index" ]]; then
-  echo "Expected frame export index was not written: $export_index" >&2
-  exit 1
+if [[ -n "$probe_export_dir" ]]; then
+  export_index="$probe_export_dir/frames.jsonl"
+  if [[ ! -f "$export_index" ]]; then
+    echo "Expected frame export index was not written: $export_index" >&2
+    exit 1
+  fi
+else
+  export_index=""
 fi
 
 for eye in 0 1; do
   payload_file="$probe_export_dir/frame_000001_eye_${eye}.bgra"
   record_file="$probe_export_dir/frame_000001_eye_${eye}.json"
-  if [[ ! -f "$record_file" ]]; then
-    echo "Expected frame export record was not written: $record_file" >&2
-    exit 1
+  if [[ -n "$probe_export_dir" ]]; then
+    if [[ ! -f "$record_file" ]]; then
+      echo "Expected frame export record was not written: $record_file" >&2
+      exit 1
+    fi
+    grep -q "\"frame\":1" "$record_file"
+    grep -q "\"eye\":$eye" "$record_file"
+    record_source="$record_file"
+  else
+    if [[ ! -s "$probe_export_socket_capture" ]]; then
+      echo "Expected frame export socket records were not captured: $probe_export_socket_capture" >&2
+      exit 1
+    fi
+    grep -q "\"frame\":1.*\"eye\":$eye" "$probe_export_socket_capture"
+    record_source="$probe_export_socket_capture"
   fi
-  grep -q "\"frame\":1" "$record_file"
-  grep -q "\"eye\":$eye" "$record_file"
   if [[ "$probe_export_mode" == "iosurface" ]]; then
-    grep -q "\"payloadFormat\":\"IOSurface" "$record_file"
-    grep -q "\"ioSurfaceId\":" "$record_file"
+    grep -q "\"payloadFormat\":\"IOSurface" "$record_source"
+    grep -q "\"ioSurfaceId\":" "$record_source"
   else
     if [[ ! -s "$payload_file" ]]; then
       echo "Expected non-empty frame export payload was not written: $payload_file" >&2
@@ -691,8 +774,14 @@ for eye in 0 1; do
   fi
 done
 
-grep -q "\"eye\":0" "$export_index"
-grep -q "\"eye\":1" "$export_index"
+if [[ -n "$export_index" ]]; then
+  grep -q "\"eye\":0" "$export_index"
+  grep -q "\"eye\":1" "$export_index"
 
-echo "Frame exports: $probe_export_dir"
-sed -n '1,4p' "$export_index"
+  echo "Frame exports: $probe_export_dir"
+  sed -n '1,4p' "$export_index"
+fi
+if [[ -s "$probe_export_socket_capture" ]]; then
+  echo "Frame export socket records: $probe_export_socket_capture"
+  sed -n '1,4p' "$probe_export_socket_capture"
+fi
