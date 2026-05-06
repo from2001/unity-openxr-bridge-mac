@@ -20,6 +20,14 @@ if [[ -z "$adb_path" || ! -x "$adb_path" ]]; then
   exit 1
 fi
 
+adb_cmd() {
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    "$adb_path" -s "$ANDROID_SERIAL" "$@"
+  else
+    "$adb_path" "$@"
+  fi
+}
+
 python_bin="$(command -v python3 || true)"
 if [[ -z "$python_bin" ]]; then
   echo "python3 is required for screenshot analysis." >&2
@@ -27,7 +35,7 @@ if [[ -z "$python_bin" ]]; then
 fi
 
 mkdir -p "$(dirname "$output_path")"
-"$adb_path" exec-out screencap -p >"$output_path"
+adb_cmd exec-out screencap -p >"$output_path"
 
 "$python_bin" - "$output_path" "$min_bright_samples" "$min_color_samples" <<'PY'
 import struct

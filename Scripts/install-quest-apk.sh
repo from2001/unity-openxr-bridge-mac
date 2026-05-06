@@ -10,6 +10,7 @@ Usage:
 
 Environment:
   ADB     Optional adb executable path. Defaults to Libs/adb-lib/adb, then PATH.
+  ANDROID_SERIAL  Optional adb serial to target when multiple devices are connected.
 USAGE
 }
 
@@ -39,22 +40,40 @@ if [[ -z "$adb_path" || ! -x "$adb_path" ]]; then
   exit 1
 fi
 
+adb_cmd() {
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    "$adb_path" -s "$ANDROID_SERIAL" "$@"
+  else
+    "$adb_path" "$@"
+  fi
+}
+
 "$adb_path" start-server >/dev/null
-devices="$("$adb_path" devices | awk 'NR > 1 && $2 == "device" { print $1 }')"
 
-if [[ -z "$devices" ]]; then
-  echo "No authorized Quest/Android device is connected." >&2
-  echo "Connect the headset over USB and accept the USB debugging prompt in the headset." >&2
-  "$adb_path" devices -l >&2
-  exit 1
-fi
+if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+  device_state="$(adb_cmd get-state 2>/dev/null || true)"
+  if [[ "$device_state" != "device" ]]; then
+    echo "The requested Android device is not authorized or connected: $ANDROID_SERIAL" >&2
+    "$adb_path" devices -l >&2
+    exit 1
+  fi
+else
+  devices="$("$adb_path" devices | awk 'NR > 1 && $2 == "device" { print $1 }')"
 
-device_count="$(printf '%s\n' "$devices" | sed '/^$/d' | wc -l | tr -d ' ')"
-if [[ "$device_count" != "1" ]]; then
-  echo "More than one device is connected. Set ANDROID_SERIAL before running this script." >&2
-  "$adb_path" devices -l >&2
-  exit 1
+  if [[ -z "$devices" ]]; then
+    echo "No authorized Quest/Android device is connected." >&2
+    echo "Connect the headset over USB and accept the USB debugging prompt in the headset." >&2
+    "$adb_path" devices -l >&2
+    exit 1
+  fi
+
+  device_count="$(printf '%s\n' "$devices" | sed '/^$/d' | wc -l | tr -d ' ')"
+  if [[ "$device_count" != "1" ]]; then
+    echo "More than one device is connected. Set ANDROID_SERIAL before running this script." >&2
+    "$adb_path" devices -l >&2
+    exit 1
+  fi
 fi
 
 echo "Installing $apk_path"
-"$adb_path" install -r "$apk_path"
+adb_cmd install -r "$apk_path"

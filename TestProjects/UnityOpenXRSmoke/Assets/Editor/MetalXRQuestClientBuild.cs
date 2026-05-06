@@ -10,6 +10,7 @@ using UnityEditor.Build.Reporting;
 using UnityEditor.XR.Management;
 using UnityEditor.XR.Management.Metadata;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.XR.Management;
 using UnityEngine.XR.OpenXR;
 using UnityEngine.XR.OpenXR.Features.Interactions;
@@ -25,6 +26,7 @@ public static class MetalXRQuestClientBuild
     public static void BuildAndroidApk()
     {
         string outputPath = GetArgument("-metalxrBuildOutput");
+        string androidGraphicsApi = GetArgument("-metalxrAndroidGraphicsApi");
         if (string.IsNullOrWhiteSpace(outputPath))
         {
             outputPath = Path.Combine(GetProjectRoot(), DefaultOutputPath);
@@ -37,28 +39,36 @@ public static class MetalXRQuestClientBuild
             Directory.CreateDirectory(outputDirectory);
         }
 
-        ConfigureAndroidPlayerSettings();
-        EnsureAndroidOpenXRLoader();
-        EnsureAndroidOpenXRFeatures();
-
-        EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
-
-        BuildPlayerOptions options = new BuildPlayerOptions
+        AndroidGraphicsApiOverride graphicsApiOverride = AndroidGraphicsApiOverride.Apply(androidGraphicsApi);
+        try
         {
-            scenes = EnabledScenes(),
-            locationPathName = outputPath,
-            target = BuildTarget.Android,
-            targetGroup = BuildTargetGroup.Android,
-            options = BuildOptions.Development | BuildOptions.CompressWithLz4
-        };
+            ConfigureAndroidPlayerSettings();
+            EnsureAndroidOpenXRLoader();
+            EnsureAndroidOpenXRFeatures();
 
-        BuildReport report = BuildPipeline.BuildPlayer(options);
-        if (report.summary.result != BuildResult.Succeeded)
-        {
-            throw new InvalidOperationException("MetalXR Quest client APK build failed: " + report.summary.result);
+            EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
+
+            BuildPlayerOptions options = new BuildPlayerOptions
+            {
+                scenes = EnabledScenes(),
+                locationPathName = outputPath,
+                target = BuildTarget.Android,
+                targetGroup = BuildTargetGroup.Android,
+                options = BuildOptions.Development | BuildOptions.CompressWithLz4
+            };
+
+            BuildReport report = BuildPipeline.BuildPlayer(options);
+            if (report.summary.result != BuildResult.Succeeded)
+            {
+                throw new InvalidOperationException("MetalXR Quest client APK build failed: " + report.summary.result);
+            }
+
+            Debug.Log("MetalXR Quest client APK built at " + outputPath);
         }
-
-        Debug.Log("MetalXR Quest client APK built at " + outputPath);
+        finally
+        {
+            graphicsApiOverride.Dispose();
+        }
     }
 
     private static void ConfigureAndroidPlayerSettings()
@@ -217,6 +227,95 @@ public static class MetalXRQuestClientBuild
         }
 
         return projectDirectory.FullName;
+    }
+
+    private sealed class AndroidGraphicsApiOverride : IDisposable
+    {
+        private readonly bool _active;
+        private readonly bool _previousUseDefaultGraphicsApis;
+        private readonly GraphicsDeviceType[] _previousGraphicsApis;
+
+        private AndroidGraphicsApiOverride(
+            bool active,
+            bool previousUseDefaultGraphicsApis,
+            GraphicsDeviceType[] previousGraphicsApis)
+        {
+            _active = active;
+            _previousUseDefaultGraphicsApis = previousUseDefaultGraphicsApis;
+            _previousGraphicsApis = previousGraphicsApis;
+        }
+
+        public static AndroidGraphicsApiOverride Apply(string argument)
+        {
+            GraphicsDeviceType[] requestedApis;
+            if (!TryParseAndroidGraphicsApis(argument, out requestedApis))
+            {
+                return new AndroidGraphicsApiOverride(false, false, null);
+            }
+
+            bool previousUseDefault = PlayerSettings.GetUseDefaultGraphicsAPIs(BuildTarget.Android);
+            GraphicsDeviceType[] previousApis = PlayerSettings.GetGraphicsAPIs(BuildTarget.Android);
+            PlayerSettings.SetUseDefaultGraphicsAPIs(BuildTarget.Android, false);
+            PlayerSettings.SetGraphicsAPIs(BuildTarget.Android, requestedApis);
+            Debug.Log("MetalXR Quest client Android graphics APIs: " + string.Join(",", requestedApis));
+            return new AndroidGraphicsApiOverride(true, previousUseDefault, previousApis);
+        }
+
+        public void Dispose()
+        {
+            if (!_active)
+            {
+                return;
+            }
+
+            if (_previousGraphicsApis != null && _previousGraphicsApis.Length > 0)
+            {
+                PlayerSettings.SetGraphicsAPIs(BuildTarget.Android, _previousGraphicsApis);
+            }
+
+            PlayerSettings.SetUseDefaultGraphicsAPIs(BuildTarget.Android, _previousUseDefaultGraphicsApis);
+        }
+
+        private static bool TryParseAndroidGraphicsApis(string argument, out GraphicsDeviceType[] graphicsApis)
+        {
+            graphicsApis = null;
+            if (string.IsNullOrWhiteSpace(argument) ||
+                string.Equals(argument, "default", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(argument, "auto", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            string[] parts = argument.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+            {
+                return false;
+            }
+
+            graphicsApis = new GraphicsDeviceType[parts.Length];
+            for (int i = 0; i < parts.Length; i++)
+            {
+                graphicsApis[i] = ParseAndroidGraphicsApi(parts[i].Trim());
+            }
+
+            return true;
+        }
+
+        private static GraphicsDeviceType ParseAndroidGraphicsApi(string value)
+        {
+            if (string.Equals(value, "gles3", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "opengles3", StringComparison.OrdinalIgnoreCase))
+            {
+                return GraphicsDeviceType.OpenGLES3;
+            }
+
+            if (string.Equals(value, "vulkan", StringComparison.OrdinalIgnoreCase))
+            {
+                return GraphicsDeviceType.Vulkan;
+            }
+
+            throw new InvalidOperationException("Unsupported MetalXR Android graphics API override: " + value);
+        }
     }
 }
 

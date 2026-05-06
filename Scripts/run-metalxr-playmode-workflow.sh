@@ -20,6 +20,7 @@ Environment:
   METALXR_QUEST_ACTIVITY               Android activity class. Defaults to UnityPlayerGameActivity.
   METALXR_QUEST_LAUNCH_CATEGORY        Android launch category. Defaults to Quest VR category.
   METALXR_QUEST_SURFACE_DECODE         Pass the experimental Surface decode opt-in to Quest. Defaults to 0.
+  METALXR_QUEST_SURFACE_PRESENT        Pass the experimental Surface external-texture presentation opt-in to Quest. Defaults to 0.
   METALXR_WORKFLOW_EXPORT_WAIT_SECONDS Seconds to wait for Unity frame exports. Defaults to 120.
   METALXR_WORKFLOW_STREAM_WAIT_SECONDS Seconds to wait for streamer/client logs. Defaults to 60.
   METALXR_FRAME_EXPORT_DIR             Shared frame export directory. Defaults to TMPDIR/metalxr_frame_export.
@@ -50,6 +51,7 @@ package_name="${METALXR_QUEST_PACKAGE:-com.metalxr.questclient}"
 quest_activity="${METALXR_QUEST_ACTIVITY:-com.unity3d.player.UnityPlayerGameActivity}"
 quest_launch_category="${METALXR_QUEST_LAUNCH_CATEGORY:-com.oculus.intent.category.VR}"
 quest_surface_decode="${METALXR_QUEST_SURFACE_DECODE:-0}"
+quest_surface_present="${METALXR_QUEST_SURFACE_PRESENT:-0}"
 host_port="${METALXR_HOST_PORT:-47000}"
 build_missing="${METALXR_WORKFLOW_BUILD_MISSING:-1}"
 install_apk="${METALXR_WORKFLOW_INSTALL_APK:-1}"
@@ -109,6 +111,14 @@ if [[ -z "$adb_path" || ! -x "$adb_path" ]]; then
   echo "adb was not found. Set ADB=/path/to/adb." >&2
   exit 1
 fi
+
+adb_cmd() {
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    "$adb_path" -s "$ANDROID_SERIAL" "$@"
+  else
+    "$adb_path" "$@"
+  fi
+}
 
 unity_pid=""
 streamer_pid=""
@@ -179,10 +189,30 @@ cleanup() {
 trap cleanup EXIT
 
 require_ready_device() {
+  "$adb_path" start-server >/dev/null
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    local device_state
+    device_state="$(adb_cmd get-state 2>/dev/null || true)"
+    if [[ "$device_state" != "device" ]]; then
+      echo "The requested Android device is not authorized or connected: $ANDROID_SERIAL" >&2
+      "$adb_path" devices -l >&2 || true
+      exit 1
+    fi
+    return
+  fi
+
   local devices
   devices="$("$adb_path" devices | awk 'NR > 1 && $2 == "device" { print $1 }')"
   if [[ -z "$devices" ]]; then
     echo "No authorized Quest/Android device is connected." >&2
+    "$adb_path" devices -l >&2 || true
+    exit 1
+  fi
+
+  local device_count
+  device_count="$(printf '%s\n' "$devices" | sed '/^$/d' | wc -l | tr -d ' ')"
+  if [[ "$device_count" != "1" ]]; then
+    echo "More than one device is connected. Set ANDROID_SERIAL before running this workflow." >&2
     "$adb_path" devices -l >&2 || true
     exit 1
   fi
@@ -247,15 +277,26 @@ prepare_quest_client() {
   if [[ "$install_apk" == "1" ]]; then
     "$repo_root/Scripts/install-quest-apk.sh" "$apk_path"
   fi
-  "$adb_path" reverse --remove "tcp:$host_port" >/dev/null 2>&1 || true
-  "$adb_path" reverse "tcp:$host_port" "tcp:$host_port"
+  adb_cmd reverse --remove "tcp:$host_port" >/dev/null 2>&1 || true
+  adb_cmd reverse "tcp:$host_port" "tcp:$host_port"
 }
 
 start_quest_client_activity() {
+  adb_cmd shell am force-stop "$package_name" >/dev/null 2>&1 || true
+  adb_cmd logcat -c >/dev/null 2>&1 || true
+
+  if [[ "$quest_surface_decode" == "1" && "$quest_surface_present" == "1" ]]; then
+    adb_cmd shell am start -W \
+      -a android.intent.action.MAIN \
+      -c "$quest_launch_category" \
+      -n "$package_name/$quest_activity" \
+      --ez metalxr_surface_decode true \
+      --ez metalxr_surface_present true >/dev/null
+    return
+  fi
+
   if [[ "$quest_surface_decode" == "1" ]]; then
-    "$adb_path" shell am force-stop "$package_name" >/dev/null 2>&1 || true
-    "$adb_path" logcat -c >/dev/null 2>&1 || true
-    "$adb_path" shell am start -W \
+    adb_cmd shell am start -W \
       -a android.intent.action.MAIN \
       -c "$quest_launch_category" \
       -n "$package_name/$quest_activity" \
@@ -263,9 +304,16 @@ start_quest_client_activity() {
     return
   fi
 
-  "$adb_path" shell am force-stop "$package_name" >/dev/null 2>&1 || true
-  "$adb_path" logcat -c >/dev/null 2>&1 || true
-  "$adb_path" shell am start -W \
+  if [[ "$quest_surface_present" == "1" ]]; then
+    adb_cmd shell am start -W \
+      -a android.intent.action.MAIN \
+      -c "$quest_launch_category" \
+      -n "$package_name/$quest_activity" \
+      --ez metalxr_surface_present true >/dev/null
+    return
+  fi
+
+  adb_cmd shell am start -W \
     -a android.intent.action.MAIN \
     -c "$quest_launch_category" \
     -n "$package_name/$quest_activity" >/dev/null
@@ -418,7 +466,7 @@ wait_for_quest_display_logs() {
   local start
   start="$(date +%s)"
   while true; do
-    if "$adb_path" logcat -d Unity:D '*:S' | grep -q 'MetalXRQuestClient displayed VIDEO_FRAME'; then
+    if adb_cmd logcat -d Unity:D '*:S' | grep -q 'MetalXRQuestClient displayed VIDEO_FRAME'; then
       return 0
     fi
     local now
