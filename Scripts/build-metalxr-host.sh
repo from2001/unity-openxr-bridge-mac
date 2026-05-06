@@ -37,6 +37,7 @@ else
     "$protocol_dir/src/metalxr_protocol.c" \
     "$protocol_dir/src/metalxr_shared_state.c" \
     "$host_dir/src/metalxr_host_streamer.c" \
+    -framework Accelerate \
     -framework CoreFoundation \
     -framework CoreMedia \
     -framework CoreVideo \

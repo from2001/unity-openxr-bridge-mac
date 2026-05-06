@@ -4,6 +4,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
+#include <Accelerate/Accelerate.h>
 #include <IOSurface/IOSurface.h>
 #include <VideoToolbox/VideoToolbox.h>
 
@@ -1304,6 +1305,41 @@ static CVPixelBufferRef create_synthetic_pixel_buffer(EncoderContext* context, u
     return pixelBuffer;
 }
 
+static int swizzle_rgba_to_bgra_rows(
+    const uint8_t* sourceBase,
+    size_t sourceBytesPerRow,
+    uint8_t* destinationBase,
+    size_t destinationBytesPerRow,
+    int width,
+    int height)
+{
+    if (sourceBase == NULL || destinationBase == NULL ||
+        width <= 0 || height <= 0 ||
+        sourceBytesPerRow < (size_t)width * 4u ||
+        destinationBytesPerRow < (size_t)width * 4u) {
+        return 0;
+    }
+
+    vImage_Buffer source;
+    source.data = (void*)sourceBase;
+    source.height = (vImagePixelCount)height;
+    source.width = (vImagePixelCount)width;
+    source.rowBytes = sourceBytesPerRow;
+
+    vImage_Buffer destination;
+    destination.data = destinationBase;
+    destination.height = (vImagePixelCount)height;
+    destination.width = (vImagePixelCount)width;
+    destination.rowBytes = destinationBytesPerRow;
+
+    const uint8_t permuteMap[4] = { 2, 1, 0, 3 };
+    return vImagePermuteChannels_ARGB8888(
+               &source,
+               &destination,
+               permuteMap,
+               kvImageNoFlags) == kvImageNoError;
+}
+
 static int read_file_exact(const char* path, uint8_t* data, size_t size)
 {
     FILE* input = fopen(path, "rb");
@@ -1372,21 +1408,21 @@ static CVPixelBufferRef create_unity_export_iosurface_pixel_buffer(
         const size_t sourceBytesPerRow = IOSurfaceGetBytesPerRow(surface);
         uint8_t* destinationBase = (uint8_t*)CVPixelBufferGetBaseAddress(convertedPixelBuffer);
         const size_t destinationBytesPerRow = CVPixelBufferGetBytesPerRow(convertedPixelBuffer);
-        for (int y = 0; y < record->height; ++y) {
-            const uint8_t* sourceRow = sourceBase + ((size_t)y * sourceBytesPerRow);
-            uint8_t* destinationRow = destinationBase + ((size_t)y * destinationBytesPerRow);
-            for (int x = 0; x < record->width; ++x) {
-                const uint8_t* sourcePixel = sourceRow + ((size_t)x * 4u);
-                uint8_t* destinationPixel = destinationRow + ((size_t)x * 4u);
-                destinationPixel[0] = sourcePixel[2];
-                destinationPixel[1] = sourcePixel[1];
-                destinationPixel[2] = sourcePixel[0];
-                destinationPixel[3] = sourcePixel[3];
-            }
-        }
+        const int converted = swizzle_rgba_to_bgra_rows(
+            sourceBase,
+            sourceBytesPerRow,
+            destinationBase,
+            destinationBytesPerRow,
+            record->width,
+            record->height);
 
         CVPixelBufferUnlockBaseAddress(convertedPixelBuffer, 0);
         IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+        if (!converted) {
+            CVPixelBufferRelease(convertedPixelBuffer);
+            CFRelease(surface);
+            return NULL;
+        }
         CFRelease(surface);
         return convertedPixelBuffer;
     }
@@ -1481,21 +1517,24 @@ static CVPixelBufferRef create_unity_export_pixel_buffer(
     const size_t destinationBytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer);
     const size_t copiedRowBytes = (size_t)record->width * 4u;
     const int sourceIsRgba = strcmp(record->payloadFormat, "RGBA8") == 0;
-    for (int y = 0; y < record->height; ++y) {
-        const uint8_t* sourceRow = payload + ((size_t)y * record->bytesPerRow);
-        uint8_t* destinationRow = base + ((size_t)y * destinationBytesPerRow);
-        if (!sourceIsRgba) {
-            memcpy(destinationRow, sourceRow, copiedRowBytes);
-            continue;
+    if (sourceIsRgba) {
+        if (!swizzle_rgba_to_bgra_rows(
+                payload,
+                record->bytesPerRow,
+                base,
+                destinationBytesPerRow,
+                record->width,
+                record->height)) {
+            CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+            CVPixelBufferRelease(pixelBuffer);
+            free(payload);
+            return NULL;
         }
-
-        for (int x = 0; x < record->width; ++x) {
-            const uint8_t* sourcePixel = sourceRow + ((size_t)x * 4u);
-            uint8_t* destinationPixel = destinationRow + ((size_t)x * 4u);
-            destinationPixel[0] = sourcePixel[2];
-            destinationPixel[1] = sourcePixel[1];
-            destinationPixel[2] = sourcePixel[0];
-            destinationPixel[3] = sourcePixel[3];
+    } else {
+        for (int y = 0; y < record->height; ++y) {
+            const uint8_t* sourceRow = payload + ((size_t)y * record->bytesPerRow);
+            uint8_t* destinationRow = base + ((size_t)y * destinationBytesPerRow);
+            memcpy(destinationRow, sourceRow, copiedRowBytes);
         }
     }
 
