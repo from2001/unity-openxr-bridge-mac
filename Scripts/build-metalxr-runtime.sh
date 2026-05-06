@@ -21,7 +21,9 @@ else
     -dynamiclib \
     -fvisibility=hidden \
     -I "$runtime_dir/include" \
+    -I "$repo_root/Runtime/MetalXRProtocol/include" \
     "$runtime_dir/src/metalxr_runtime.c" \
+    "$repo_root/Runtime/MetalXRProtocol/src/metalxr_shared_state.c" \
     -install_name "@rpath/libmetalxr_runtime.dylib" \
     -o "$build_dir/libmetalxr_runtime.dylib"
 fi

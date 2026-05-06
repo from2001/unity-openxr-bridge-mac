@@ -34,6 +34,7 @@ else
   "$clang_bin" -std=c11 -Wall -Wextra -Werror \
     -I "$protocol_dir/include" \
     "$protocol_dir/src/metalxr_protocol.c" \
+    "$protocol_dir/src/metalxr_shared_state.c" \
     "$host_dir/src/metalxr_host_streamer.c" \
     -framework CoreFoundation \
     -framework CoreMedia \

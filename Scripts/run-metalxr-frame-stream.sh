@@ -29,6 +29,9 @@ Environment:
                               Signed prediction offset in milliseconds. Defaults to 0.
   METALXR_CLOCK_SYNC_INTERVAL_MS
                               Clock sync probe interval. Defaults to 500.
+  METALXR_SHARED_STATE_NAME   Runtime-host POSIX shared memory name. Defaults to /metalxr_runtime_state.
+  METALXR_DISABLE_SHARED_STATE
+                              Set to 1 to force text-file state fallback only.
   METALXR_TRACKING_STATE_PATH Host tracking state output. Defaults to /tmp/metalxr_tracking_state.txt.
   METALXR_HAPTIC_COMMAND_PATH Runtime haptic command input. Defaults to /tmp/metalxr_haptic_command.txt.
   METALXR_TIMING_STATE_PATH   Host timing state output. Defaults to /tmp/metalxr_timing_state.txt.
@@ -56,6 +59,8 @@ frame_source="${METALXR_FRAME_SOURCE:-synthetic}"
 frame_export_dir="${METALXR_FRAME_EXPORT_DIR:-}"
 prediction_offset_ms="${METALXR_PREDICTION_OFFSET_MS:-0}"
 clock_sync_interval_ms="${METALXR_CLOCK_SYNC_INTERVAL_MS:-500}"
+shared_state_name="${METALXR_SHARED_STATE_NAME:-/metalxr_runtime_state}"
+disable_shared_state="${METALXR_DISABLE_SHARED_STATE:-0}"
 tracking_state_path="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}"
 haptic_command_path="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}"
 timing_state_path="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}"
@@ -137,6 +142,7 @@ streamer_args=(
   --frame-source "$frame_source"
   --prediction-offset-ms "$prediction_offset_ms"
   --clock-sync-interval-ms "$clock_sync_interval_ms"
+  --shared-state-name "$shared_state_name"
   --tracking-state-path "$tracking_state_path"
   --haptic-command-path "$haptic_command_path"
   --timing-state-path "$timing_state_path"
@@ -144,6 +150,10 @@ streamer_args=(
 
 if [[ -n "$fps" ]]; then
   streamer_args+=(--fps "$fps")
+fi
+
+if [[ "$disable_shared_state" == "1" ]]; then
+  streamer_args+=(--no-shared-state)
 fi
 
 if [[ -n "$frame_export_dir" ]]; then

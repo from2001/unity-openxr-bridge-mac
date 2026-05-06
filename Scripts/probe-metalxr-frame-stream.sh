@@ -127,6 +127,8 @@ target_eye_frames = frames * 2
 
 HEADER = struct.Struct("<IHHHHIQQII")
 HELLO = struct.Struct("<IIIIIIII64s")
+POSE = struct.Struct("<QQQ3f4fII")
+CONTROLLER = struct.Struct("<QQIIff2fII3f4f3f4f")
 VIDEO = struct.Struct("<QIIIIQQQII")
 TIMING = struct.Struct("<QQQQQQQQQQII")
 MAGIC = 0x4D585250
@@ -134,12 +136,16 @@ HEADER_SIZE = 40
 PACKET_HELLO = 1
 PACKET_HELLO_ACK = 2
 PACKET_VIDEO_FRAME = 10
+PACKET_POSE_SAMPLE = 20
+PACKET_CONTROLLER_INPUT = 21
 PACKET_TIMING_SAMPLE = 30
 TIMING_FLAG_CLOCK_SYNC = 0x00000001
 TIMING_FLAG_FRAME_DISPLAY = 0x00000002
 ROLE_QUEST_CLIENT = 2
 CAP_H264 = 0x00000001
 CAP_STEREO_SEPARATE_EYES = 0x00000004
+CAP_POSE_INPUT = 0x00000010
+CAP_CONTROLLER_INPUT = 0x00000020
 CAP_LOG_STREAM = 0x00000080
 
 
@@ -181,7 +187,7 @@ while True:
 
 hello_payload = HELLO.pack(
     ROLE_QUEST_CLIENT,
-    CAP_H264 | CAP_STEREO_SEPARATE_EYES | CAP_LOG_STREAM,
+    CAP_H264 | CAP_STEREO_SEPARATE_EYES | CAP_POSE_INPUT | CAP_CONTROLLER_INPUT | CAP_LOG_STREAM,
     2064,
     2208,
     72,
@@ -196,6 +202,45 @@ ack_header = HEADER.unpack(recv_exact(sock, HEADER_SIZE))
 if ack_header[0] != MAGIC or ack_header[2] != PACKET_HELLO_ACK:
     raise RuntimeError(f"expected HELLO_ACK, got type={ack_header[2]} magic=0x{ack_header[0]:08x}")
 recv_exact(sock, ack_header[8])
+
+input_ns = time.monotonic_ns()
+send_packet(
+    sock,
+    PACKET_POSE_SAMPLE,
+    POSE.pack(1001, input_ns, 0, 0.06, 1.22, 0.20, 0.0, 0.0, 0.0, 1.0, 0x0F, 0),
+)
+for hand in (0, 1):
+    x = -0.2 if hand == 0 else 0.2
+    send_packet(
+        sock,
+        PACKET_CONTROLLER_INPUT,
+        CONTROLLER.pack(
+            1002 + hand,
+            input_ns,
+            hand,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0x0F,
+            0,
+            x,
+            1.1,
+            0.1,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            x,
+            1.0,
+            0.1,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        ),
+    )
 
 eye_counts = {0: 0, 1: 0}
 keyframes = 0
@@ -303,6 +348,12 @@ PY
 
   if ! grep -q '"event":"latency"' "$log_file"; then
     echo "Streamer did not report latency samples in $name." >&2
+    cat "$log_file" >&2
+    exit 1
+  fi
+
+  if ! grep -q '"event":"pose"' "$log_file" || ! grep -q '"event":"controller"' "$log_file"; then
+    echo "Streamer did not process probe input packets in $name." >&2
     cat "$log_file" >&2
     exit 1
   fi

@@ -51,6 +51,19 @@ Both endpoints can send `METALXR_PACKET_HEARTBEAT` with:
 - `batteryPercent`: client battery when known.
 - `flags`: reserved status flags.
 
+## Runtime-Host Shared State
+
+The host and native runtime use a POSIX shared memory object for local tracking, timing, and haptics state. The default name is `/metalxr_runtime_state`; set `METALXR_SHARED_STATE_NAME` on both processes to override it, or `METALXR_DISABLE_SHARED_STATE=1` to force text-file fallback.
+
+The shared state currently carries:
+
+- latest HMD pose sample and controller input snapshots from host to runtime
+- measured timing and prediction data from host to runtime
+- latest haptic command from runtime to host
+- a host heartbeat timestamp so the runtime can reject stale POSIX shared memory objects from prior runs
+
+This is a first replacement for the development text-file boundary. It is still a single-slot shared state, not a full timestamped IPC ring.
+
 ## Media And Timing Packets
 
 `METALXR_PACKET_VIDEO_FRAME` metadata contains:
@@ -80,7 +93,7 @@ payloadBytes of H.264 Annex B data
 - Host-to-Quest clock sync probes use `METALXR_TIMING_FLAG_CLOCK_SYNC`, `frameId = UINT64_MAX`, and `hostCaptureTimeNs` as the host send time.
 - Quest-to-host frame samples use `METALXR_TIMING_FLAG_FRAME_DISPLAY` and include host capture, predicted display, host encode start/end, Quest receive/display, Quest decode start/end, compositor submit time, and queue depth.
 
-The host estimates Quest-to-host clock offset from clock sync replies, converts Quest display timestamps into the host clock domain, logs encode/network/decode/compositor/total latency, and writes measured display timing to `METALXR_TIMING_STATE_PATH` for the runtime.
+The host estimates Quest-to-host clock offset from clock sync replies, converts Quest display timestamps into the host clock domain, logs encode/network/decode/compositor/total latency, and publishes measured display timing through shared state while mirroring it to `METALXR_TIMING_STATE_PATH` for fallback diagnostics.
 
 The host streamer accepts a new Quest client after disconnects. Continuous sessions use an unlimited reconnect loop; finite smoke runs can enable bounded retries with `METALXR_STREAM_RECONNECT_ATTEMPTS`. Keyframe packets include decoder parameter sets so the Quest client can recover after reconnect without relying on earlier stream state.
 

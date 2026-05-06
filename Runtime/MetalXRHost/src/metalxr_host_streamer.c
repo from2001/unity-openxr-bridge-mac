@@ -1,4 +1,5 @@
 #include "MetalXRProtocol/metalxr_protocol.h"
+#include "MetalXRProtocol/metalxr_shared_state.h"
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMedia/CoreMedia.h>
@@ -53,6 +54,8 @@ typedef struct StreamerOptions {
     char trackingStatePath[1024];
     char hapticCommandPath[1024];
     char timingStatePath[1024];
+    char sharedStateName[METALXR_SHARED_STATE_NAME_SIZE];
+    int useSharedState;
 } StreamerOptions;
 
 typedef struct UnityExportRecord {
@@ -138,6 +141,9 @@ typedef struct StreamSession {
     char trackingStatePath[1024];
     char hapticCommandPath[1024];
     char timingStatePath[1024];
+    MetalXRSharedStateMapping sharedState;
+    int hasSharedState;
+    uint32_t lastSharedHapticSequence;
     uint64_t lastHapticCommandId;
     HostTimingState timing;
 } StreamSession;
@@ -240,6 +246,7 @@ static void print_usage(const char* argv0)
             "[--width N] [--height N] [--bitrate BPS] [--tracking-state-path PATH] "
             "[--haptic-command-path PATH] [--timing-state-path PATH] [--queue-depth N] "
             "[--frame-source synthetic|unity-export] [--frame-export-dir PATH] "
+            "[--shared-state-name NAME] [--no-shared-state] "
             "[--prediction-offset-ms N] [--clock-sync-interval-ms N] "
             "[--reconnect-attempts N] [--no-realtime]\n\n"
             "frames=0 streams until the client disconnects. The default bind host is 127.0.0.1,\n"
@@ -275,6 +282,8 @@ static StreamerOptions parse_options(int argc, char** argv)
     options.reconnectAttempts = 0;
     options.frameSource = FRAME_SOURCE_SYNTHETIC;
     options.frameExportDir[0] = '\0';
+    snprintf(options.sharedStateName, sizeof(options.sharedStateName), "%s", metalxr_shared_state_default_name());
+    options.useSharedState = 1;
     options.clockSyncIntervalMs = 500;
     options.predictionOffsetNs = 0;
     snprintf(options.trackingStatePath, sizeof(options.trackingStatePath), "%s", "/tmp/metalxr_tracking_state.txt");
@@ -325,6 +334,10 @@ static StreamerOptions parse_options(int argc, char** argv)
             }
         } else if (strcmp(arg, "--frame-export-dir") == 0 && i + 1 < argc) {
             snprintf(options.frameExportDir, sizeof(options.frameExportDir), "%s", argv[++i]);
+        } else if (strcmp(arg, "--shared-state-name") == 0 && i + 1 < argc) {
+            snprintf(options.sharedStateName, sizeof(options.sharedStateName), "%s", argv[++i]);
+        } else if (strcmp(arg, "--no-shared-state") == 0) {
+            options.useSharedState = 0;
         } else if (strcmp(arg, "--prediction-offset-ms") == 0 && i + 1 < argc) {
             options.predictionOffsetNs = (int64_t)parse_int_arg(argv[++i], "prediction offset ms", -500, 500) * 1000000;
         } else if (strcmp(arg, "--clock-sync-interval-ms") == 0 && i + 1 < argc) {
@@ -1524,6 +1537,65 @@ static void write_timing_state_file(const StreamSession* session)
     (void)rename(tempPath, session->timingStatePath);
 }
 
+static uint64_t touch_shared_state_host_heartbeat(StreamSession* session)
+{
+    if (session == NULL || !session->hasSharedState) {
+        return 0;
+    }
+
+    const uint64_t timestampNs = host_time_ns();
+    metalxr_shared_state_write_host_heartbeat(&session->sharedState, timestampNs);
+    return timestampNs;
+}
+
+static void fill_shared_timing_state(const StreamSession* session, MetalXRSharedTimingState* shared)
+{
+    if (shared == NULL) {
+        return;
+    }
+    memset(shared, 0, sizeof(*shared));
+    if (session == NULL) {
+        return;
+    }
+
+    const HostTimingState* timing = &session->timing;
+    shared->hostTimestampNs = timing->lastDisplayHostNs;
+    shared->timingSamples = timing->timingSamples;
+    shared->clockOffsetNs = timing->clockOffsetNs;
+    shared->clockRttNs = timing->clockRttNs;
+    shared->measuredFramePeriodNs = timing->measuredFramePeriodNs;
+    shared->lastDisplayHostNs = timing->lastDisplayHostNs;
+    shared->predictionOffsetNs = timing->predictionOffsetNs;
+    shared->averageLatencyUs =
+        timing->totalLatencySamples > 0 ?
+            timing->totalLatencyUs / timing->totalLatencySamples :
+            0;
+    shared->maxLatencyUs = timing->maxLatencyUs;
+    shared->lastEncodeUs = timing->lastEncodeUs;
+    shared->lastNetworkUs = timing->lastNetworkUs;
+    shared->lastDecodeUs = timing->lastDecodeUs;
+    shared->lastCompositorUs = timing->lastCompositorUs;
+    shared->lastTotalUs = timing->lastTotalUs;
+    shared->lastPredictionErrorUs = timing->lastPredictionErrorUs;
+    shared->lastQueueDepth = timing->lastQueueDepth;
+}
+
+static void publish_timing_state(StreamSession* session)
+{
+    if (session == NULL) {
+        return;
+    }
+
+    if (session->hasSharedState) {
+        MetalXRSharedTimingState shared;
+        const uint64_t hostTimestampNs = touch_shared_state_host_heartbeat(session);
+        fill_shared_timing_state(session, &shared);
+        shared.hostTimestampNs = hostTimestampNs;
+        metalxr_shared_state_write_timing(&session->sharedState, &shared);
+    }
+    write_timing_state_file(session);
+}
+
 static int reserve_encoder_queue_slot(EncoderContext* context, uint64_t frameId)
 {
     pthread_mutex_lock(&context->queueLock);
@@ -1631,6 +1703,59 @@ static void write_tracking_state_file(const StreamSession* session, const HostIn
     (void)rename(tempPath, session->trackingStatePath);
 }
 
+static void fill_shared_tracking_state(
+    const HostInputState* state,
+    uint64_t hostTimestampNs,
+    MetalXRSharedTrackingState* shared)
+{
+    if (shared == NULL) {
+        return;
+    }
+    memset(shared, 0, sizeof(*shared));
+    shared->hostTimestampNs = hostTimestampNs;
+    if (state == NULL) {
+        return;
+    }
+
+    shared->hmd.sampleId = state->hmd.sampleId;
+    shared->hmd.timestampNs = state->hmd.timestampNs;
+    shared->hmd.trackingFlags = state->hmd.trackingFlags;
+    memcpy(shared->hmd.position, state->hmd.position, sizeof(shared->hmd.position));
+    memcpy(shared->hmd.orientation, state->hmd.orientation, sizeof(shared->hmd.orientation));
+
+    for (size_t hand = 0; hand < 2; ++hand) {
+        const HostControllerState* source = &state->controllers[hand];
+        MetalXRControllerInputPayload* target = &shared->controllers[hand];
+        target->sampleId = source->sampleId;
+        target->timestampNs = source->timestampNs;
+        target->hand = source->hand;
+        target->buttons = source->buttons;
+        target->trackingFlags = source->trackingFlags;
+        target->trigger = source->trigger;
+        target->grip = source->grip;
+        memcpy(target->thumbstick, source->thumbstick, sizeof(target->thumbstick));
+        memcpy(target->aimPosition, source->aimPosition, sizeof(target->aimPosition));
+        memcpy(target->aimOrientation, source->aimOrientation, sizeof(target->aimOrientation));
+        memcpy(target->gripPosition, source->gripPosition, sizeof(target->gripPosition));
+        memcpy(target->gripOrientation, source->gripOrientation, sizeof(target->gripOrientation));
+    }
+}
+
+static void publish_tracking_state(StreamSession* session, const HostInputState* state)
+{
+    if (session == NULL || state == NULL) {
+        return;
+    }
+
+    if (session->hasSharedState) {
+        MetalXRSharedTrackingState shared;
+        const uint64_t hostTimestampNs = touch_shared_state_host_heartbeat(session);
+        fill_shared_tracking_state(state, hostTimestampNs, &shared);
+        metalxr_shared_state_write_tracking(&session->sharedState, &shared);
+    }
+    write_tracking_state_file(session, state);
+}
+
 static int socket_has_data(int fd)
 {
     fd_set readSet;
@@ -1664,7 +1789,7 @@ static void handle_pose_sample(StreamSession* session, HostInputState* state, co
         fflush(stdout);
     }
 
-    write_tracking_state_file(session, state);
+    publish_tracking_state(session, state);
 }
 
 static void handle_controller_input(
@@ -1793,7 +1918,7 @@ static void handle_timing_sample(
                 fflush(stdout);
             }
 
-            write_timing_state_file(session);
+            publish_timing_state(session);
         }
         return;
     }
@@ -1845,7 +1970,7 @@ static void handle_timing_sample(
         fflush(stdout);
     }
 
-    write_timing_state_file(session);
+    publish_timing_state(session);
 }
 
 static void drain_client_input_packets(StreamSession* session, HostInputState* state)
@@ -1893,6 +2018,50 @@ static int send_haptic_command(StreamSession* session, const MetalXRHapticComman
     return sent;
 }
 
+static int forward_haptic_command(StreamSession* session, const MetalXRHapticCommandPayload* command)
+{
+    if (session == NULL || command == NULL ||
+        command->commandId == session->lastHapticCommandId ||
+        command->hand > METALXR_CONTROLLER_HAND_RIGHT) {
+        return 0;
+    }
+
+    session->lastHapticCommandId = command->commandId;
+    if (send_haptic_command(session, command)) {
+        printf("{\"event\":\"haptic\",\"command\":%" PRIu64 ",\"hand\":%u,"
+               "\"amplitude\":%.4f,\"duration_us\":%u}\n",
+               command->commandId,
+               command->hand,
+               command->amplitude,
+               command->durationUs);
+        fflush(stdout);
+        return 1;
+    }
+
+    return 0;
+}
+
+static void poll_haptic_command_shared_state(StreamSession* session)
+{
+    if (session == NULL || !session->hasSharedState) {
+        return;
+    }
+
+    (void)touch_shared_state_host_heartbeat(session);
+
+    MetalXRHapticCommandPayload command;
+    memset(&command, 0, sizeof(command));
+    uint32_t sequence = 0;
+    if (!metalxr_shared_state_read_haptic(&session->sharedState, &command, &sequence) ||
+        sequence == session->lastSharedHapticSequence ||
+        command.commandId == 0) {
+        return;
+    }
+
+    session->lastSharedHapticSequence = sequence;
+    (void)forward_haptic_command(session, &command);
+}
+
 static void poll_haptic_command_file(StreamSession* session)
 {
     if (session == NULL || session->hapticCommandPath[0] == '\0') {
@@ -1916,21 +2085,17 @@ static void poll_haptic_command_file(StreamSession* session)
                                &command.durationUs);
     fclose(input);
 
-    if (scanned != 6 || command.commandId == session->lastHapticCommandId ||
-        command.hand > METALXR_CONTROLLER_HAND_RIGHT) {
+    if (scanned != 6) {
         return;
     }
 
-    session->lastHapticCommandId = command.commandId;
-    if (send_haptic_command(session, &command)) {
-        printf("{\"event\":\"haptic\",\"command\":%" PRIu64 ",\"hand\":%u,"
-               "\"amplitude\":%.4f,\"duration_us\":%u}\n",
-               command.commandId,
-               command.hand,
-               command.amplitude,
-               command.durationUs);
-        fflush(stdout);
-    }
+    (void)forward_haptic_command(session, &command);
+}
+
+static void poll_haptic_commands(StreamSession* session)
+{
+    poll_haptic_command_shared_state(session);
+    poll_haptic_command_file(session);
 }
 
 static int create_server_socket(const StreamerOptions* options)
@@ -2252,13 +2417,33 @@ static int stream_client(int clientFd, const StreamerOptions* options)
     snprintf(stream.trackingStatePath, sizeof(stream.trackingStatePath), "%s", activeOptions.trackingStatePath);
     snprintf(stream.hapticCommandPath, sizeof(stream.hapticCommandPath), "%s", activeOptions.hapticCommandPath);
     snprintf(stream.timingStatePath, sizeof(stream.timingStatePath), "%s", activeOptions.timingStatePath);
+    if (activeOptions.useSharedState) {
+        char sharedStateError[256];
+        sharedStateError[0] = '\0';
+        stream.hasSharedState = metalxr_shared_state_open(&stream.sharedState,
+                                                          activeOptions.sharedStateName,
+                                                          1,
+                                                          sharedStateError,
+                                                          sizeof(sharedStateError));
+        if (stream.hasSharedState) {
+            (void)touch_shared_state_host_heartbeat(&stream);
+            printf("{\"event\":\"shared_state\",\"state\":\"ready\",\"name\":\"%s\"}\n",
+                   activeOptions.sharedStateName);
+            fflush(stdout);
+        } else {
+            fprintf(stderr,
+                    "{\"event\":\"shared_state\",\"state\":\"fallback\",\"reason\":\"%s\"}\n",
+                    sharedStateError[0] != '\0' ? sharedStateError : "open failed");
+        }
+    }
     stream.timing = make_default_timing_state(&activeOptions);
     pthread_mutex_init(&stream.sendLock, NULL);
     HostInputState inputState = make_default_input_state();
-    write_tracking_state_file(&stream, &inputState);
-    write_timing_state_file(&stream);
 
     if (!configure_unity_export_stream(&activeOptions, &unityExportSource, &initialUnityPair)) {
+        if (stream.hasSharedState) {
+            metalxr_shared_state_close(&stream.sharedState);
+        }
         pthread_mutex_destroy(&stream.sendLock);
         return 0;
     }
@@ -2276,13 +2461,19 @@ static int stream_client(int clientFd, const StreamerOptions* options)
                          profileError[0] != '\0' ? profileError : "Quest device profile is incompatible with stream options");
         fprintf(stderr, "Rejected stream profile: %s\n",
                 profileError[0] != '\0' ? profileError : "Quest device profile is incompatible with stream options");
+        if (stream.hasSharedState) {
+            metalxr_shared_state_close(&stream.sharedState);
+        }
         pthread_mutex_destroy(&stream.sendLock);
         return 0;
     }
     stream.timing = make_default_timing_state(&activeOptions);
-    write_timing_state_file(&stream);
+    publish_timing_state(&stream);
 
     if (!send_hello_ack(clientFd, &stream, &activeOptions)) {
+        if (stream.hasSharedState) {
+            metalxr_shared_state_close(&stream.sharedState);
+        }
         pthread_mutex_destroy(&stream.sendLock);
         return 0;
     }
@@ -2309,7 +2500,7 @@ static int stream_client(int clientFd, const StreamerOptions* options)
     const uint64_t clockSyncIntervalNs = (uint64_t)activeOptions.clockSyncIntervalMs * 1000000ull;
     for (int frame = 0; ok && !stream.failed && (activeOptions.frames == 0 || frame < activeOptions.frames); ++frame) {
         drain_client_input_packets(&stream, &inputState);
-        poll_haptic_command_file(&stream);
+        poll_haptic_commands(&stream);
         send_clock_sync_if_due(&stream, clockSyncIntervalNs);
 
         const uint64_t captureTimeNs = host_time_ns();
@@ -2389,6 +2580,9 @@ static int stream_client(int clientFd, const StreamerOptions* options)
     destroy_encoder(&left);
     destroy_encoder(&right);
     pthread_mutex_destroy(&stream.sendLock);
+    if (stream.hasSharedState) {
+        metalxr_shared_state_close(&stream.sharedState);
+    }
     return ok;
 }
 
@@ -2403,7 +2597,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d reconnect_attempts=%d source=%s export_dir=%s prediction_offset_ns=%" PRId64 " tracking=%s haptics=%s timing=%s\n",
+    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d reconnect_attempts=%d source=%s export_dir=%s prediction_offset_ns=%" PRId64 " shared_state=%s tracking=%s haptics=%s timing=%s\n",
            options.bindHost,
            options.port,
            options.width,
@@ -2416,6 +2610,7 @@ int main(int argc, char** argv)
            frame_source_name(options.frameSource),
            options.frameExportDir[0] != '\0' ? options.frameExportDir : "-",
            options.predictionOffsetNs,
+           options.useSharedState ? options.sharedStateName : "disabled",
            options.trackingStatePath,
            options.hapticCommandPath,
            options.timingStatePath);

@@ -89,7 +89,7 @@ The script uses `adb exec-out screencap -p`, saves the PNG to `METALXR_SCREENSHO
 
 The host sends `METALXR_PACKET_TIMING_SAMPLE` clock-sync probes and the Quest client replies immediately from the stream thread. After a frame is decoded and submitted to the eye texture, the Quest client sends a frame timing sample with receive, decode, display, and queue-depth timestamps.
 
-The host logs latency JSON records with encode, network, decode, compositor-submit, total latency, prediction error, queue depth, and measured display period. It also writes `METALXR_TIMING_STATE_PATH`; the native runtime reads that file so `xrWaitFrame` predictions can follow measured Quest display timing instead of a fixed local guess.
+The host logs latency JSON records with encode, network, decode, compositor-submit, total latency, prediction error, queue depth, and measured display period. It also publishes timing to the runtime-host shared-state bridge named by `METALXR_SHARED_STATE_NAME` and mirrors it to `METALXR_TIMING_STATE_PATH` for fallback diagnostics. The native runtime prefers shared state so `xrWaitFrame` predictions can follow measured Quest display timing instead of a fixed local guess.
 
 ## Tracking, Controllers, And Haptics
 
@@ -98,9 +98,9 @@ The Quest client samples the center-eye HMD, left controller, and right controll
 - `METALXR_PACKET_POSE_SAMPLE` for HMD position, orientation, and tracking flags.
 - `METALXR_PACKET_CONTROLLER_INPUT` for controller buttons, trigger, grip, thumbstick, tracking flags, and aim/grip poses.
 
-The macOS host streamer drains those packets on the stream socket and atomically rewrites `METALXR_TRACKING_STATE_PATH`. The native runtime consumes that file for `xrLocateViews`, action-space locations, and action-state reads. If the state file is older than `METALXR_TRACKING_STALE_TIMEOUT_MS` (default 1000), the runtime keeps the last or identity HMD pose valid for view rendering, but clears live tracking bits, controller tracking flags, button states, triggers, grips, and thumbsticks so Unity can continue submitting projection layers without treating stale input as live controller state.
+The macOS host streamer drains those packets on the stream socket, publishes them to the runtime-host shared-state bridge, and mirrors them to `METALXR_TRACKING_STATE_PATH`. The native runtime prefers shared state for `xrLocateViews`, action-space locations, and action-state reads, with the text file as fallback. Shared state includes a host heartbeat so the runtime can reconnect instead of reading stale POSIX shared memory from a prior run. If input state is stale, the runtime keeps the last or identity HMD pose valid for view rendering, but clears live tracking bits, controller tracking flags, button states, triggers, grips, and thumbsticks so Unity can continue submitting projection layers without treating stale input as live controller state.
 
-Haptics flow in the opposite direction. The runtime writes the latest command to `METALXR_HAPTIC_COMMAND_PATH` from `xrApplyHapticFeedback`; the host streamer sends it as `METALXR_PACKET_HAPTIC_COMMAND`; the Quest client applies it with Unity XR `SendHapticImpulse` on the main thread.
+Haptics flow in the opposite direction. The runtime publishes the latest command to shared state from `xrApplyHapticFeedback` and mirrors it to `METALXR_HAPTIC_COMMAND_PATH`; the host streamer sends new shared-state or fallback-file commands as `METALXR_PACKET_HAPTIC_COMMAND`; the Quest client applies them with Unity XR `SendHapticImpulse` on the main thread.
 
 This is a development bridge for USB smoke tests. It does not yet provide datagram delivery or production reconnect policy.
 

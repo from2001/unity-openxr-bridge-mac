@@ -239,6 +239,7 @@ MetalXR view size: ${view_width}x${view_height}
 MetalXR tracking state: ${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}
 MetalXR haptic commands: ${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}
 MetalXR timing state: ${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}
+MetalXR shared state: ${METALXR_SHARED_STATE_NAME:-/metalxr_runtime_state}
 EOF
 
   if [[ "$auto_play" == "1" ]]; then
@@ -264,6 +265,8 @@ EOF
     METALXR_TRACKING_STATE_PATH="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}" \
     METALXR_HAPTIC_COMMAND_PATH="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}" \
     METALXR_TIMING_STATE_PATH="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}" \
+    METALXR_SHARED_STATE_NAME="${METALXR_SHARED_STATE_NAME:-/metalxr_runtime_state}" \
+    METALXR_DISABLE_SHARED_STATE="${METALXR_DISABLE_SHARED_STATE:-0}" \
     "$repo_root/Scripts/launch-unity-openxr.sh" "$project_path" >>"$unity_log" 2>&1 &
     unity_pid="$!"
 
@@ -314,6 +317,8 @@ EOF
   METALXR_TRACKING_STATE_PATH="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}" \
   METALXR_HAPTIC_COMMAND_PATH="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}" \
   METALXR_TIMING_STATE_PATH="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}" \
+  METALXR_SHARED_STATE_NAME="${METALXR_SHARED_STATE_NAME:-/metalxr_runtime_state}" \
+  METALXR_DISABLE_SHARED_STATE="${METALXR_DISABLE_SHARED_STATE:-0}" \
   "$repo_root/Scripts/launch-unity-openxr.sh" "$project_path" >"$unity_log" 2>&1 &
   unity_pid="$!"
 
@@ -330,6 +335,8 @@ start_unity_export_streamer() {
   METALXR_TRACKING_STATE_PATH="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}" \
   METALXR_HAPTIC_COMMAND_PATH="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}" \
   METALXR_TIMING_STATE_PATH="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}" \
+  METALXR_SHARED_STATE_NAME="${METALXR_SHARED_STATE_NAME:-/metalxr_runtime_state}" \
+  METALXR_DISABLE_SHARED_STATE="${METALXR_DISABLE_SHARED_STATE:-0}" \
   "$repo_root/Scripts/run-metalxr-frame-stream.sh" >"$streamer_log" 2>&1 &
   streamer_pid="$!"
 }
