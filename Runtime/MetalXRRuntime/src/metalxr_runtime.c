@@ -1303,7 +1303,11 @@ static uint64_t metalxr_swapchain_storage_mode(void)
 static int metalxr_should_use_iosurface_swapchain(void)
 {
     const char* resourceMode = getenv("METALXR_SWAPCHAIN_RESOURCE_MODE");
-    return resourceMode != NULL && strcmp(resourceMode, "iosurface") == 0;
+    const char* experimentalExport = getenv("METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT");
+    return resourceMode != NULL &&
+           strcmp(resourceMode, "iosurface") == 0 &&
+           experimentalExport != NULL &&
+           strcmp(experimentalExport, "1") == 0;
 }
 
 static int metalxr_format_supports_iosurface(int64_t format)
