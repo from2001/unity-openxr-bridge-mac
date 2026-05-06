@@ -11,6 +11,7 @@ Usage:
 Environment:
   ADB                         Optional adb executable path. Defaults to Libs/adb-lib/adb, then PATH.
   METALXR_QUEST_PACKAGE       Android package name. Defaults to com.metalxr.questclient.
+  METALXR_QUEST_ACTIVITY      Android activity class. Defaults to UnityPlayerGameActivity.
   METALXR_QUEST_LAUNCH_CATEGORY
                               Android launch category. Defaults to com.oculus.intent.category.VR.
   METALXR_HOST_PORT           Host handshake port forwarded with adb reverse. Defaults to 47000.
@@ -27,6 +28,7 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 apk_path="${1:-$repo_root/TestProjects/UnityOpenXRSmoke/Builds/MetalXRQuestClient.apk}"
 package_name="${METALXR_QUEST_PACKAGE:-com.metalxr.questclient}"
+quest_activity="${METALXR_QUEST_ACTIVITY:-com.unity3d.player.UnityPlayerGameActivity}"
 launch_category="${METALXR_QUEST_LAUNCH_CATEGORY:-com.oculus.intent.category.VR}"
 host_port="${METALXR_HOST_PORT:-47000}"
 logcat_wait_seconds="${METALXR_LOGCAT_WAIT_SECONDS:-10}"
@@ -58,8 +60,11 @@ echo "Forwarding device tcp:$host_port to host tcp:$host_port"
 echo "Clearing logcat"
 "$adb_path" logcat -c || true
 
-echo "Launching $package_name with $launch_category"
-"$adb_path" shell monkey -p "$package_name" -c "$launch_category" 1
+echo "Launching $package_name/$quest_activity with $launch_category"
+"$adb_path" shell am start -W \
+  -a android.intent.action.MAIN \
+  -c "$launch_category" \
+  -n "$package_name/$quest_activity"
 
 sleep "$logcat_wait_seconds"
 echo "Recent MetalXRQuestClient logs:"

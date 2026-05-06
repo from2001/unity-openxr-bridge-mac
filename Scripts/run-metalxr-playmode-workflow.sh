@@ -17,9 +17,13 @@ Environment:
   METALXR_WORKFLOW_AUTO_PLAY           Use uloop to enter Play Mode after Unity launches. Defaults to 1.
   METALXR_WORKFLOW_RESTART_UNITY       Quit an existing Unity editor before launch. Defaults to 1.
   METALXR_WORKFLOW_KEEP_RUNNING        Keep Unity and streamer running after smoke checks. Defaults to 1.
+  METALXR_QUEST_ACTIVITY               Android activity class. Defaults to UnityPlayerGameActivity.
+  METALXR_QUEST_LAUNCH_CATEGORY        Android launch category. Defaults to Quest VR category.
   METALXR_WORKFLOW_EXPORT_WAIT_SECONDS Seconds to wait for Unity frame exports. Defaults to 120.
   METALXR_WORKFLOW_STREAM_WAIT_SECONDS Seconds to wait for streamer/client logs. Defaults to 60.
   METALXR_FRAME_EXPORT_DIR             Shared frame export directory. Defaults to TMPDIR/metalxr_frame_export.
+                                      Set to an empty value with METALXR_FRAME_EXPORT_SOCKET for socket-only export.
+  METALXR_FRAME_EXPORT_SOCKET          Runtime frame export datagram socket for unity-export source.
   METALXR_FRAME_EXPORT_MODE            readback or fixture. Defaults to fixture for smoke reliability.
                                       iosurface is experimental and requires
                                       METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1.
@@ -42,6 +46,8 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project_path="${UNITY_PROJECT_PATH:-$repo_root/TestProjects/UnityOpenXRSmoke}"
 package_name="${METALXR_QUEST_PACKAGE:-com.metalxr.questclient}"
+quest_activity="${METALXR_QUEST_ACTIVITY:-com.unity3d.player.UnityPlayerGameActivity}"
+quest_launch_category="${METALXR_QUEST_LAUNCH_CATEGORY:-com.oculus.intent.category.VR}"
 host_port="${METALXR_HOST_PORT:-47000}"
 build_missing="${METALXR_WORKFLOW_BUILD_MISSING:-1}"
 install_apk="${METALXR_WORKFLOW_INSTALL_APK:-1}"
@@ -51,7 +57,12 @@ keep_running="${METALXR_WORKFLOW_KEEP_RUNNING:-1}"
 export_wait_seconds="${METALXR_WORKFLOW_EXPORT_WAIT_SECONDS:-120}"
 stream_wait_seconds="${METALXR_WORKFLOW_STREAM_WAIT_SECONDS:-60}"
 tmp_root="${TMPDIR:-/tmp}"
-frame_export_dir="${METALXR_FRAME_EXPORT_DIR:-$tmp_root/metalxr_frame_export}"
+if [[ "${METALXR_FRAME_EXPORT_DIR+x}" == "x" ]]; then
+  frame_export_dir="$METALXR_FRAME_EXPORT_DIR"
+else
+  frame_export_dir="$tmp_root/metalxr_frame_export"
+fi
+frame_export_socket="${METALXR_FRAME_EXPORT_SOCKET:-}"
 frame_export_mode="${METALXR_FRAME_EXPORT_MODE:-fixture}"
 swapchain_storage_mode="${METALXR_SWAPCHAIN_STORAGE_MODE:-shared}"
 view_width="${METALXR_VIEW_WIDTH:-640}"
@@ -65,11 +76,23 @@ apk_path="$project_path/Builds/MetalXRQuestClient.apk"
 runtime_dylib="$repo_root/Runtime/MetalXRRuntime/build/libmetalxr_runtime.dylib"
 runtime_manifest="$repo_root/Runtime/MetalXRRuntime/metalxr_runtime.json"
 host_streamer="$repo_root/Runtime/MetalXRHost/build/metalxr_host_streamer"
+socket_only_export=0
+if [[ -z "$frame_export_dir" && -n "$frame_export_socket" ]]; then
+  socket_only_export=1
+fi
 
 if [[ "$frame_export_mode" == "iosurface" &&
       "${METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT:-0}" != "1" ]]; then
   echo "METALXR_FRAME_EXPORT_MODE=iosurface is experimental and is disabled by default." >&2
   echo "Set METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1 only for isolated IOSurface runtime validation." >&2
+  exit 1
+fi
+if [[ -z "$frame_export_dir" && -z "$frame_export_socket" ]]; then
+  echo "METALXR_FRAME_EXPORT_DIR or METALXR_FRAME_EXPORT_SOCKET is required." >&2
+  exit 1
+fi
+if [[ "$frame_export_mode" != "iosurface" && -z "$frame_export_dir" ]]; then
+  echo "METALXR_FRAME_EXPORT_MODE=$frame_export_mode requires METALXR_FRAME_EXPORT_DIR." >&2
   exit 1
 fi
 
@@ -218,22 +241,40 @@ build_missing_artifacts() {
   fi
 }
 
-launch_quest_client() {
+prepare_quest_client() {
   if [[ "$install_apk" == "1" ]]; then
     "$repo_root/Scripts/install-quest-apk.sh" "$apk_path"
   fi
   "$adb_path" reverse --remove "tcp:$host_port" >/dev/null 2>&1 || true
   "$adb_path" reverse "tcp:$host_port" "tcp:$host_port"
+}
+
+start_quest_client_activity() {
   "$adb_path" shell am force-stop "$package_name" >/dev/null 2>&1 || true
   "$adb_path" logcat -c >/dev/null 2>&1 || true
-  "$adb_path" shell monkey -p "$package_name" -c com.oculus.intent.category.VR 1 >/dev/null
+  "$adb_path" shell am start -W \
+    -a android.intent.action.MAIN \
+    -c "$quest_launch_category" \
+    -n "$package_name/$quest_activity" >/dev/null
+}
+
+launch_quest_client() {
+  prepare_quest_client
+  start_quest_client_activity
 }
 
 launch_unity_and_enter_play_mode() {
-  mkdir -p "$(dirname "$unity_log")" "$frame_export_dir" "$frame_dump_dir"
+  mkdir -p "$(dirname "$unity_log")" "$frame_dump_dir"
+  if [[ -n "$frame_export_dir" ]]; then
+    mkdir -p "$frame_export_dir"
+  fi
   rm -f "$unity_log" "$runtime_log"
-  rm -rf "$frame_export_dir" "$frame_dump_dir"
-  mkdir -p "$frame_export_dir" "$frame_dump_dir"
+  if [[ -n "$frame_export_dir" ]]; then
+    rm -rf "$frame_export_dir"
+    mkdir -p "$frame_export_dir"
+  fi
+  rm -rf "$frame_dump_dir"
+  mkdir -p "$frame_dump_dir"
 
   cat >"$unity_log" <<EOF
 Repository: $repo_root
@@ -241,7 +282,8 @@ Unity project: $project_path
 OpenXR runtime: $runtime_manifest
 MetalXR runtime log: $runtime_log
 MetalXR frame dumps: $frame_dump_dir
-MetalXR frame exports: $frame_export_dir
+MetalXR frame exports: ${frame_export_dir:-disabled}
+MetalXR frame export socket: ${frame_export_socket:-disabled}
 MetalXR frame export mode: $frame_export_mode
 MetalXR swapchain storage mode: $swapchain_storage_mode
 MetalXR view size: ${view_width}x${view_height}
@@ -266,6 +308,7 @@ EOF
     METALXR_RUNTIME_LOG="$runtime_log" \
     METALXR_FRAME_DUMP_DIR="$frame_dump_dir" \
     METALXR_FRAME_EXPORT_DIR="$frame_export_dir" \
+    METALXR_FRAME_EXPORT_SOCKET="$frame_export_socket" \
     METALXR_FRAME_EXPORT_MODE="$frame_export_mode" \
     METALXR_SWAPCHAIN_STORAGE_MODE="$swapchain_storage_mode" \
     METALXR_VIEW_WIDTH="$view_width" \
@@ -293,6 +336,11 @@ EOF
     fi
     uloop compile --project-path "$project_path" --force-recompile false --wait-for-domain-reload true >>"$unity_log" 2>&1
 
+    if [[ "$socket_only_export" == "1" && -z "$streamer_pid" ]]; then
+      start_unity_export_streamer
+      start_quest_client_activity
+    fi
+
     local play_ready=0
     local play_output
     for _ in $(seq 1 30); do
@@ -319,6 +367,7 @@ EOF
   METALXR_RUNTIME_LOG="$runtime_log" \
   METALXR_FRAME_DUMP_DIR="$frame_dump_dir" \
   METALXR_FRAME_EXPORT_DIR="$frame_export_dir" \
+  METALXR_FRAME_EXPORT_SOCKET="$frame_export_socket" \
   METALXR_FRAME_EXPORT_MODE="$frame_export_mode" \
   METALXR_SWAPCHAIN_STORAGE_MODE="$swapchain_storage_mode" \
   METALXR_VIEW_WIDTH="$view_width" \
@@ -341,6 +390,8 @@ start_unity_export_streamer() {
   METALXR_HOST_PORT="$host_port" \
   METALXR_FRAME_SOURCE=unity-export \
   METALXR_FRAME_EXPORT_DIR="$frame_export_dir" \
+  METALXR_FRAME_EXPORT_SOCKET="$frame_export_socket" \
+  METALXR_FRAME_EXPORT_WAIT_MS="$((export_wait_seconds * 1000))" \
   METALXR_TRACKING_STATE_PATH="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}" \
   METALXR_HAPTIC_COMMAND_PATH="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}" \
   METALXR_TIMING_STATE_PATH="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}" \
@@ -369,10 +420,17 @@ wait_for_quest_display_logs() {
 
 require_ready_device
 build_missing_artifacts
-launch_quest_client
+prepare_quest_client
 launch_unity_and_enter_play_mode
-wait_for_export_pair
-start_unity_export_streamer
+if [[ "$socket_only_export" == "1" && -z "$streamer_pid" ]]; then
+  start_unity_export_streamer
+  start_quest_client_activity
+fi
+if [[ "$socket_only_export" != "1" ]]; then
+  wait_for_export_pair
+  start_unity_export_streamer
+  start_quest_client_activity
+fi
 wait_for_file_pattern "Quest streamer connection" "$stream_wait_seconds" "$streamer_log" 'Quest stream client connected'
 wait_for_file_pattern "streamed VIDEO_FRAME packets" "$stream_wait_seconds" "$streamer_log" '"event":"streamed"'
 wait_for_quest_display_logs
@@ -382,7 +440,8 @@ METALXR_SCREENSHOT_PATH="$screenshot_path" "$repo_root/Scripts/probe-quest-clien
 echo "MetalXR Play Mode workflow smoke passed."
 echo "Unity log: $unity_log"
 echo "Runtime log: $runtime_log"
-echo "Frame exports: $frame_export_dir"
+echo "Frame exports: ${frame_export_dir:-disabled}"
+echo "Frame export socket: ${frame_export_socket:-disabled}"
 echo "Streamer log: $streamer_log"
 echo "Quest screenshot: $screenshot_path"
 workflow_complete=1

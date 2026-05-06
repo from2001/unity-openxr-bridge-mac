@@ -52,6 +52,7 @@ typedef struct StreamerOptions {
     FrameSourceMode frameSource;
     char frameExportDir[1024];
     char frameExportSocketPath[1024];
+    int frameExportWaitMs;
     int clockSyncIntervalMs;
     int64_t predictionOffsetNs;
     char trackingStatePath[1024];
@@ -253,7 +254,7 @@ static void print_usage(const char* argv0)
             "[--width N] [--height N] [--bitrate BPS] [--tracking-state-path PATH] "
             "[--haptic-command-path PATH] [--timing-state-path PATH] [--queue-depth N] "
             "[--frame-source synthetic|unity-export] [--frame-export-dir PATH] "
-            "[--frame-export-socket PATH] "
+            "[--frame-export-socket PATH] [--frame-export-wait-ms N] "
             "[--shared-state-name NAME] [--no-shared-state] "
             "[--prediction-offset-ms N] [--clock-sync-interval-ms N] "
             "[--reconnect-attempts N] [--no-realtime]\n\n"
@@ -291,6 +292,7 @@ static StreamerOptions parse_options(int argc, char** argv)
     options.frameSource = FRAME_SOURCE_SYNTHETIC;
     options.frameExportDir[0] = '\0';
     options.frameExportSocketPath[0] = '\0';
+    options.frameExportWaitMs = 3000;
     snprintf(options.sharedStateName, sizeof(options.sharedStateName), "%s", metalxr_shared_state_default_name());
     options.useSharedState = 1;
     options.clockSyncIntervalMs = 500;
@@ -345,6 +347,8 @@ static StreamerOptions parse_options(int argc, char** argv)
             snprintf(options.frameExportDir, sizeof(options.frameExportDir), "%s", argv[++i]);
         } else if (strcmp(arg, "--frame-export-socket") == 0 && i + 1 < argc) {
             snprintf(options.frameExportSocketPath, sizeof(options.frameExportSocketPath), "%s", argv[++i]);
+        } else if (strcmp(arg, "--frame-export-wait-ms") == 0 && i + 1 < argc) {
+            options.frameExportWaitMs = parse_int_arg(argv[++i], "frame export wait ms", 0, 600000);
         } else if (strcmp(arg, "--shared-state-name") == 0 && i + 1 < argc) {
             snprintf(options.sharedStateName, sizeof(options.sharedStateName), "%s", argv[++i]);
         } else if (strcmp(arg, "--no-shared-state") == 0) {
@@ -2722,7 +2726,8 @@ static int configure_unity_export_stream(
     }
 
     const uint64_t waitStartNs = host_time_ns();
-    const uint64_t waitDeadlineNs = waitStartNs + 3000000000ull;
+    const uint64_t waitDeadlineNs =
+        waitStartNs + ((uint64_t)activeOptions->frameExportWaitMs * 1000000ull);
     while (!poll_unity_export_frame_source(source, initialPair) &&
            source->socketPath[0] != '\0' &&
            host_time_ns() < waitDeadlineNs) {
@@ -2975,7 +2980,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d reconnect_attempts=%d source=%s export_dir=%s export_socket=%s prediction_offset_ns=%" PRId64 " shared_state=%s tracking=%s haptics=%s timing=%s\n",
+    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d reconnect_attempts=%d source=%s export_dir=%s export_socket=%s export_wait_ms=%d prediction_offset_ns=%" PRId64 " shared_state=%s tracking=%s haptics=%s timing=%s\n",
            options.bindHost,
            options.port,
            options.width,
@@ -2988,6 +2993,7 @@ int main(int argc, char** argv)
            frame_source_name(options.frameSource),
            options.frameExportDir[0] != '\0' ? options.frameExportDir : "-",
            options.frameExportSocketPath[0] != '\0' ? options.frameExportSocketPath : "-",
+           options.frameExportWaitMs,
            options.predictionOffsetNs,
            options.useSharedState ? options.sharedStateName : "disabled",
            options.trackingStatePath,
