@@ -85,7 +85,7 @@ For GLES experiments, build a dedicated APK with:
 METALXR_QUEST_GRAPHICS_API=gles3 Scripts/build-quest-client-apk.sh
 ```
 
-Then launch the full workflow with `METALXR_QUEST_SURFACE_DECODE=1`. A second opt-in, `METALXR_QUEST_SURFACE_PRESENT=1`, asks the Unity client to wrap the decoded external texture with `Texture2D.CreateExternalTexture` and bind it to the per-eye presentation materials. This is still experimental and does not yet advertise `METALXR_CAPABILITY_SURFACE_DECODE`; the Image-plane path remains the supported diagnostic fallback until external texture creation, sampling, and compositor presentation are proven on device. In the current Unity client, Java-side GLES texture creation can still fail even in a GLES3 build because it is not yet routed through Unity's render thread or a native plugin event.
+Then launch the full workflow with `METALXR_QUEST_SURFACE_DECODE=1`. A second opt-in, `METALXR_QUEST_SURFACE_PRESENT=1`, asks the Unity client to wrap the decoded external texture with `Texture2D.CreateExternalTexture` and bind it to the per-eye presentation materials. This is still experimental and does not yet advertise `METALXR_CAPABILITY_SURFACE_DECODE`; the Image-plane path remains the supported diagnostic fallback until external texture update, sampling, and compositor presentation are proven on device. `Runtime/MetalXRQuestGLPlugin` creates external OES texture ids through a Unity render-thread plugin event. The current remaining blocker is moving `SurfaceTexture.updateTexImage()` onto a valid render-thread GL context as well; when that update fails, the client logs it and falls back to MediaCodec Image-plane decode.
 
 To make HMD/casting black-frame regressions visible during device smoke tests, capture and analyze a Quest screenshot:
 
@@ -130,6 +130,8 @@ The default output is `TestProjects/UnityOpenXRSmoke/Builds/MetalXRQuestClient.a
 - Android internet permission
 - Android XR Management settings with the Unity OpenXR loader assigned
 - Meta Quest OpenXR support, hand tracking manifest entries, and the Hand Interaction Profile so adb launch does not require awake controllers
+
+The APK build script also builds the Android ARM64 native helper `libmetalxrquestgl.so` from `Runtime/MetalXRQuestGLPlugin`. That generated plugin is kept under `Assets/Plugins/Android/libs/arm64-v8a` for Unity packaging and is ignored by git. Set `METALXR_QUEST_BUILD_GL_PLUGIN=0` only when reusing an already-built local copy.
 
 ## Install, launch, and logs
 

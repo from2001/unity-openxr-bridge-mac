@@ -13,6 +13,7 @@ Environment:
   UNITY_PROJECT_PATH           Unity project path. Defaults to TestProjects/UnityOpenXRSmoke.
   METALXR_QUEST_BUILD_LOG      Unity batchmode log path. Defaults to TMPDIR/metalxr_quest_client_build.log.
   METALXR_QUEST_GRAPHICS_API   Optional Android graphics API override: gles3, vulkan, or comma-separated order.
+  METALXR_QUEST_BUILD_GL_PLUGIN Build the Android GL native plugin before the APK. Defaults to 1.
 USAGE
 }
 
@@ -26,6 +27,7 @@ project_path="${UNITY_PROJECT_PATH:-$repo_root/TestProjects/UnityOpenXRSmoke}"
 output_apk="${1:-$project_path/Builds/MetalXRQuestClient.apk}"
 build_log="${METALXR_QUEST_BUILD_LOG:-${TMPDIR:-/tmp}/metalxr_quest_client_build.log}"
 quest_graphics_api="${METALXR_QUEST_GRAPHICS_API:-}"
+build_gl_plugin="${METALXR_QUEST_BUILD_GL_PLUGIN:-1}"
 
 if [[ "$output_apk" != /* ]]; then
   output_apk="$repo_root/$output_apk"
@@ -58,6 +60,10 @@ echo "Unity: $unity_app"
 echo "Project: $project_path"
 echo "Output APK: $output_apk"
 echo "Build log: $build_log"
+
+if [[ "$build_gl_plugin" == "1" ]]; then
+  "$repo_root/Scripts/build-quest-gl-plugin.sh"
+fi
 
 if [[ -n "$quest_graphics_api" ]]; then
   build_command=(

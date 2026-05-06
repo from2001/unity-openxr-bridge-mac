@@ -7,3 +7,4 @@ Runtime/MetalXRHost/build/
 Runtime/MetalXRProtocol/build/
 Builds/
 TestProjects/UnityOpenXRSmoke/Builds/
+TestProjects/UnityOpenXRSmoke/Assets/Plugins/Android/libs/
