@@ -6,6 +6,7 @@ set(METALXR_PROTOCOL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../MetalXRProtocol")
 
 add_library(metalxr_protocol_host STATIC
     "${METALXR_PROTOCOL_DIR}/src/metalxr_protocol.c"
+    "${METALXR_PROTOCOL_DIR}/src/metalxr_shared_state.c"
 )
 
 target_include_directories(metalxr_protocol_host

@@ -44,10 +44,10 @@ The current implementation deliberately keeps several development-only boundarie
 
 - Unity-submitted Metal frames are exported through CPU readback and files before the host encoder reads them.
 - The host applies the Quest HELLO device profile for stream compatibility, but the runtime still uses a fixed development view configuration until the profile bridge moves into runtime-host IPC.
-- Runtime-host tracking, timing, and haptics use debug text files.
+- Runtime-host tracking, timing, and haptics now have a POSIX shared-state bridge; debug text files remain as fallback and diagnostics.
 - The Quest client uses a Unity diagnostic presentation path and keeps a CPU MediaCodec Image-plane fallback.
 
-The next production-oriented milestones are to replace those boundaries with timestamped IPC/shared state, shared GPU or encoder-compatible frame resources, explicit projection metadata, and a Quest presentation path that is aware of frame pose/FOV rather than just showing diagnostic panels.
+The next production-oriented milestones are to move the shared-state bridge to richer IPC/ring ownership, replace file-based frame export with shared GPU or encoder-compatible frame resources, and add a Quest presentation path that is aware of frame pose/FOV rather than just showing diagnostic panels.
 
 ## Repository Layout
 

@@ -1,4 +1,5 @@
 #include "MetalXRRuntime/openxr_minimal.h"
+#include "MetalXRProtocol/metalxr_shared_state.h"
 
 #include <dlfcn.h>
 #include <inttypes.h>
@@ -492,6 +493,85 @@ static const char* metalxr_timing_state_path(void)
     return path != NULL && path[0] != '\0' ? path : "/tmp/metalxr_timing_state.txt";
 }
 
+static const char* metalxr_shared_state_name(void)
+{
+    const char* name = getenv("METALXR_SHARED_STATE_NAME");
+    return name != NULL && name[0] != '\0' ? name : metalxr_shared_state_default_name();
+}
+
+static int metalxr_shared_state_disabled(void)
+{
+    const char* value = getenv("METALXR_DISABLE_SHARED_STATE");
+    return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
+}
+
+static pthread_mutex_t g_sharedStateMutex = PTHREAD_MUTEX_INITIALIZER;
+static MetalXRSharedStateMapping g_sharedStateMapping;
+static int g_sharedStateAttempted = 0;
+static int g_sharedStateAvailable = 0;
+static uint64_t g_sharedStateLastAttemptNs = 0;
+
+static int metalxr_shared_state_heartbeat_is_stale(MetalXRSharedStateMapping* mapping, uint64_t nowNs)
+{
+    const uint64_t heartbeatNs = metalxr_shared_state_host_heartbeat_ns(mapping);
+    if (heartbeatNs == 0) {
+        return 1;
+    }
+    if (nowNs == 0 || nowNs <= heartbeatNs) {
+        return 0;
+    }
+
+    return nowNs - heartbeatNs > 3000000000ull;
+}
+
+static MetalXRSharedStateMapping* metalxr_runtime_shared_state(void)
+{
+    if (metalxr_shared_state_disabled()) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&g_sharedStateMutex);
+    const uint64_t nowNs = metalxr_now_ns();
+    if (g_sharedStateAvailable &&
+        metalxr_shared_state_heartbeat_is_stale(&g_sharedStateMapping, nowNs)) {
+        metalxr_log("shared state stale name=%s; reconnecting", g_sharedStateMapping.name);
+        metalxr_shared_state_close(&g_sharedStateMapping);
+        g_sharedStateAvailable = 0;
+        g_sharedStateLastAttemptNs = 0;
+    }
+
+    const int shouldAttempt =
+        !g_sharedStateAvailable &&
+        (g_sharedStateLastAttemptNs == 0 ||
+         nowNs == 0 ||
+         nowNs - g_sharedStateLastAttemptNs >= 1000000000ull);
+    if (shouldAttempt) {
+        char errorMessage[256];
+        errorMessage[0] = '\0';
+        g_sharedStateLastAttemptNs = nowNs;
+        g_sharedStateAvailable = metalxr_shared_state_open(&g_sharedStateMapping,
+                                                           metalxr_shared_state_name(),
+                                                           0,
+                                                           errorMessage,
+                                                           sizeof(errorMessage));
+        if (g_sharedStateAvailable &&
+            metalxr_shared_state_heartbeat_is_stale(&g_sharedStateMapping, nowNs)) {
+            metalxr_shared_state_close(&g_sharedStateMapping);
+            g_sharedStateAvailable = 0;
+            snprintf(errorMessage, sizeof(errorMessage), "host heartbeat is stale");
+        }
+        if (g_sharedStateAvailable) {
+            metalxr_log("shared state connected name=%s", metalxr_shared_state_name());
+        } else if (!g_sharedStateAttempted && errorMessage[0] != '\0') {
+            metalxr_log("shared state unavailable name=%s reason=%s", metalxr_shared_state_name(), errorMessage);
+        }
+        g_sharedStateAttempted = 1;
+    }
+    MetalXRSharedStateMapping* mapping = g_sharedStateAvailable ? &g_sharedStateMapping : NULL;
+    pthread_mutex_unlock(&g_sharedStateMutex);
+    return mapping;
+}
+
 static int metalxr_env_int(const char* name, int fallback, int minValue, int maxValue)
 {
     const char* value = getenv(name);
@@ -545,6 +625,7 @@ static int64_t metalxr_prediction_offset_ns(int64_t fallbackNs)
 
 typedef struct MetalXrRuntimeTimingState {
     int loaded;
+    uint64_t sharedSequence;
     uint64_t sampleId;
     uint64_t hostTimestampNs;
     int64_t clockOffsetNs;
@@ -554,11 +635,49 @@ typedef struct MetalXrRuntimeTimingState {
     int64_t predictionOffsetNs;
 } MetalXrRuntimeTimingState;
 
+static int metalxr_load_shared_runtime_timing_state(MetalXrRuntimeTimingState* state)
+{
+    if (state == NULL) {
+        return 0;
+    }
+
+    MetalXRSharedStateMapping* mapping = metalxr_runtime_shared_state();
+    if (mapping == NULL) {
+        return 0;
+    }
+
+    MetalXRSharedTimingState shared;
+    memset(&shared, 0, sizeof(shared));
+    uint32_t sequence = 0;
+    if (!metalxr_shared_state_read_timing(mapping, &shared, &sequence)) {
+        return 0;
+    }
+
+    state->loaded = 1;
+    state->sharedSequence = sequence;
+    state->sampleId = shared.timingSamples;
+    state->hostTimestampNs = shared.hostTimestampNs;
+    state->clockOffsetNs = shared.clockOffsetNs;
+    state->clockRttNs = shared.clockRttNs;
+    state->measuredFramePeriodNs = shared.measuredFramePeriodNs;
+    state->lastDisplayHostNs = shared.lastDisplayHostNs;
+    state->predictionOffsetNs = shared.predictionOffsetNs;
+    return 1;
+}
+
 static MetalXrRuntimeTimingState metalxr_load_runtime_timing_state(void)
 {
     MetalXrRuntimeTimingState state;
     memset(&state, 0, sizeof(state));
     state.measuredFramePeriodNs = (uint64_t)metalxr_configured_frame_period_ns();
+
+    if (metalxr_load_shared_runtime_timing_state(&state)) {
+        if (state.measuredFramePeriodNs == 0) {
+            state.measuredFramePeriodNs = (uint64_t)metalxr_configured_frame_period_ns();
+        }
+        state.predictionOffsetNs = metalxr_prediction_offset_ns(state.predictionOffsetNs);
+        return state;
+    }
 
     FILE* input = fopen(metalxr_timing_state_path(), "r");
     if (input == NULL) {
@@ -702,6 +821,29 @@ static void metalxr_apply_tracking_stale_policy(
     metalxr_mark_tracking_state_stale(state);
 }
 
+static void metalxr_apply_shared_tracking_stale_policy(
+    MetalXrTrackingState* state,
+    uint64_t hostTimestampNs)
+{
+    const int timeoutMs = metalxr_env_int("METALXR_TRACKING_STALE_TIMEOUT_MS", 1000, 0, 60000);
+    if (state == NULL || timeoutMs == 0 || hostTimestampNs == 0) {
+        return;
+    }
+
+    const uint64_t nowNs = metalxr_now_ns();
+    if (nowNs == 0 || nowNs <= hostTimestampNs) {
+        return;
+    }
+
+    const uint64_t ageMs = (nowNs - hostTimestampNs) / 1000000ull;
+    if (ageMs <= (uint64_t)timeoutMs) {
+        return;
+    }
+
+    metalxr_log_stale_tracking(ageMs, timeoutMs, state);
+    metalxr_mark_tracking_state_stale(state);
+}
+
 static XrSpaceLocationFlags metalxr_openxr_location_flags(uint32_t trackingFlags)
 {
     XrSpaceLocationFlags flags = 0;
@@ -753,6 +895,39 @@ static int metalxr_load_tracking_state(MetalXrTrackingState* state)
     }
 
     *state = metalxr_default_tracking_state();
+
+    MetalXRSharedStateMapping* mapping = metalxr_runtime_shared_state();
+    if (mapping != NULL) {
+        MetalXRSharedTrackingState shared;
+        memset(&shared, 0, sizeof(shared));
+        uint32_t sequence = 0;
+        if (metalxr_shared_state_read_tracking(mapping, &shared, &sequence)) {
+            state->hmdSampleId = shared.hmd.sampleId;
+            state->hmdTimestampNs = shared.hmd.timestampNs;
+            state->hmdTrackingFlags = shared.hmd.trackingFlags;
+            memcpy(&state->hmdPose.position, shared.hmd.position, sizeof(shared.hmd.position));
+            memcpy(&state->hmdPose.orientation, shared.hmd.orientation, sizeof(shared.hmd.orientation));
+            for (size_t hand = 0; hand < 2; ++hand) {
+                const MetalXRControllerInputPayload* source = &shared.controllers[hand];
+                MetalXrControllerState* target = &state->controllers[hand];
+                target->sampleId = source->sampleId;
+                target->timestampNs = source->timestampNs;
+                target->trackingFlags = source->trackingFlags;
+                target->buttons = source->buttons;
+                target->trigger = source->trigger;
+                target->grip = source->grip;
+                target->thumbstick.x = source->thumbstick[0];
+                target->thumbstick.y = source->thumbstick[1];
+                memcpy(&target->aimPose.position, source->aimPosition, sizeof(source->aimPosition));
+                memcpy(&target->aimPose.orientation, source->aimOrientation, sizeof(source->aimOrientation));
+                memcpy(&target->gripPose.position, source->gripPosition, sizeof(source->gripPosition));
+                memcpy(&target->gripPose.orientation, source->gripOrientation, sizeof(source->gripOrientation));
+            }
+            metalxr_apply_shared_tracking_stale_policy(state, shared.hostTimestampNs);
+            return 1;
+        }
+    }
+
     const char* trackingStatePath = metalxr_tracking_state_path();
     struct stat metadata;
     const int hasMetadata = stat(trackingStatePath, &metadata) == 0;
@@ -2391,23 +2566,35 @@ static XrResult XRAPI_CALL metalxr_xrApplyHapticFeedback(
     const uint64_t commandId = g_nextHapticCommandId++;
     pthread_mutex_unlock(&g_mutex);
 
+    MetalXRHapticCommandPayload command;
+    memset(&command, 0, sizeof(command));
+    command.commandId = commandId;
+    command.timestampNs = (uint64_t)metalxr_now_ns();
+    command.hand = hand;
+    command.amplitude = vibration->amplitude;
+    command.frequencyHz = vibration->frequency;
+    if (vibration->duration > 0) {
+        command.durationUs = (uint32_t)(vibration->duration / 1000);
+    }
+
+    MetalXRSharedStateMapping* mapping = metalxr_runtime_shared_state();
+    if (mapping != NULL) {
+        metalxr_shared_state_write_haptic(mapping, &command);
+    }
+
     const char* commandPath = metalxr_haptic_command_path();
     char tempPath[1200];
     snprintf(tempPath, sizeof(tempPath), "%s.tmp", commandPath);
     FILE* output = fopen(tempPath, "w");
     if (output != NULL) {
-        uint32_t durationUs = 0;
-        if (vibration->duration > 0) {
-            durationUs = (uint32_t)(vibration->duration / 1000);
-        }
         fprintf(output,
                 "%" PRIu64 " %" PRIu64 " %u %.6f %.6f %u\n",
-                commandId,
-                (uint64_t)metalxr_now_ns(),
-                hand,
-                vibration->amplitude,
-                vibration->frequency,
-                durationUs);
+                command.commandId,
+                command.timestampNs,
+                command.hand,
+                command.amplitude,
+                command.frequencyHz,
+                command.durationUs);
         fclose(output);
         (void)rename(tempPath, commandPath);
     }

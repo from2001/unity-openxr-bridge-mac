@@ -4,6 +4,7 @@ project(MetalXRProtocol LANGUAGES C)
 
 add_library(metalxr_protocol STATIC
     src/metalxr_protocol.c
+    src/metalxr_shared_state.c
 )
 
 target_include_directories(metalxr_protocol

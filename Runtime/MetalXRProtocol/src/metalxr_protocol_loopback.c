@@ -1,7 +1,9 @@
 #include "MetalXRProtocol/metalxr_protocol.h"
+#include "MetalXRProtocol/metalxr_shared_state.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -261,6 +263,109 @@ static int run_version_mismatch_loopback(void)
     return 1;
 }
 
+static int run_shared_state_loopback(void)
+{
+    char name[METALXR_SHARED_STATE_NAME_SIZE];
+    snprintf(name, sizeof(name), "/mxr_lb_%ld", (long)getpid());
+    (void)shm_unlink(name);
+
+    char errorMessage[256];
+    errorMessage[0] = '\0';
+    MetalXRSharedStateMapping writer;
+    if (!metalxr_shared_state_open(&writer, name, 1, errorMessage, sizeof(errorMessage))) {
+        fprintf(stderr, "failed to create shared state: %s\n", errorMessage);
+        return 0;
+    }
+
+    MetalXRSharedStateMapping reader;
+    errorMessage[0] = '\0';
+    if (!metalxr_shared_state_open(&reader, name, 0, errorMessage, sizeof(errorMessage))) {
+        fprintf(stderr, "failed to open shared state reader: %s\n", errorMessage);
+        metalxr_shared_state_close(&writer);
+        (void)shm_unlink(name);
+        return 0;
+    }
+
+    metalxr_shared_state_write_host_heartbeat(&writer, 123456789ull);
+    if (metalxr_shared_state_host_heartbeat_ns(&reader) != 123456789ull) {
+        fprintf(stderr, "shared state heartbeat did not round-trip\n");
+        metalxr_shared_state_close(&reader);
+        metalxr_shared_state_close(&writer);
+        (void)shm_unlink(name);
+        return 0;
+    }
+
+    MetalXRSharedTrackingState tracking;
+    memset(&tracking, 0, sizeof(tracking));
+    tracking.hostTimestampNs = 123456790ull;
+    tracking.hmd.sampleId = 7;
+    tracking.hmd.position[0] = 1.0f;
+    tracking.hmd.orientation[3] = 1.0f;
+    tracking.hmd.trackingFlags = METALXR_TRACKING_ORIENTATION_VALID |
+                                 METALXR_TRACKING_POSITION_VALID;
+    tracking.controllers[0].hand = METALXR_CONTROLLER_HAND_LEFT;
+    tracking.controllers[0].trigger = 0.5f;
+    tracking.controllers[0].aimOrientation[3] = 1.0f;
+    tracking.controllers[0].gripOrientation[3] = 1.0f;
+    metalxr_shared_state_write_tracking(&writer, &tracking);
+
+    MetalXRSharedTrackingState trackingRead;
+    uint32_t sequence = 0;
+    if (!metalxr_shared_state_read_tracking(&reader, &trackingRead, &sequence) ||
+        trackingRead.hmd.sampleId != 7 ||
+        trackingRead.controllers[0].trigger != 0.5f) {
+        fprintf(stderr, "shared tracking state did not round-trip\n");
+        metalxr_shared_state_close(&reader);
+        metalxr_shared_state_close(&writer);
+        (void)shm_unlink(name);
+        return 0;
+    }
+
+    MetalXRSharedTimingState timing;
+    memset(&timing, 0, sizeof(timing));
+    timing.hostTimestampNs = 123456791ull;
+    timing.timingSamples = 3;
+    timing.measuredFramePeriodNs = 16666666ull;
+    timing.lastDisplayHostNs = 123456000ull;
+    metalxr_shared_state_write_timing(&writer, &timing);
+
+    MetalXRSharedTimingState timingRead;
+    if (!metalxr_shared_state_read_timing(&reader, &timingRead, &sequence) ||
+        timingRead.timingSamples != 3 ||
+        timingRead.measuredFramePeriodNs != 16666666ull) {
+        fprintf(stderr, "shared timing state did not round-trip\n");
+        metalxr_shared_state_close(&reader);
+        metalxr_shared_state_close(&writer);
+        (void)shm_unlink(name);
+        return 0;
+    }
+
+    MetalXRHapticCommandPayload haptic;
+    memset(&haptic, 0, sizeof(haptic));
+    haptic.commandId = 42;
+    haptic.hand = METALXR_CONTROLLER_HAND_RIGHT;
+    haptic.amplitude = 0.75f;
+    haptic.durationUs = 12000;
+    metalxr_shared_state_write_haptic(&writer, &haptic);
+
+    MetalXRHapticCommandPayload hapticRead;
+    if (!metalxr_shared_state_read_haptic(&reader, &hapticRead, &sequence) ||
+        hapticRead.commandId != 42 ||
+        hapticRead.hand != METALXR_CONTROLLER_HAND_RIGHT) {
+        fprintf(stderr, "shared haptic state did not round-trip\n");
+        metalxr_shared_state_close(&reader);
+        metalxr_shared_state_close(&writer);
+        (void)shm_unlink(name);
+        return 0;
+    }
+
+    metalxr_shared_state_close(&reader);
+    metalxr_shared_state_close(&writer);
+    (void)shm_unlink(name);
+    printf("shared state loopback passed\n");
+    return 1;
+}
+
 int main(void)
 {
     if (!run_successful_loopback()) {
@@ -268,6 +373,10 @@ int main(void)
     }
 
     if (!run_version_mismatch_loopback()) {
+        return 1;
+    }
+
+    if (!run_shared_state_loopback()) {
         return 1;
     }
 

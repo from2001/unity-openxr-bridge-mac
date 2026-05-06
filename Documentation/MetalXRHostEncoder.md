@@ -70,6 +70,8 @@ The streamer reads `<export-dir>/frames.jsonl`, selects the latest complete left
 
 For normal Play Mode sessions, `METALXR_STREAM_FRAMES=0` keeps the streamer alive and waits for a Quest client to reconnect after the app restarts or USB transport drops. Finite smoke tests can set `METALXR_STREAM_RECONNECT_ATTEMPTS=N`; the streamer logs `client_disconnect` and `reconnect_wait` records before accepting the next client. When `METALXR_STREAM_FPS` is not set, the host uses the Quest HELLO `preferredFps`; explicit FPS values are capped to the client preferred rate. `METALXR_STREAM_QUEUE_DEPTH`, `METALXR_STREAM_BITRATE`, resolution, frame rate, `METALXR_PREDICTION_OFFSET_MS`, and `METALXR_CLOCK_SYNC_INTERVAL_MS` remain the primary tuning controls for latency and backlog.
 
+The host creates a POSIX shared-state object named by `METALXR_SHARED_STATE_NAME` (default `/metalxr_runtime_state`) for runtime-facing tracking, timing, and haptic state. `METALXR_DISABLE_SHARED_STATE=1` keeps the older text-file bridge as the only state path for debugging.
+
 ## Metadata
 
 Each encoded frame emits one JSONL record:
