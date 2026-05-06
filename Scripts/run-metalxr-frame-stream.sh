@@ -26,6 +26,8 @@ Environment:
   METALXR_FRAME_SOURCE        synthetic or unity-export. Defaults to synthetic.
   METALXR_FRAME_EXPORT_DIR    Runtime frame export directory for unity-export source.
   METALXR_FRAME_EXPORT_SOCKET Runtime frame export datagram socket for unity-export source.
+  METALXR_FRAME_EXPORT_WAIT_MS
+                              Initial wait for a complete unity-export stereo pair. Defaults to 3000.
   METALXR_PREDICTION_OFFSET_MS
                               Signed prediction offset in milliseconds. Defaults to 0.
   METALXR_CLOCK_SYNC_INTERVAL_MS
@@ -59,6 +61,7 @@ reconnect_attempts="${METALXR_STREAM_RECONNECT_ATTEMPTS:-0}"
 frame_source="${METALXR_FRAME_SOURCE:-synthetic}"
 frame_export_dir="${METALXR_FRAME_EXPORT_DIR:-}"
 frame_export_socket="${METALXR_FRAME_EXPORT_SOCKET:-}"
+frame_export_wait_ms="${METALXR_FRAME_EXPORT_WAIT_MS:-3000}"
 prediction_offset_ms="${METALXR_PREDICTION_OFFSET_MS:-0}"
 clock_sync_interval_ms="${METALXR_CLOCK_SYNC_INTERVAL_MS:-500}"
 shared_state_name="${METALXR_SHARED_STATE_NAME:-/metalxr_runtime_state}"
@@ -142,6 +145,7 @@ streamer_args=(
   --queue-depth "$queue_depth"
   --reconnect-attempts "$reconnect_attempts"
   --frame-source "$frame_source"
+  --frame-export-wait-ms "$frame_export_wait_ms"
   --prediction-offset-ms "$prediction_offset_ms"
   --clock-sync-interval-ms "$clock_sync_interval_ms"
   --shared-state-name "$shared_state_name"
