@@ -54,6 +54,7 @@ if(APPLE)
     target_link_libraries(metalxr_host_streamer
         PRIVATE
             metalxr_protocol_host
+            "-framework Accelerate"
             "-framework CoreFoundation"
             "-framework CoreMedia"
             "-framework CoreVideo"
