@@ -1382,6 +1382,10 @@ static IOSurfaceRef metalxr_create_iosurface(
             kCVPixelFormatType_32BGRA :
             kCVPixelFormatType_32RGBA;
     metalxr_cf_dictionary_set_u32(properties, kIOSurfacePixelFormat, pixelFormat);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CFDictionarySetValue(properties, kIOSurfaceIsGlobal, kCFBooleanTrue);
+#pragma clang diagnostic pop
 
     IOSurfaceRef surface = IOSurfaceCreate(properties);
     CFRelease(properties);

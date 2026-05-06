@@ -28,6 +28,10 @@ add_executable(metalxr_host_streamer
     src/metalxr_host_streamer.c
 )
 
+add_executable(metalxr_iosurface_export_fixture
+    src/metalxr_iosurface_export_fixture.c
+)
+
 set_target_properties(metalxr_host_encoder PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED YES
@@ -35,6 +39,12 @@ set_target_properties(metalxr_host_encoder PROPERTIES
 )
 
 set_target_properties(metalxr_host_streamer PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
+set_target_properties(metalxr_iosurface_export_fixture PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED YES
     C_EXTENSIONS NO
@@ -57,6 +67,13 @@ if(APPLE)
             "-framework CoreMedia"
             "-framework CoreVideo"
             "-framework VideoToolbox"
+    )
+
+    target_link_libraries(metalxr_iosurface_export_fixture
+        PRIVATE
+            "-framework CoreFoundation"
+            "-framework CoreVideo"
+            "-framework IOSurface"
     )
 else()
     message(FATAL_ERROR "MetalXR host encoder currently requires macOS VideoToolbox.")
