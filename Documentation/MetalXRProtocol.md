@@ -44,7 +44,7 @@ The host uses the Quest profile to validate the effective stream size and select
 Current Quest presentation flags are:
 
 - `METALXR_CAPABILITY_PROJECTION_PRESENTATION`: the client can consume per-eye OpenXR projection metadata and resize its per-eye presentation surfaces from frame FOV.
-- `METALXR_CAPABILITY_SURFACE_DECODE`: reserved for a future MediaCodec Surface/native texture decode path. The current Unity client does not advertise this flag yet, because Image-plane readback is still the active decode path.
+- `METALXR_CAPABILITY_SURFACE_DECODE`: the client can use the experimental MediaCodec Surface/native texture path. The Unity client advertises this only when Surface decode and external-texture presentation are both explicitly enabled and supported by the active graphics backend. Default Vulkan builds continue to omit it and use the Image-plane diagnostic fallback.
 
 ## Heartbeat
 

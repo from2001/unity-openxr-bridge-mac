@@ -85,7 +85,8 @@ namespace MetalXR.QuestClient
                 LogClientMessage,
                 experimentalSurfaceDecode,
                 experimentalSurfacePresent);
-            _handshakeClient = new MetalXRQuestHandshakeClient(endpoint, deviceProfile);
+            uint clientCapabilities = CreateClientCapabilities(experimentalSurfaceDecode, experimentalSurfacePresent);
+            _handshakeClient = new MetalXRQuestHandshakeClient(endpoint, deviceProfile, clientCapabilities);
             _handshakeClient.Start();
 
             Debug.Log(
@@ -93,7 +94,8 @@ namespace MetalXR.QuestClient
                 endpoint.Host + ":" + endpoint.Port +
                 " graphics=" + SystemInfo.graphicsDeviceType +
                 " experimental_surface_decode=" + experimentalSurfaceDecode +
-                " experimental_surface_present=" + experimentalSurfacePresent);
+                " experimental_surface_present=" + experimentalSurfacePresent +
+                " capabilities=0x" + clientCapabilities.ToString("x8"));
         }
 
         private void Update()
@@ -198,6 +200,17 @@ namespace MetalXR.QuestClient
         {
             return SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3 ||
                    SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES2;
+        }
+
+        private static uint CreateClientCapabilities(bool experimentalSurfaceDecode, bool experimentalSurfacePresent)
+        {
+            uint capabilities = MetalXRQuestProtocol.DefaultClientCapabilities;
+            if (experimentalSurfaceDecode && experimentalSurfacePresent)
+            {
+                capabilities |= MetalXRQuestProtocol.CapabilitySurfaceDecode;
+            }
+
+            return capabilities;
         }
 
         private static bool ReadExperimentalBooleanFlag(string commandLineFlag, string intentExtraName, bool defaultValue)
