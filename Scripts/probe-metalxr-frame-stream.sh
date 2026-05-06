@@ -358,6 +358,12 @@ PY
     exit 1
   fi
 
+  if ! grep -q '"event":"pixel_buffer_pool"' "$log_file"; then
+    echo "Streamer did not create encoder pixel buffer pools in $name." >&2
+    cat "$log_file" >&2
+    exit 1
+  fi
+
   if [[ "$frame_source" == "synthetic" ]]; then
     grep -q 'source=synthetic' "$log_file"
   else

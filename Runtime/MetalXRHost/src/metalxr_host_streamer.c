@@ -185,6 +185,7 @@ typedef struct EncoderContext {
     int height;
     int fps;
     VTCompressionSessionRef session;
+    CVPixelBufferPoolRef pixelBufferPool;
     StreamSession* stream;
     EncoderStats stats;
     pthread_mutex_t queueLock;
@@ -1070,21 +1071,104 @@ static void fill_synthetic_frame(CVPixelBufferRef pixelBuffer, uint64_t frameId,
     CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
 }
 
-static CVPixelBufferRef create_synthetic_pixel_buffer(int width, int height, uint64_t frameId, int eye)
+static void set_cf_int(CFMutableDictionaryRef dictionary, CFStringRef key, int value)
 {
-    CVPixelBufferRef pixelBuffer = NULL;
-    const OSStatus status = CVPixelBufferCreate(
+    if (dictionary == NULL || key == NULL) {
+        return;
+    }
+
+    CFNumberRef number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &value);
+    if (number == NULL) {
+        return;
+    }
+    CFDictionarySetValue(dictionary, key, number);
+    CFRelease(number);
+}
+
+static CVPixelBufferPoolRef create_encoder_pixel_buffer_pool(
+    int width,
+    int height,
+    int minBufferCount)
+{
+    CFMutableDictionaryRef poolAttributes = CFDictionaryCreateMutable(
         kCFAllocatorDefault,
-        (size_t)width,
-        (size_t)height,
-        kCVPixelFormatType_32BGRA,
-        NULL,
-        &pixelBuffer);
-    if (status != kCVReturnSuccess || pixelBuffer == NULL) {
+        0,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    CFMutableDictionaryRef pixelAttributes = CFDictionaryCreateMutable(
+        kCFAllocatorDefault,
+        0,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    CFMutableDictionaryRef iosurfaceProperties = CFDictionaryCreateMutable(
+        kCFAllocatorDefault,
+        0,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+
+    if (poolAttributes == NULL || pixelAttributes == NULL || iosurfaceProperties == NULL) {
+        if (poolAttributes != NULL) {
+            CFRelease(poolAttributes);
+        }
+        if (pixelAttributes != NULL) {
+            CFRelease(pixelAttributes);
+        }
+        if (iosurfaceProperties != NULL) {
+            CFRelease(iosurfaceProperties);
+        }
         return NULL;
     }
 
-    fill_synthetic_frame(pixelBuffer, frameId, eye);
+    set_cf_int(poolAttributes, kCVPixelBufferPoolMinimumBufferCountKey, minBufferCount);
+    set_cf_int(pixelAttributes, kCVPixelBufferWidthKey, width);
+    set_cf_int(pixelAttributes, kCVPixelBufferHeightKey, height);
+    set_cf_int(pixelAttributes, kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA);
+    CFDictionarySetValue(pixelAttributes, kCVPixelBufferIOSurfacePropertiesKey, iosurfaceProperties);
+    CFDictionarySetValue(pixelAttributes, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
+
+    CVPixelBufferPoolRef pool = NULL;
+    const CVReturn status = CVPixelBufferPoolCreate(
+        kCFAllocatorDefault,
+        poolAttributes,
+        pixelAttributes,
+        &pool);
+
+    CFRelease(iosurfaceProperties);
+    CFRelease(pixelAttributes);
+    CFRelease(poolAttributes);
+
+    if (status != kCVReturnSuccess) {
+        return NULL;
+    }
+    return pool;
+}
+
+static CVPixelBufferRef create_encoder_pool_pixel_buffer(EncoderContext* context)
+{
+    if (context == NULL || context->pixelBufferPool == NULL) {
+        return NULL;
+    }
+
+    CVPixelBufferRef pixelBuffer = NULL;
+    const CVReturn status = CVPixelBufferPoolCreatePixelBuffer(
+        kCFAllocatorDefault,
+        context->pixelBufferPool,
+        &pixelBuffer);
+    if (status != kCVReturnSuccess) {
+        return NULL;
+    }
+
+    return pixelBuffer;
+}
+
+static CVPixelBufferRef create_synthetic_pixel_buffer(EncoderContext* context, uint64_t frameId)
+{
+    CVPixelBufferRef pixelBuffer = create_encoder_pool_pixel_buffer(context);
+    if (pixelBuffer == NULL) {
+        return NULL;
+    }
+
+    fill_synthetic_frame(pixelBuffer, frameId, context->eyeIndex);
     return pixelBuffer;
 }
 
@@ -1101,12 +1185,16 @@ static int read_file_exact(const char* path, uint8_t* data, size_t size)
     return ok;
 }
 
-static CVPixelBufferRef create_unity_export_pixel_buffer(const UnityExportRecord* record)
+static CVPixelBufferRef create_unity_export_pixel_buffer(
+    EncoderContext* context,
+    const UnityExportRecord* record)
 {
-    if (record == NULL ||
+    if (context == NULL || record == NULL ||
         (strcmp(record->payloadFormat, "BGRA8") != 0 &&
          strcmp(record->payloadFormat, "RGBA8") != 0) ||
         record->width <= 0 || record->height <= 0 ||
+        record->width != context->width ||
+        record->height != context->height ||
         record->bytesPerRow < (size_t)record->width * 4u ||
         record->bytesPerRow > SIZE_MAX / (size_t)record->height ||
         record->payloadBytes < record->bytesPerRow * (size_t)record->height ||
@@ -1124,15 +1212,8 @@ static CVPixelBufferRef create_unity_export_pixel_buffer(const UnityExportRecord
         return NULL;
     }
 
-    CVPixelBufferRef pixelBuffer = NULL;
-    const OSStatus createStatus = CVPixelBufferCreate(
-        kCFAllocatorDefault,
-        (size_t)record->width,
-        (size_t)record->height,
-        kCVPixelFormatType_32BGRA,
-        NULL,
-        &pixelBuffer);
-    if (createStatus != kCVReturnSuccess || pixelBuffer == NULL) {
+    CVPixelBufferRef pixelBuffer = create_encoder_pool_pixel_buffer(context);
+    if (pixelBuffer == NULL) {
         free(payload);
         return NULL;
     }
@@ -1179,6 +1260,26 @@ static int create_encoder(EncoderContext* context, const StreamerOptions* option
     context->maxQueueDepth = (uint32_t)options->queueDepth;
     pthread_mutex_init(&context->queueLock, NULL);
     context->queueLockInitialized = 1;
+    context->pixelBufferPool = create_encoder_pixel_buffer_pool(
+        options->width,
+        options->height,
+        options->queueDepth + 2);
+    if (context->pixelBufferPool == NULL) {
+        fprintf(stderr, "CVPixelBufferPoolCreate failed for %s %dx%d\n",
+                context->eyeName,
+                options->width,
+                options->height);
+        return 0;
+    }
+    printf("{\"event\":\"pixel_buffer_pool\",\"eye\":%d,\"eye_name\":\"%s\","
+           "\"width\":%d,\"height\":%d,\"min_buffers\":%d,"
+           "\"iosurface\":true,\"metal_compatible\":true}\n",
+           context->eyeIndex,
+           context->eyeName,
+           options->width,
+           options->height,
+           options->queueDepth + 2);
+    fflush(stdout);
 
     OSStatus status = VTCompressionSessionCreate(
         kCFAllocatorDefault,
@@ -1328,8 +1429,7 @@ static int encode_synthetic_eye_frame(
     uint64_t captureTimeNs,
     uint64_t predictedDisplayTimeNs)
 {
-    CVPixelBufferRef pixelBuffer =
-        create_synthetic_pixel_buffer(context->width, context->height, frameId, context->eyeIndex);
+    CVPixelBufferRef pixelBuffer = create_synthetic_pixel_buffer(context, frameId);
     if (pixelBuffer == NULL) {
         fprintf(stderr, "Failed to create synthetic pixel buffer for %s frame %" PRIu64 "\n",
                 context->eyeName,
@@ -1369,7 +1469,7 @@ static int encode_unity_export_eye_frame(
         return 0;
     }
 
-    CVPixelBufferRef pixelBuffer = create_unity_export_pixel_buffer(record);
+    CVPixelBufferRef pixelBuffer = create_unity_export_pixel_buffer(context, record);
     if (pixelBuffer == NULL) {
         fprintf(stderr,
                 "{\"event\":\"drop\",\"reason\":\"unity_export_payload\","
@@ -1401,6 +1501,10 @@ static void destroy_encoder(EncoderContext* context)
         VTCompressionSessionInvalidate(context->session);
         CFRelease(context->session);
         context->session = NULL;
+    }
+    if (context->pixelBufferPool != NULL) {
+        CVPixelBufferPoolRelease(context->pixelBufferPool);
+        context->pixelBufferPool = NULL;
     }
     if (context->queueLockInitialized) {
         pthread_mutex_destroy(&context->queueLock);
