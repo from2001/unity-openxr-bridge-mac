@@ -1338,6 +1338,55 @@ static CVPixelBufferRef create_unity_export_iosurface_pixel_buffer(
         return NULL;
     }
 
+    if (strcmp(record->payloadFormat, "IOSurfaceRGBA8") == 0) {
+        if ((int)IOSurfaceGetWidth(surface) != record->width ||
+            (int)IOSurfaceGetHeight(surface) != record->height ||
+            IOSurfaceGetBytesPerRow(surface) < (size_t)record->width * 4u) {
+            CFRelease(surface);
+            return NULL;
+        }
+
+        CVPixelBufferRef convertedPixelBuffer = create_encoder_pool_pixel_buffer(context);
+        if (convertedPixelBuffer == NULL) {
+            CFRelease(surface);
+            return NULL;
+        }
+
+        if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) {
+            CVPixelBufferRelease(convertedPixelBuffer);
+            CFRelease(surface);
+            return NULL;
+        }
+        if (CVPixelBufferLockBaseAddress(convertedPixelBuffer, 0) != kCVReturnSuccess) {
+            IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+            CVPixelBufferRelease(convertedPixelBuffer);
+            CFRelease(surface);
+            return NULL;
+        }
+
+        const uint8_t* sourceBase = (const uint8_t*)IOSurfaceGetBaseAddress(surface);
+        const size_t sourceBytesPerRow = IOSurfaceGetBytesPerRow(surface);
+        uint8_t* destinationBase = (uint8_t*)CVPixelBufferGetBaseAddress(convertedPixelBuffer);
+        const size_t destinationBytesPerRow = CVPixelBufferGetBytesPerRow(convertedPixelBuffer);
+        for (int y = 0; y < record->height; ++y) {
+            const uint8_t* sourceRow = sourceBase + ((size_t)y * sourceBytesPerRow);
+            uint8_t* destinationRow = destinationBase + ((size_t)y * destinationBytesPerRow);
+            for (int x = 0; x < record->width; ++x) {
+                const uint8_t* sourcePixel = sourceRow + ((size_t)x * 4u);
+                uint8_t* destinationPixel = destinationRow + ((size_t)x * 4u);
+                destinationPixel[0] = sourcePixel[2];
+                destinationPixel[1] = sourcePixel[1];
+                destinationPixel[2] = sourcePixel[0];
+                destinationPixel[3] = sourcePixel[3];
+            }
+        }
+
+        CVPixelBufferUnlockBaseAddress(convertedPixelBuffer, 0);
+        IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+        CFRelease(surface);
+        return convertedPixelBuffer;
+    }
+
     CFMutableDictionaryRef attributes = CFDictionaryCreateMutable(
         kCFAllocatorDefault,
         0,
