@@ -10,7 +10,19 @@ import android.view.Surface;
 import java.nio.ByteBuffer;
 
 public final class MetalXRSurfaceDecoder {
+    private static final int MAX_TEXTURE_SLOTS = 2;
+    private static final MetalXRSurfaceDecoder[] DECODERS_BY_SLOT = new MetalXRSurfaceDecoder[MAX_TEXTURE_SLOTS];
+
+    static {
+        try {
+            System.loadLibrary("metalxrquestgl");
+            nativeRegisterClass();
+        } catch (Throwable ignored) {
+        }
+    }
+
     private final String eyeName;
+    private final int textureSlot;
     private final MediaCodec.BufferInfo bufferInfo;
 
     private MediaCodec codec;
@@ -24,10 +36,17 @@ public final class MetalXRSurfaceDecoder {
     private String lastError;
 
     public MetalXRSurfaceDecoder(String eyeName) {
+        this(eyeName, -1);
+    }
+
+    public MetalXRSurfaceDecoder(String eyeName, int textureSlot) {
         this.eyeName = eyeName == null ? "unknown" : eyeName;
+        this.textureSlot = textureSlot;
         this.bufferInfo = new MediaCodec.BufferInfo();
         this.lastError = "";
     }
+
+    private static native void nativeRegisterClass();
 
     public int createExternalTexture() {
         int[] textures = new int[1];
@@ -83,6 +102,7 @@ public final class MetalXRSurfaceDecoder {
             codec = MediaCodec.createDecoderByType("video/avc");
             codec.configure(format, surface, null, 0);
             codec.start();
+            registerSlot();
             lastError = "";
             return true;
         } catch (Exception exception) {
@@ -148,7 +168,7 @@ public final class MetalXRSurfaceDecoder {
     }
 
     public boolean updateTexImage() {
-        if (surfaceTexture == null || !frameAvailable) {
+        if (surfaceTexture == null) {
             return false;
         }
 
@@ -160,6 +180,15 @@ public final class MetalXRSurfaceDecoder {
             lastError = "SurfaceTexture update failed for " + eyeName + " eye: " + exception.getMessage();
             return false;
         }
+    }
+
+    public static boolean updateTexImageForSlot(int textureSlot) {
+        MetalXRSurfaceDecoder decoder = decoderForSlot(textureSlot);
+        if (decoder == null) {
+            return false;
+        }
+
+        return decoder.updateTexImage();
     }
 
     public String getLastError() {
@@ -186,6 +215,8 @@ public final class MetalXRSurfaceDecoder {
     }
 
     private void releaseDecoderOnly() {
+        unregisterSlot();
+
         if (codec != null) {
             try {
                 codec.stop();
@@ -213,5 +244,37 @@ public final class MetalXRSurfaceDecoder {
         configuredWidth = 0;
         configuredHeight = 0;
         frameAvailable = false;
+    }
+
+    private void registerSlot() {
+        if (textureSlot < 0 || textureSlot >= MAX_TEXTURE_SLOTS) {
+            return;
+        }
+
+        synchronized (DECODERS_BY_SLOT) {
+            DECODERS_BY_SLOT[textureSlot] = this;
+        }
+    }
+
+    private void unregisterSlot() {
+        if (textureSlot < 0 || textureSlot >= MAX_TEXTURE_SLOTS) {
+            return;
+        }
+
+        synchronized (DECODERS_BY_SLOT) {
+            if (DECODERS_BY_SLOT[textureSlot] == this) {
+                DECODERS_BY_SLOT[textureSlot] = null;
+            }
+        }
+    }
+
+    private static MetalXRSurfaceDecoder decoderForSlot(int textureSlot) {
+        if (textureSlot < 0 || textureSlot >= MAX_TEXTURE_SLOTS) {
+            return null;
+        }
+
+        synchronized (DECODERS_BY_SLOT) {
+            return DECODERS_BY_SLOT[textureSlot];
+        }
     }
 }
