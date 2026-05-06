@@ -26,6 +26,7 @@ The build script uses CMake when available and falls back to direct `clang` comp
 - CoreFoundation
 - CoreMedia
 - CoreVideo
+- IOSurface
 - VideoToolbox
 
 ## Probe
@@ -66,7 +67,7 @@ METALXR_FRAME_EXPORT_DIR=/tmp/metalxr_frame_export \
 Scripts/run-metalxr-frame-stream.sh
 ```
 
-The streamer reads `<export-dir>/frames.jsonl`, selects the latest complete left/right BGRA eye pair, auto-configures the encoder dimensions from that pair, validates those dimensions against the Quest HELLO device profile, and logs frame age plus repeated-frame counts. If no complete pair is available when the client connects, it exits with a setup error instead of silently falling back to synthetic content.
+The streamer reads `<export-dir>/frames.jsonl`, selects the latest complete left/right eye pair, auto-configures the encoder dimensions from that pair, validates those dimensions against the Quest HELLO device profile, and logs frame age plus repeated-frame counts. Raw `BGRA8` and `RGBA8` records still read a payload file into the encoder pool. Experimental `IOSurfaceBGRA8` and `IOSurfaceRGBA8` records use `ioSurfaceId`, `IOSurfaceLookup`, and `CVPixelBufferCreateWithIOSurface` so the host can submit a VideoToolbox input buffer without reading a frame payload file. If no complete pair is available when the client connects, it exits with a setup error instead of silently falling back to synthetic content.
 
 For normal Play Mode sessions, `METALXR_STREAM_FRAMES=0` keeps the streamer alive and waits for a Quest client to reconnect after the app restarts or USB transport drops. Finite smoke tests can set `METALXR_STREAM_RECONNECT_ATTEMPTS=N`; the streamer logs `client_disconnect` and `reconnect_wait` records before accepting the next client. When `METALXR_STREAM_FPS` is not set, the host uses the Quest HELLO `preferredFps`; explicit FPS values are capped to the client preferred rate. `METALXR_STREAM_QUEUE_DEPTH`, `METALXR_STREAM_BITRATE`, resolution, frame rate, `METALXR_PREDICTION_OFFSET_MS`, and `METALXR_CLOCK_SYNC_INTERVAL_MS` remain the primary tuning controls for latency and backlog.
 
@@ -86,10 +87,10 @@ The streamer also emits `frame_source`, `clock_sync`, `latency`, `client_disconn
 
 ## Current Limitations
 
-- Unity-rendered frames currently move through development BGRA files before being copied into IOSurface-backed `CVPixelBufferPool` encoder slots.
+- Unity-rendered frames use development payload files by default before being copied into IOSurface-backed `CVPixelBufferPool` encoder slots. The host can consume runtime-emitted IOSurface ids, but that runtime sidecar path is still explicit and experimental.
 - The encoder uses one H.264 session per eye. A future transport can either keep separate eye streams or add a stereo packing step.
 - There is no HEVC path yet.
-- There is no production GPU synchronization, IOSurface export from the OpenXR swapchain, or direct VideoToolbox handoff from runtime-owned textures yet.
+- There is no production GPU synchronization or direct host-owned frame-slot lifecycle yet.
 - The stream path is TCP-only for now. USB adb reverse and Wi-Fi are both usable for evaluation, but automatic bitrate adaptation, packet loss handling, and production-grade clock sync are still future work.
 
 ## Next Step

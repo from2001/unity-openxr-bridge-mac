@@ -88,7 +88,7 @@ Tradeoffs and limitations:
 - The runtime can prove frame access at the GPU-resource level because Unity renders into textures allocated by the runtime.
 - `METALXR_FRAME_DUMP_DIR` writes metadata for submitted projection frames, including swapchain ids, Metal texture pointers, image indices, formats, and rectangles.
 - `METALXR_FRAME_EXPORT_DIR` writes per-eye JSON records and BGRA/raw payload files for submitted projection views. By default the runtime attempts CPU readback from the submitted Metal texture; `METALXR_FRAME_EXPORT_MODE=fixture` writes deterministic probe pixels instead.
-- The runtime does not allocate IOSurface-backed textures yet, so there is no cross-process share handle or VideoToolbox encode path.
+- The runtime now has an experimental IOSurface sidecar export path behind `METALXR_SWAPCHAIN_RESOURCE_MODE=iosurface` plus `METALXR_FRAME_EXPORT_MODE=iosurface`. Unity still receives its normal runtime-owned Metal swapchain texture; at frame submission time the runtime can lazily create per-image/per-eye IOSurface-backed 2D textures, GPU-blit the submitted array slice into them, and emit `IOSurfaceBGRA8` or `IOSurfaceRGBA8` records with `ioSurfaceId` instead of a raw payload file. This path is not the default Play Mode smoke path yet because Unity's current 2D-array render setup needs more validation before it can replace readback.
 - Synchronization is minimal and uses a development Metal blit synchronization when a Unity command queue is available. Real GPU fences must be added before production encoding or streaming.
 
 ## Tracking, Actions, And Haptics

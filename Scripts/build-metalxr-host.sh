@@ -39,6 +39,7 @@ else
     -framework CoreFoundation \
     -framework CoreMedia \
     -framework CoreVideo \
+    -framework IOSurface \
     -framework VideoToolbox \
     -o "$build_dir/metalxr_host_streamer"
 fi
