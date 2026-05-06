@@ -12,6 +12,7 @@ Environment:
   UNITY_APP                    Full path to Unity.app. If omitted, the newest Unity Hub editor is used.
   UNITY_PROJECT_PATH           Unity project path. Defaults to TestProjects/UnityOpenXRSmoke.
   METALXR_QUEST_BUILD_LOG      Unity batchmode log path. Defaults to TMPDIR/metalxr_quest_client_build.log.
+  METALXR_QUEST_GRAPHICS_API   Optional Android graphics API override: gles3, vulkan, or comma-separated order.
 USAGE
 }
 
@@ -24,6 +25,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project_path="${UNITY_PROJECT_PATH:-$repo_root/TestProjects/UnityOpenXRSmoke}"
 output_apk="${1:-$project_path/Builds/MetalXRQuestClient.apk}"
 build_log="${METALXR_QUEST_BUILD_LOG:-${TMPDIR:-/tmp}/metalxr_quest_client_build.log}"
+quest_graphics_api="${METALXR_QUEST_GRAPHICS_API:-}"
+
+if [[ "$output_apk" != /* ]]; then
+  output_apk="$repo_root/$output_apk"
+fi
 
 if [[ ! -d "$project_path" ]]; then
   echo "Unity project path does not exist: $project_path" >&2
@@ -53,15 +59,34 @@ echo "Project: $project_path"
 echo "Output APK: $output_apk"
 echo "Build log: $build_log"
 
-if ! "$unity_app/Contents/MacOS/Unity" \
-  -batchmode \
-  -quit \
-  -nographics \
-  -projectPath "$project_path" \
-  -buildTarget Android \
-  -executeMethod MetalXRQuestClientBuild.BuildAndroidApk \
-  -metalxrBuildOutput "$output_apk" \
-  -logFile "$build_log"; then
+if [[ -n "$quest_graphics_api" ]]; then
+  build_command=(
+    "$unity_app/Contents/MacOS/Unity"
+    -batchmode
+    -quit
+    -nographics
+    -projectPath "$project_path"
+    -buildTarget Android
+    -executeMethod MetalXRQuestClientBuild.BuildAndroidApk
+    -metalxrBuildOutput "$output_apk"
+    -metalxrAndroidGraphicsApi "$quest_graphics_api"
+    -logFile "$build_log"
+  )
+else
+  build_command=(
+    "$unity_app/Contents/MacOS/Unity"
+    -batchmode
+    -quit
+    -nographics
+    -projectPath "$project_path"
+    -buildTarget Android
+    -executeMethod MetalXRQuestClientBuild.BuildAndroidApk
+    -metalxrBuildOutput "$output_apk"
+    -logFile "$build_log"
+  )
+fi
+
+if ! "${build_command[@]}"; then
   echo "Unity APK build failed. Last log lines:" >&2
   tail -n 120 "$build_log" >&2 || true
   exit 1

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.XR;
 
 namespace MetalXR.QuestClient
@@ -26,6 +27,8 @@ namespace MetalXR.QuestClient
 
         private Texture2D _leftTexture;
         private Texture2D _rightTexture;
+        private Texture2D _leftExternalTexture;
+        private Texture2D _rightExternalTexture;
         private Material _leftMaterial;
         private Material _rightMaterial;
         private Mesh _quadMesh;
@@ -65,14 +68,32 @@ namespace MetalXR.QuestClient
             MetalXRQuestEndpoint endpoint = MetalXRQuestEndpoint.FromCommandLine();
             MetalXRQuestDeviceProfile deviceProfile = CreateDeviceProfile();
             bool experimentalSurfaceDecode = ExperimentalSurfaceDecodeEnabled();
-            _videoDecoder = new MetalXRQuestVideoDecoder(LogClientMessage, experimentalSurfaceDecode);
+            bool surfaceDecodeGraphicsSupported = SurfaceDecodeGraphicsSupported();
+            bool experimentalSurfacePresent = experimentalSurfaceDecode && ExperimentalSurfacePresentEnabled();
+            if (experimentalSurfaceDecode && !surfaceDecodeGraphicsSupported)
+            {
+                Debug.Log(
+                    LogPrefix +
+                    " experimental Surface decode requires an OpenGLES graphics device; current_graphics=" +
+                    SystemInfo.graphicsDeviceType +
+                    "; falling back to MediaCodec Image-plane decode");
+                experimentalSurfaceDecode = false;
+                experimentalSurfacePresent = false;
+            }
+
+            _videoDecoder = new MetalXRQuestVideoDecoder(
+                LogClientMessage,
+                experimentalSurfaceDecode,
+                experimentalSurfacePresent);
             _handshakeClient = new MetalXRQuestHandshakeClient(endpoint, deviceProfile);
             _handshakeClient.Start();
 
             Debug.Log(
                 LogPrefix + " started; stream client active with diagnostic fallback; host=" +
                 endpoint.Host + ":" + endpoint.Port +
-                " experimental_surface_decode=" + experimentalSurfaceDecode);
+                " graphics=" + SystemInfo.graphicsDeviceType +
+                " experimental_surface_decode=" + experimentalSurfaceDecode +
+                " experimental_surface_present=" + experimentalSurfacePresent);
         }
 
         private void Update()
@@ -112,6 +133,8 @@ namespace MetalXR.QuestClient
             DestroyUnityObject(_rightMaterial);
             DestroyUnityObject(_leftTexture);
             DestroyUnityObject(_rightTexture);
+            DestroyUnityObject(_leftExternalTexture);
+            DestroyUnityObject(_rightExternalTexture);
             DestroyUnityObject(_quadMesh);
         }
 
@@ -157,20 +180,43 @@ namespace MetalXR.QuestClient
 
         private static bool ExperimentalSurfaceDecodeEnabled()
         {
-            bool enabled = false;
+            return ReadExperimentalBooleanFlag(
+                "--metalxr-surface-decode",
+                "metalxr_surface_decode",
+                false);
+        }
+
+        private static bool ExperimentalSurfacePresentEnabled()
+        {
+            return ReadExperimentalBooleanFlag(
+                "--metalxr-surface-present",
+                "metalxr_surface_present",
+                false);
+        }
+
+        private static bool SurfaceDecodeGraphicsSupported()
+        {
+            return SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3 ||
+                   SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES2;
+        }
+
+        private static bool ReadExperimentalBooleanFlag(string commandLineFlag, string intentExtraName, bool defaultValue)
+        {
+            bool enabled = defaultValue;
             string[] args = Environment.GetCommandLineArgs();
             for (int i = 0; i < args.Length; i++)
             {
                 string arg = args[i];
-                if (string.Equals(arg, "--metalxr-surface-decode", StringComparison.Ordinal))
+                if (string.Equals(arg, commandLineFlag, StringComparison.Ordinal))
                 {
                     enabled = true;
                     continue;
                 }
 
-                if (arg.StartsWith("--metalxr-surface-decode=", StringComparison.Ordinal))
+                string prefix = commandLineFlag + "=";
+                if (arg.StartsWith(prefix, StringComparison.Ordinal))
                 {
-                    string value = arg.Substring("--metalxr-surface-decode=".Length);
+                    string value = arg.Substring(prefix.Length);
                     enabled = value == "1" ||
                               string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
                               string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
@@ -196,14 +242,14 @@ namespace MetalXR.QuestClient
                                 return enabled;
                             }
 
-                            enabled = intent.Call<bool>("getBooleanExtra", "metalxr_surface_decode", enabled);
+                            enabled = intent.Call<bool>("getBooleanExtra", intentExtraName, enabled);
                         }
                     }
                 }
             }
             catch (Exception exception)
             {
-                Debug.Log(LogPrefix + " could not read Surface decode intent extra: " + exception.Message);
+                Debug.Log(LogPrefix + " could not read Android intent extra " + intentExtraName + ": " + exception.Message);
             }
 #endif
 
@@ -249,7 +295,7 @@ namespace MetalXR.QuestClient
             if (_videoDecoder.TryDecode(encodedFrame, out decodedFrame) && decodedFrame != null)
             {
                 ulong decodeEndTimeNs = MetalXRQuestProtocol.NowNs();
-                if (!IsFreshMediaCodecFrame(decodedFrame))
+                if (ShouldReuseFallbackFrame(decodedFrame))
                 {
                     MetalXRQuestDecodedVideoFrame reusedFrame = CreateReusedDecodedFrame(encodedFrame);
                     if (reusedFrame != null)
@@ -378,6 +424,11 @@ namespace MetalXR.QuestClient
         private static bool IsFreshMediaCodecFrame(MetalXRQuestDecodedVideoFrame frame)
         {
             return frame != null && frame.DecodedByMediaCodec && frame.DecoderMode == "mediacodec-yuv420";
+        }
+
+        private static bool ShouldReuseFallbackFrame(MetalXRQuestDecodedVideoFrame frame)
+        {
+            return frame != null && !frame.UsesExternalTexture && !IsFreshMediaCodecFrame(frame);
         }
 
         private void RememberFreshMediaCodecFrame(MetalXRQuestDecodedVideoFrame frame)
@@ -673,6 +724,23 @@ namespace MetalXR.QuestClient
             }
 
             material.name = name;
+            SetMaterialTexture(material, texture);
+
+            if (material.HasProperty("_BaseColor"))
+            {
+                material.SetColor("_BaseColor", Color.white);
+            }
+
+            return material;
+        }
+
+        private static void SetMaterialTexture(Material material, Texture texture)
+        {
+            if (material == null || texture == null)
+            {
+                return;
+            }
+
             if (material.HasProperty("_BaseMap"))
             {
                 material.SetTexture("_BaseMap", texture);
@@ -681,13 +749,6 @@ namespace MetalXR.QuestClient
             {
                 material.mainTexture = texture;
             }
-
-            if (material.HasProperty("_BaseColor"))
-            {
-                material.SetColor("_BaseColor", Color.white);
-            }
-
-            return material;
         }
 
         private GameObject CreateRigRoot()
@@ -863,6 +924,69 @@ namespace MetalXR.QuestClient
 
         private bool UpdateStreamTexture(MetalXRQuestDecodedVideoFrame frame)
         {
+            if (frame == null)
+            {
+                return false;
+            }
+
+            bool updated = frame.UsesExternalTexture ?
+                UpdateExternalStreamTexture(frame) :
+                UpdateCpuStreamTexture(frame);
+            if (!updated)
+            {
+                return false;
+            }
+
+            ulong displayTimeNs = MetalXRQuestProtocol.NowNs();
+            MarkFrameDisplayed(frame, displayTimeNs);
+            return true;
+        }
+
+        private bool UpdateExternalStreamTexture(MetalXRQuestDecodedVideoFrame frame)
+        {
+            if (frame.ExternalTexturePtr == IntPtr.Zero || frame.Width <= 0 || frame.Height <= 0)
+            {
+                return false;
+            }
+
+            Texture2D texture = frame.IsLeftEye ? _leftExternalTexture : _rightExternalTexture;
+            if (texture == null || texture.width != frame.Width || texture.height != frame.Height)
+            {
+                texture = Texture2D.CreateExternalTexture(
+                    frame.Width,
+                    frame.Height,
+                    TextureFormat.RGBA32,
+                    false,
+                    false,
+                    frame.ExternalTexturePtr);
+                texture.name = frame.IsLeftEye ?
+                    "MetalXR Left SurfaceTexture External" :
+                    "MetalXR Right SurfaceTexture External";
+                texture.wrapMode = TextureWrapMode.Clamp;
+                texture.filterMode = FilterMode.Bilinear;
+
+                if (frame.IsLeftEye)
+                {
+                    DestroyUnityObject(_leftExternalTexture);
+                    _leftExternalTexture = texture;
+                }
+                else
+                {
+                    DestroyUnityObject(_rightExternalTexture);
+                    _rightExternalTexture = texture;
+                }
+            }
+            else
+            {
+                texture.UpdateExternalTexture(frame.ExternalTexturePtr);
+            }
+
+            SetEyeMaterialTexture(frame.IsLeftEye, texture);
+            return true;
+        }
+
+        private bool UpdateCpuStreamTexture(MetalXRQuestDecodedVideoFrame frame)
+        {
             Color32[] pixels = frame.IsLeftEye ? _leftPixels : _rightPixels;
             Texture2D texture = frame.IsLeftEye ? _leftTexture : _rightTexture;
             if (pixels == null || texture == null || frame.RgbaBytes == null)
@@ -898,7 +1022,18 @@ namespace MetalXR.QuestClient
 
             texture.SetPixels32(pixels);
             texture.Apply(false);
-            ulong displayTimeNs = MetalXRQuestProtocol.NowNs();
+            SetEyeMaterialTexture(frame.IsLeftEye, texture);
+            return true;
+        }
+
+        private void SetEyeMaterialTexture(bool leftEye, Texture texture)
+        {
+            Material material = leftEye ? _leftMaterial : _rightMaterial;
+            SetMaterialTexture(material, texture);
+        }
+
+        private void MarkFrameDisplayed(MetalXRQuestDecodedVideoFrame frame, ulong displayTimeNs)
+        {
             _lastStreamFrameTime = Time.unscaledTime;
             _displayedEyeFrames++;
             ulong displayedThisEye;
@@ -944,7 +1079,6 @@ namespace MetalXR.QuestClient
                     " bytes=" + frame.EncodedBytes);
             }
 
-            return true;
         }
 
         private void SendFrameTimingSample(MetalXRQuestDecodedVideoFrame frame, ulong displayTimeNs)
@@ -1063,6 +1197,25 @@ namespace MetalXR.QuestClient
             bool decodedByMediaCodec,
             string decoderMode,
             string outputFormat)
+            : this(
+                source,
+                rgbaBytes,
+                rgbaStrideBytes,
+                decodedByMediaCodec,
+                decoderMode,
+                outputFormat,
+                IntPtr.Zero)
+        {
+        }
+
+        public MetalXRQuestDecodedVideoFrame(
+            MetalXRQuestEncodedVideoFrame source,
+            byte[] rgbaBytes,
+            int rgbaStrideBytes,
+            bool decodedByMediaCodec,
+            string decoderMode,
+            string outputFormat,
+            IntPtr externalTexturePtr)
         {
             FrameId = source.FrameId;
             IsLeftEye = source.IsLeftEye;
@@ -1089,6 +1242,7 @@ namespace MetalXR.QuestClient
             DecodedByMediaCodec = decodedByMediaCodec;
             DecoderMode = string.IsNullOrEmpty(decoderMode) ? "unknown" : decoderMode;
             OutputFormat = string.IsNullOrEmpty(outputFormat) ? "unknown" : outputFormat;
+            ExternalTexturePtr = externalTexturePtr;
         }
 
         public ulong FrameId { get; }
@@ -1118,6 +1272,8 @@ namespace MetalXR.QuestClient
         public bool DecodedByMediaCodec { get; }
         public string DecoderMode { get; }
         public string OutputFormat { get; }
+        public IntPtr ExternalTexturePtr { get; }
+        public bool UsesExternalTexture { get { return ExternalTexturePtr != IntPtr.Zero; } }
 
         public void SetDecodeTiming(ulong decodeStartTimeNs, ulong decodeEndTimeNs)
         {
@@ -1131,10 +1287,21 @@ namespace MetalXR.QuestClient
         private readonly MetalXRQuestEyeDecoder _leftDecoder;
         private readonly MetalXRQuestEyeDecoder _rightDecoder;
 
-        public MetalXRQuestVideoDecoder(Action<string> log, bool enableExperimentalSurfaceDecode)
+        public MetalXRQuestVideoDecoder(
+            Action<string> log,
+            bool enableExperimentalSurfaceDecode,
+            bool enableExperimentalSurfacePresent)
         {
-            _leftDecoder = new MetalXRQuestEyeDecoder(true, log, enableExperimentalSurfaceDecode);
-            _rightDecoder = new MetalXRQuestEyeDecoder(false, log, enableExperimentalSurfaceDecode);
+            _leftDecoder = new MetalXRQuestEyeDecoder(
+                true,
+                log,
+                enableExperimentalSurfaceDecode,
+                enableExperimentalSurfacePresent);
+            _rightDecoder = new MetalXRQuestEyeDecoder(
+                false,
+                log,
+                enableExperimentalSurfaceDecode,
+                enableExperimentalSurfacePresent);
         }
 
         public bool TryDecode(MetalXRQuestEncodedVideoFrame frame, out MetalXRQuestDecodedVideoFrame decodedFrame)
@@ -1165,6 +1332,7 @@ namespace MetalXR.QuestClient
         private readonly string _eyeName;
         private readonly Action<string> _log;
         private readonly bool _enableExperimentalSurfaceDecode;
+        private readonly bool _enableExperimentalSurfacePresent;
         private readonly Dictionary<long, MetalXRQuestEncodedVideoFrame> _pendingFrames = new Dictionary<long, MetalXRQuestEncodedVideoFrame>();
         private bool _fallbackLogged;
 
@@ -1196,12 +1364,17 @@ namespace MetalXR.QuestClient
         private readonly Dictionary<long, MetalXRQuestEncodedVideoFrame> _surfacePendingFrames = new Dictionary<long, MetalXRQuestEncodedVideoFrame>();
 #endif
 
-        public MetalXRQuestEyeDecoder(bool leftEye, Action<string> log, bool enableExperimentalSurfaceDecode)
+        public MetalXRQuestEyeDecoder(
+            bool leftEye,
+            Action<string> log,
+            bool enableExperimentalSurfaceDecode,
+            bool enableExperimentalSurfacePresent)
         {
             _leftEye = leftEye;
             _eyeName = leftEye ? "left" : "right";
             _log = log;
             _enableExperimentalSurfaceDecode = enableExperimentalSurfaceDecode;
+            _enableExperimentalSurfacePresent = enableExperimentalSurfacePresent;
         }
 
         public bool TryDecode(MetalXRQuestEncodedVideoFrame frame, out MetalXRQuestDecodedVideoFrame decodedFrame)
@@ -1288,6 +1461,19 @@ namespace MetalXR.QuestClient
                 string outputFormat =
                     "external-oes-texture=" + _surfaceTextureName +
                     ";updated=" + textureUpdated;
+                if (_enableExperimentalSurfacePresent && textureUpdated)
+                {
+                    decodedFrame = new MetalXRQuestDecodedVideoFrame(
+                        sourceFrame,
+                        null,
+                        0,
+                        true,
+                        "surface-external-texture",
+                        outputFormat,
+                        new IntPtr(_surfaceTextureName));
+                    return true;
+                }
+
                 decodedFrame = CreateCompressedPreview(
                     sourceFrame,
                     "surface-experimental-preview",
