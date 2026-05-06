@@ -17,7 +17,7 @@ Working:
 
 Not MVP-ready yet:
 
-- Production zero-copy runtime-to-host IOSurface frame handoff. Frame transfer currently still uses CPU readback and file-based export before the host copies pixels into encoder slots.
+- Production zero-copy runtime-to-host IOSurface frame handoff. Frame transfer currently still uses CPU readback and file-based export before the host copies pixels into encoder slots. Runtime-emitted IOSurface ids are available only behind an explicit experimental guard.
 - Production runtime-host IPC/ring ownership beyond the current single-slot shared-state bridge.
 - Production Quest presentation. The Quest APK is currently a diagnostic Unity OpenXR client that displays streamed eye textures through an in-headset debug presentation path.
 - Pose/FOV-aware Quest presentation, rotational reprojection, or compositor-layer style presentation.

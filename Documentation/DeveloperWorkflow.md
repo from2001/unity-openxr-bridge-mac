@@ -98,7 +98,7 @@ For USB, the stream script binds to `127.0.0.1`, configures `adb reverse`, and r
 - `UNITY_APP` - explicit Unity.app path for batch builds.
 - `UNITY_PROJECT_PATH` - Unity project path, defaulting to `TestProjects/UnityOpenXRSmoke`.
 - `METALXR_RUNTIME_JSON` - explicit OpenXR runtime manifest.
-- `METALXR_FRAME_EXPORT_MODE=fixture|readback`
+- `METALXR_FRAME_EXPORT_MODE=fixture|readback`; `iosurface` is gated behind `METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1` and should only be used for isolated runtime validation.
 - `METALXR_FRAME_EXPORT_DIR`
 - `METALXR_SWAPCHAIN_STORAGE_MODE=shared|managed|private`
 - `METALXR_STREAM_WIDTH`, `METALXR_STREAM_HEIGHT`, `METALXR_STREAM_FPS`

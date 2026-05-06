@@ -21,6 +21,8 @@ Environment:
   METALXR_WORKFLOW_STREAM_WAIT_SECONDS Seconds to wait for streamer/client logs. Defaults to 60.
   METALXR_FRAME_EXPORT_DIR             Shared frame export directory. Defaults to TMPDIR/metalxr_frame_export.
   METALXR_FRAME_EXPORT_MODE            readback or fixture. Defaults to fixture for smoke reliability.
+                                      iosurface is experimental and requires
+                                      METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1.
   METALXR_SWAPCHAIN_STORAGE_MODE       shared, managed, or private. Defaults to shared for Unity export.
   METALXR_VIEW_WIDTH                   Runtime eye width. Defaults to 640 for Quest debug streaming.
   METALXR_VIEW_HEIGHT                  Runtime eye height. Defaults to 360 for Quest debug streaming.
@@ -63,6 +65,13 @@ apk_path="$project_path/Builds/MetalXRQuestClient.apk"
 runtime_dylib="$repo_root/Runtime/MetalXRRuntime/build/libmetalxr_runtime.dylib"
 runtime_manifest="$repo_root/Runtime/MetalXRRuntime/metalxr_runtime.json"
 host_streamer="$repo_root/Runtime/MetalXRHost/build/metalxr_host_streamer"
+
+if [[ "$frame_export_mode" == "iosurface" &&
+      "${METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT:-0}" != "1" ]]; then
+  echo "METALXR_FRAME_EXPORT_MODE=iosurface is experimental and is disabled by default." >&2
+  echo "Set METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1 only for isolated IOSurface runtime validation." >&2
+  exit 1
+fi
 
 adb_path="${ADB:-}"
 if [[ -z "$adb_path" && -x "$repo_root/Libs/adb-lib/adb" ]]; then

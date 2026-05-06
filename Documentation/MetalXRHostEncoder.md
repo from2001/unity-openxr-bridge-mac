@@ -88,7 +88,7 @@ The streamer also emits `frame_source`, `clock_sync`, `latency`, `client_disconn
 
 ## Current Limitations
 
-- Unity-rendered frames use development payload files by default before being copied into IOSurface-backed `CVPixelBufferPool` encoder slots. The host can consume runtime-emitted IOSurface ids, but that runtime sidecar path is still explicit and experimental.
+- Unity-rendered frames use development payload files by default before being copied into IOSurface-backed `CVPixelBufferPool` encoder slots. The host can consume runtime-emitted IOSurface ids, but that runtime sidecar path is still explicit and experimental. Runtime IOSurface export requires `METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1` in addition to `METALXR_FRAME_EXPORT_MODE=iosurface`.
 - The encoder uses one H.264 session per eye. A future transport can either keep separate eye streams or add a stereo packing step.
 - There is no HEVC path yet.
 - There is no production GPU synchronization or direct host-owned frame-slot lifecycle yet.
