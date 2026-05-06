@@ -21,6 +21,7 @@ if command -v cmake >/dev/null 2>&1; then
   cmake -S "$host_dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=Debug >/dev/null
   cmake --build "$build_dir" --target metalxr_host_encoder >/dev/null
   cmake --build "$build_dir" --target metalxr_host_streamer >/dev/null
+  cmake --build "$build_dir" --target metalxr_iosurface_export_fixture >/dev/null
 else
   protocol_dir="$repo_root/Runtime/MetalXRProtocol"
   mkdir -p "$build_dir"
@@ -42,7 +43,14 @@ else
     -framework IOSurface \
     -framework VideoToolbox \
     -o "$build_dir/metalxr_host_streamer"
+  "$clang_bin" -std=c11 -Wall -Wextra -Werror \
+    "$host_dir/src/metalxr_iosurface_export_fixture.c" \
+    -framework CoreFoundation \
+    -framework CoreVideo \
+    -framework IOSurface \
+    -o "$build_dir/metalxr_iosurface_export_fixture"
 fi
 
 echo "Built $build_dir/metalxr_host_encoder"
 echo "Built $build_dir/metalxr_host_streamer"
+echo "Built $build_dir/metalxr_iosurface_export_fixture"

@@ -19,6 +19,7 @@ The binary is built at:
 ```text
 Runtime/MetalXRHost/build/metalxr_host_encoder
 Runtime/MetalXRHost/build/metalxr_host_streamer
+Runtime/MetalXRHost/build/metalxr_iosurface_export_fixture
 ```
 
 The build script uses CMake when available and falls back to direct `clang` compilation against:
@@ -49,7 +50,7 @@ The stream probe exercises the TCP transport path:
 Scripts/probe-metalxr-frame-stream.sh
 ```
 
-It starts `metalxr_host_streamer` with the synthetic frame source, with a generated Unity-export fixture, and with a reconnecting synthetic client. Each run performs the Quest HELLO/HELLO_ACK exchange, responds to timing sync probes, receives finite `METALXR_PACKET_VIDEO_FRAME` packets, verifies left/right eye counts, and checks that each packet carries H.264 bytes after the fixed video-frame metadata. The probe also verifies clock-sync, latency, reconnect, and frame-source JSON records.
+It starts `metalxr_host_streamer` with the synthetic frame source, with a generated file-payload Unity-export fixture, with a generated IOSurface Unity-export fixture, and with a reconnecting synthetic client. Each run performs the Quest HELLO/HELLO_ACK exchange, responds to timing sync probes, receives finite `METALXR_PACKET_VIDEO_FRAME` packets, verifies left/right eye counts, and checks that each packet carries H.264 bytes after the fixed video-frame metadata. The probe also verifies clock-sync, latency, reconnect, frame-source JSON records, and the host's `IOSurfaceLookup`/`CVPixelBufferCreateWithIOSurface` path.
 
 For a headset session, launch the Quest client APK and then run:
 

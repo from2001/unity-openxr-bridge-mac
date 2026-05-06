@@ -5,11 +5,12 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 streamer="$repo_root/Runtime/MetalXRHost/build/metalxr_host_streamer"
+iosurface_fixture="$repo_root/Runtime/MetalXRHost/build/metalxr_iosurface_export_fixture"
 base_port="${METALXR_PROBE_STREAM_PORT:-47002}"
 frames="${METALXR_PROBE_STREAM_FRAMES:-8}"
 log_dir="${TMPDIR:-/tmp}"
 
-if [[ ! -x "$streamer" ]]; then
+if [[ ! -x "$streamer" || ! -x "$iosurface_fixture" ]]; then
   "$repo_root/Scripts/build-metalxr-host.sh"
 fi
 
@@ -581,9 +582,56 @@ PY
   sed -n '1,24p' "$log_file"
 }
 
+run_iosurface_export_probe() {
+  local port="$1"
+  local width=96
+  local height=64
+  local fixture_dir
+  local fixture_log
+  fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/metalxr_iosurface_export_probe.XXXXXX")"
+  fixture_log="$log_dir/metalxr_iosurface_export_fixture.log"
+  rm -f "$fixture_log"
+
+  "$iosurface_fixture" "$fixture_dir" "$width" "$height" 3 20 >"$fixture_log" 2>&1 &
+  local fixture_pid="$!"
+
+  local ready=0
+  for _ in $(seq 1 50); do
+    if [[ -f "$fixture_dir/frames.jsonl" ]] &&
+        grep -q '"payloadFormat":"IOSurfaceBGRA8"' "$fixture_dir/frames.jsonl"; then
+      ready=1
+      break
+    fi
+    if ! kill -0 "$fixture_pid" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  if [[ "$ready" != "1" ]]; then
+    echo "IOSurface export fixture did not become ready." >&2
+    cat "$fixture_log" >&2 || true
+    if kill -0 "$fixture_pid" >/dev/null 2>&1; then
+      kill "$fixture_pid" >/dev/null 2>&1 || true
+    fi
+    wait "$fixture_pid" >/dev/null 2>&1 || true
+    exit 1
+  fi
+
+  run_stream_probe "iosurface_export" "$port" "$width" "$height" "unity-export" "$fixture_dir"
+
+  if kill -0 "$fixture_pid" >/dev/null 2>&1; then
+    kill "$fixture_pid" >/dev/null 2>&1 || true
+  fi
+  wait "$fixture_pid" >/dev/null 2>&1 || true
+  echo "Host frame streamer IOSurface fixture log: $fixture_log"
+  sed -n '1,4p' "$fixture_log"
+}
+
 unity_fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/metalxr_unity_export_probe.XXXXXX")"
 make_unity_export_fixture "$unity_fixture_dir" 96 64 3
 
 run_stream_probe "synthetic" "$base_port" 160 90 "synthetic"
 run_stream_probe "unity_export" "$((base_port + 1))" 96 64 "unity-export" "$unity_fixture_dir"
-run_reconnect_probe "$((base_port + 2))"
+run_iosurface_export_probe "$((base_port + 2))"
+run_reconnect_probe "$((base_port + 3))"
