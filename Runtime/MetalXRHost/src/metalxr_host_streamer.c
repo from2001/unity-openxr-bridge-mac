@@ -4,6 +4,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
+#include <IOSurface/IOSurface.h>
 #include <VideoToolbox/VideoToolbox.h>
 
 #include <arpa/inet.h>
@@ -76,6 +77,7 @@ typedef struct UnityExportRecord {
     float fov[4];
     size_t bytesPerRow;
     size_t payloadBytes;
+    uint32_t ioSurfaceId;
     char payloadFormat[32];
     char payloadPath[1024];
 } UnityExportRecord;
@@ -519,6 +521,7 @@ static int parse_unity_export_record(const char* line, UnityExportRecord* record
     uint64_t height = 0;
     uint64_t bytesPerRow = 0;
     uint64_t payloadBytes = 0;
+    uint64_t ioSurfaceId = 0;
     uint64_t imageArrayIndex = 0;
     uint64_t imageRectWidth = 0;
     uint64_t imageRectHeight = 0;
@@ -535,15 +538,33 @@ static int parse_unity_export_record(const char* line, UnityExportRecord* record
         !json_read_u64_field(line, "\"width\":", &width) ||
         !json_read_u64_field(line, "\"height\":", &height) ||
         !json_read_u64_field(line, "\"bytesPerRow\":", &bytesPerRow) ||
-        !json_read_u64_field(line, "\"payloadBytes\":", &payloadBytes) ||
-        !json_read_string_field(line, "\"payloadPath\":\"", record->payloadPath, sizeof(record->payloadPath))) {
+        !json_read_u64_field(line, "\"payloadBytes\":", &payloadBytes)) {
         return 0;
     }
 
+    const int isRawPayload =
+        strcmp(record->payloadFormat, "BGRA8") == 0 ||
+        strcmp(record->payloadFormat, "RGBA8") == 0;
+    const int isIosurfacePayload =
+        strcmp(record->payloadFormat, "IOSurfaceBGRA8") == 0 ||
+        strcmp(record->payloadFormat, "IOSurfaceRGBA8") == 0;
+
+    (void)json_read_string_field(
+        line,
+        "\"payloadPath\":\"",
+        record->payloadPath,
+        sizeof(record->payloadPath));
+    (void)json_read_u64_field(line, "\"ioSurfaceId\":", &ioSurfaceId);
+
     if (eye > 1 || width > INT_MAX || height > INT_MAX ||
         bytesPerRow > SIZE_MAX || payloadBytes > SIZE_MAX ||
-        (strcmp(record->payloadFormat, "BGRA8") != 0 &&
-         strcmp(record->payloadFormat, "RGBA8") != 0)) {
+        (!isRawPayload && !isIosurfacePayload)) {
+        return 0;
+    }
+
+    if ((isRawPayload && record->payloadPath[0] == '\0') ||
+        (isIosurfacePayload && ioSurfaceId > UINT32_MAX) ||
+        (isIosurfacePayload && ioSurfaceId == 0)) {
         return 0;
     }
 
@@ -609,6 +630,7 @@ static int parse_unity_export_record(const char* line, UnityExportRecord* record
 
     record->bytesPerRow = (size_t)bytesPerRow;
     record->payloadBytes = (size_t)payloadBytes;
+    record->ioSurfaceId = (uint32_t)ioSurfaceId;
     return 1;
 }
 
@@ -696,6 +718,10 @@ static int poll_unity_export_frame_source(UnityExportFrameSource* source, UnityE
 static uint64_t unity_export_pair_age_ms(const UnityExportFramePair* pair)
 {
     if (pair == NULL) {
+        return 0;
+    }
+
+    if (pair->eyes[0].payloadPath[0] == '\0' || pair->eyes[1].payloadPath[0] == '\0') {
         return 0;
     }
 
@@ -1185,10 +1211,82 @@ static int read_file_exact(const char* path, uint8_t* data, size_t size)
     return ok;
 }
 
+static int unity_export_record_is_iosurface(const UnityExportRecord* record)
+{
+    return record != NULL &&
+           (strcmp(record->payloadFormat, "IOSurfaceBGRA8") == 0 ||
+            strcmp(record->payloadFormat, "IOSurfaceRGBA8") == 0);
+}
+
+static CVPixelBufferRef create_unity_export_iosurface_pixel_buffer(
+    EncoderContext* context,
+    const UnityExportRecord* record)
+{
+    if (context == NULL || record == NULL ||
+        !unity_export_record_is_iosurface(record) ||
+        record->ioSurfaceId == 0 ||
+        record->width != context->width ||
+        record->height != context->height ||
+        record->bytesPerRow < (size_t)record->width * 4u) {
+        return NULL;
+    }
+
+    IOSurfaceRef surface = IOSurfaceLookup(record->ioSurfaceId);
+    if (surface == NULL) {
+        return NULL;
+    }
+
+    CFMutableDictionaryRef attributes = CFDictionaryCreateMutable(
+        kCFAllocatorDefault,
+        0,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    if (attributes == NULL) {
+        CFRelease(surface);
+        return NULL;
+    }
+
+    set_cf_int(attributes, kCVPixelBufferWidthKey, record->width);
+    set_cf_int(attributes, kCVPixelBufferHeightKey, record->height);
+    const OSType pixelFormat =
+        strcmp(record->payloadFormat, "IOSurfaceRGBA8") == 0 ?
+            kCVPixelFormatType_32RGBA :
+            kCVPixelFormatType_32BGRA;
+    set_cf_int(attributes, kCVPixelBufferPixelFormatTypeKey, (int)pixelFormat);
+    CFDictionarySetValue(attributes, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
+
+    CVPixelBufferRef pixelBuffer = NULL;
+    const CVReturn status = CVPixelBufferCreateWithIOSurface(
+        kCFAllocatorDefault,
+        surface,
+        attributes,
+        &pixelBuffer);
+
+    CFRelease(attributes);
+    CFRelease(surface);
+
+    if (status != kCVReturnSuccess || pixelBuffer == NULL) {
+        return NULL;
+    }
+
+    if ((int)CVPixelBufferGetWidth(pixelBuffer) != context->width ||
+        (int)CVPixelBufferGetHeight(pixelBuffer) != context->height ||
+        CVPixelBufferGetPixelFormatType(pixelBuffer) != pixelFormat) {
+        CVPixelBufferRelease(pixelBuffer);
+        return NULL;
+    }
+
+    return pixelBuffer;
+}
+
 static CVPixelBufferRef create_unity_export_pixel_buffer(
     EncoderContext* context,
     const UnityExportRecord* record)
 {
+    if (unity_export_record_is_iosurface(record)) {
+        return create_unity_export_iosurface_pixel_buffer(context, record);
+    }
+
     if (context == NULL || record == NULL ||
         (strcmp(record->payloadFormat, "BGRA8") != 0 &&
          strcmp(record->payloadFormat, "RGBA8") != 0) ||
@@ -1474,11 +1572,12 @@ static int encode_unity_export_eye_frame(
         fprintf(stderr,
                 "{\"event\":\"drop\",\"reason\":\"unity_export_payload\","
                 "\"frame\":%" PRIu64 ",\"source_frame\":%" PRIu64 ","
-                "\"eye\":%d,\"payload\":\"%s\"}\n",
+                "\"eye\":%d,\"payload\":\"%s\",\"io_surface_id\":%u}\n",
                 frameId,
                 record->sourceFrameId,
                 record->eye,
-                record->payloadPath);
+                record->payloadPath,
+                record->ioSurfaceId);
         ++context->stats.droppedFrames;
         return 0;
     }

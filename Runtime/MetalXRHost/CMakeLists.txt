@@ -47,6 +47,7 @@ if(APPLE)
             "-framework CoreFoundation"
             "-framework CoreMedia"
             "-framework CoreVideo"
+            "-framework IOSurface"
             "-framework VideoToolbox"
     )
 

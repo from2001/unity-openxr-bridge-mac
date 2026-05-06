@@ -1,6 +1,10 @@
 #include "MetalXRRuntime/openxr_minimal.h"
 #include "MetalXRProtocol/metalxr_shared_state.h"
 
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreVideo/CoreVideo.h>
+#include <IOSurface/IOSurface.h>
+
 #include <dlfcn.h>
 #include <inttypes.h>
 #include <pthread.h>
@@ -143,6 +147,12 @@ struct XrSwapchain_T {
     uint32_t sampleCount;
     uint64_t storageMode;
     void* textures[kSwapchainImageCount];
+    void* ioSurfaceTextures[kSwapchainImageCount][kViewCount];
+    IOSurfaceRef ioSurfaces[kSwapchainImageCount][kViewCount];
+    uint32_t ioSurfaceIds[kSwapchainImageCount][kViewCount];
+    size_t ioSurfaceBytesPerRow;
+    uint32_t ioSurfaceLayerCount;
+    XrBool32 ioSurfaceBacked;
     uint32_t imageCount;
     uint32_t acquiredImageIndex;
     XrBool32 imageAcquired;
@@ -164,6 +174,18 @@ typedef struct MetalXrRegion {
     uint64_t depth;
 } MetalXrRegion;
 
+typedef struct MetalXrOrigin {
+    uint64_t x;
+    uint64_t y;
+    uint64_t z;
+} MetalXrOrigin;
+
+typedef struct MetalXrSize {
+    uint64_t width;
+    uint64_t height;
+    uint64_t depth;
+} MetalXrSize;
+
 typedef MetalXrObjcClass (*PFN_objc_getClass)(const char* name);
 typedef MetalXrSel (*PFN_sel_registerName)(const char* name);
 
@@ -172,12 +194,30 @@ typedef MetalXrObjcId (*PFN_objc_msgSend_id_id)(
     MetalXrObjcId receiver,
     MetalXrSel selector,
     MetalXrObjcId value);
+typedef MetalXrObjcId (*PFN_objc_msgSend_id_id_id_uint)(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    MetalXrObjcId firstValue,
+    MetalXrObjcId secondValue,
+    uint64_t thirdValue);
 typedef void (*PFN_objc_msgSend_void)(MetalXrObjcId receiver, MetalXrSel selector);
 typedef void (*PFN_objc_msgSend_void_id)(
     MetalXrObjcId receiver,
     MetalXrSel selector,
     MetalXrObjcId value);
 typedef void (*PFN_objc_msgSend_void_uint)(MetalXrObjcId receiver, MetalXrSel selector, uint64_t value);
+typedef void (*PFN_objc_msgSend_blit_copy)(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    MetalXrObjcId sourceTexture,
+    uint64_t sourceSlice,
+    uint64_t sourceLevel,
+    MetalXrOrigin sourceOrigin,
+    MetalXrSize sourceSize,
+    MetalXrObjcId destinationTexture,
+    uint64_t destinationSlice,
+    uint64_t destinationLevel,
+    MetalXrOrigin destinationOrigin);
 typedef void (*PFN_objc_msgSend_get_bytes)(
     MetalXrObjcId receiver,
     MetalXrSel selector,
@@ -1068,6 +1108,14 @@ static void metalxr_release_swapchain(XrSwapchain swapchain)
     for (uint32_t i = 0; i < swapchain->imageCount; ++i) {
         metalxr_release_objc(swapchain->textures[i]);
         swapchain->textures[i] = NULL;
+        for (uint32_t layer = 0; layer < kViewCount; ++layer) {
+            metalxr_release_objc(swapchain->ioSurfaceTextures[i][layer]);
+            swapchain->ioSurfaceTextures[i][layer] = NULL;
+            if (swapchain->ioSurfaces[i][layer] != NULL) {
+                CFRelease(swapchain->ioSurfaces[i][layer]);
+                swapchain->ioSurfaces[i][layer] = NULL;
+            }
+        }
     }
 
     swapchain->magic = 0;
@@ -1172,6 +1220,8 @@ static XrResult metalxr_fill_view_configuration_views(
     return XR_SUCCESS;
 }
 
+static int metalxr_should_use_iosurface_swapchain(void);
+
 static const int64_t* metalxr_supported_swapchain_formats(uint32_t* formatCount)
 {
     static const int64_t formats[] = {
@@ -1250,6 +1300,101 @@ static uint64_t metalxr_swapchain_storage_mode(void)
         kMetalStorageModePrivate;
 }
 
+static int metalxr_should_use_iosurface_swapchain(void)
+{
+    const char* resourceMode = getenv("METALXR_SWAPCHAIN_RESOURCE_MODE");
+    return resourceMode != NULL && strcmp(resourceMode, "iosurface") == 0;
+}
+
+static int metalxr_format_supports_iosurface(int64_t format)
+{
+    return format == kMetalPixelFormatBGRA8Unorm ||
+           format == kMetalPixelFormatBGRA8UnormSrgb ||
+           format == kMetalPixelFormatRGBA8Unorm ||
+           format == kMetalPixelFormatRGBA8UnormSrgb;
+}
+
+static const char* metalxr_iosurface_payload_format_name(int64_t format)
+{
+    switch (format) {
+        case kMetalPixelFormatBGRA8Unorm:
+        case kMetalPixelFormatBGRA8UnormSrgb:
+            return "IOSurfaceBGRA8";
+        case kMetalPixelFormatRGBA8Unorm:
+        case kMetalPixelFormatRGBA8UnormSrgb:
+            return "IOSurfaceRGBA8";
+        default:
+            return "IOSurfaceUNKNOWN";
+    }
+}
+
+static void metalxr_cf_dictionary_set_int(
+    CFMutableDictionaryRef dictionary,
+    const void* key,
+    int value)
+{
+    CFNumberRef number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &value);
+    if (number == NULL) {
+        return;
+    }
+    CFDictionarySetValue(dictionary, key, number);
+    CFRelease(number);
+}
+
+static void metalxr_cf_dictionary_set_u32(
+    CFMutableDictionaryRef dictionary,
+    const void* key,
+    uint32_t value)
+{
+    int64_t signedValue = (int64_t)value;
+    CFNumberRef number = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &signedValue);
+    if (number == NULL) {
+        return;
+    }
+    CFDictionarySetValue(dictionary, key, number);
+    CFRelease(number);
+}
+
+static IOSurfaceRef metalxr_create_iosurface(
+    uint32_t width,
+    uint32_t height,
+    int64_t format,
+    size_t* bytesPerRow)
+{
+    if (!metalxr_format_supports_iosurface(format) || width == 0 || height == 0) {
+        return NULL;
+    }
+
+    CFMutableDictionaryRef properties = CFDictionaryCreateMutable(
+        kCFAllocatorDefault,
+        0,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    if (properties == NULL) {
+        return NULL;
+    }
+
+    metalxr_cf_dictionary_set_u32(properties, kIOSurfaceWidth, width);
+    metalxr_cf_dictionary_set_u32(properties, kIOSurfaceHeight, height);
+    metalxr_cf_dictionary_set_int(properties, kIOSurfaceBytesPerElement, 4);
+    const uint32_t pixelFormat =
+        format == kMetalPixelFormatBGRA8Unorm || format == kMetalPixelFormatBGRA8UnormSrgb ?
+            kCVPixelFormatType_32BGRA :
+            kCVPixelFormatType_32RGBA;
+    metalxr_cf_dictionary_set_u32(properties, kIOSurfacePixelFormat, pixelFormat);
+
+    IOSurfaceRef surface = IOSurfaceCreate(properties);
+    CFRelease(properties);
+    if (surface == NULL) {
+        return NULL;
+    }
+
+    if (bytesPerRow != NULL) {
+        *bytesPerRow = IOSurfaceGetBytesPerRow(surface);
+    }
+    return surface;
+}
+
 static MetalXrObjcBridge* metalxr_objc_bridge(void)
 {
     if (g_objcBridge.loaded) {
@@ -1307,6 +1452,22 @@ static MetalXrObjcId metalxr_objc_send_id_id(
     return send(receiver, selector, value);
 }
 
+static MetalXrObjcId metalxr_objc_send_id_id_id_uint(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    MetalXrObjcId firstValue,
+    MetalXrObjcId secondValue,
+    uint64_t thirdValue)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || receiver == NULL || selector == NULL) {
+        return NULL;
+    }
+
+    PFN_objc_msgSend_id_id_id_uint send = (PFN_objc_msgSend_id_id_id_uint)bridge->objc_msgSend;
+    return send(receiver, selector, firstValue, secondValue, thirdValue);
+}
+
 static void metalxr_objc_send_void(MetalXrObjcId receiver, MetalXrSel selector)
 {
     MetalXrObjcBridge* bridge = metalxr_objc_bridge();
@@ -1341,6 +1502,39 @@ static void metalxr_objc_send_void_uint(MetalXrObjcId receiver, MetalXrSel selec
 
     PFN_objc_msgSend_void_uint send = (PFN_objc_msgSend_void_uint)bridge->objc_msgSend;
     send(receiver, selector, value);
+}
+
+static void metalxr_objc_send_blit_copy(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    MetalXrObjcId sourceTexture,
+    uint64_t sourceSlice,
+    uint64_t sourceLevel,
+    MetalXrOrigin sourceOrigin,
+    MetalXrSize sourceSize,
+    MetalXrObjcId destinationTexture,
+    uint64_t destinationSlice,
+    uint64_t destinationLevel,
+    MetalXrOrigin destinationOrigin)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || receiver == NULL || selector == NULL ||
+        sourceTexture == NULL || destinationTexture == NULL) {
+        return;
+    }
+
+    PFN_objc_msgSend_blit_copy send = (PFN_objc_msgSend_blit_copy)bridge->objc_msgSend;
+    send(receiver,
+         selector,
+         sourceTexture,
+         sourceSlice,
+         sourceLevel,
+         sourceOrigin,
+         sourceSize,
+         destinationTexture,
+         destinationSlice,
+         destinationLevel,
+         destinationOrigin);
 }
 
 static void metalxr_objc_get_texture_bytes(
@@ -1435,6 +1629,58 @@ static void* metalxr_create_metal_texture(
         (MetalXrObjcId)metalDevice,
         metalxr_sel(bridge, "newTextureWithDescriptor:"),
         descriptor);
+    metalxr_release_objc(descriptor);
+
+    return texture;
+}
+
+static void* metalxr_create_metal_texture_from_iosurface(
+    void* metalDevice,
+    IOSurfaceRef surface,
+    int64_t format,
+    uint32_t width,
+    uint32_t height,
+    XrSwapchainUsageFlags usageFlags)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || metalDevice == NULL || surface == NULL ||
+        !metalxr_format_supports_iosurface(format)) {
+        return NULL;
+    }
+
+    MetalXrObjcClass descriptorClass = bridge->objc_getClass("MTLTextureDescriptor");
+    if (descriptorClass == NULL) {
+        metalxr_log("MTLTextureDescriptor class unavailable");
+        return NULL;
+    }
+
+    MetalXrObjcId descriptor =
+        metalxr_objc_send_id((MetalXrObjcId)descriptorClass, metalxr_sel(bridge, "alloc"));
+    descriptor = metalxr_objc_send_id(descriptor, metalxr_sel(bridge, "init"));
+    if (descriptor == NULL) {
+        return NULL;
+    }
+
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setTextureType:"),
+                                kMetalTextureType2D);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setPixelFormat:"), (uint64_t)format);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setWidth:"), width);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setHeight:"), height);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setDepth:"), 1);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setMipmapLevelCount:"), 1);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setSampleCount:"), 1);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setArrayLength:"), 1);
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setUsage:"),
+                                metalxr_metal_texture_usage(usageFlags));
+    metalxr_objc_send_void_uint(descriptor, metalxr_sel(bridge, "setStorageMode:"),
+                                kMetalStorageModeShared);
+
+    MetalXrObjcId texture = metalxr_objc_send_id_id_id_uint(
+        (MetalXrObjcId)metalDevice,
+        metalxr_sel(bridge, "newTextureWithDescriptor:iosurface:plane:"),
+        descriptor,
+        (MetalXrObjcId)surface,
+        0);
     metalxr_release_objc(descriptor);
 
     return texture;
@@ -2705,8 +2951,24 @@ static XrResult XRAPI_CALL metalxr_xrCreateSwapchain(
     created->arraySize = createInfo->arraySize;
     created->mipCount = createInfo->mipCount;
     created->sampleCount = createInfo->sampleCount;
+    const int wantsIosurfaceSwapchain = metalxr_should_use_iosurface_swapchain();
+    const int canUseIosurfaceSwapchain =
+        wantsIosurfaceSwapchain &&
+        createInfo->arraySize <= kViewCount &&
+        createInfo->mipCount == 1 &&
+        metalxr_format_supports_iosurface(createInfo->format);
+
+    if (wantsIosurfaceSwapchain && !canUseIosurfaceSwapchain) {
+        metalxr_log("IOSurface export unavailable format=%" PRId64 " array=%u mip=%u; using readback export",
+                    createInfo->format,
+                    createInfo->arraySize,
+                    createInfo->mipCount);
+    }
+
     created->storageMode = metalxr_swapchain_storage_mode();
     created->imageCount = kSwapchainImageCount;
+    created->ioSurfaceBacked = canUseIosurfaceSwapchain ? XR_TRUE : XR_FALSE;
+    created->ioSurfaceLayerCount = canUseIosurfaceSwapchain ? createInfo->arraySize : 0;
 
     for (uint32_t i = 0; i < created->imageCount; ++i) {
         created->textures[i] = metalxr_create_metal_texture(
@@ -2719,17 +2981,19 @@ static XrResult XRAPI_CALL metalxr_xrCreateSwapchain(
             createInfo->usageFlags,
             created->storageMode);
         if (created->textures[i] == NULL) {
-            metalxr_log("xrCreateSwapchain failed: Metal texture allocation failed");
+            metalxr_log("xrCreateSwapchain failed: Metal texture allocation failed iosurface=%u",
+                        created->ioSurfaceBacked);
             metalxr_release_swapchain(created);
             return XR_ERROR_RUNTIME_FAILURE;
         }
+
     }
 
     session->swapchains[session->swapchainCount++] = created;
     *swapchain = created;
 
     metalxr_log("swapchain %" PRIu64 " created format=%" PRId64
-                " %ux%u array=%u images=%u usage=0x%llx storage=%llu",
+                " %ux%u array=%u images=%u usage=0x%llx storage=%llu iosurface=%u layers=%u",
                 created->id,
                 created->format,
                 created->width,
@@ -2737,7 +3001,9 @@ static XrResult XRAPI_CALL metalxr_xrCreateSwapchain(
                 created->arraySize,
                 created->imageCount,
                 (unsigned long long)created->usageFlags,
-                (unsigned long long)created->storageMode);
+                (unsigned long long)created->storageMode,
+                created->ioSurfaceBacked,
+                created->ioSurfaceLayerCount);
 
     return XR_SUCCESS;
 }
@@ -3113,6 +3379,116 @@ static void metalxr_synchronize_texture_for_cpu(XrSession session, void* texture
     }
 }
 
+static int metalxr_ensure_iosurface_export_target(
+    XrSession session,
+    XrSwapchain swapchain,
+    uint32_t imageIndex,
+    uint32_t arrayIndex)
+{
+    if (!metalxr_is_session(session) || !metalxr_is_swapchain(swapchain) ||
+        imageIndex >= swapchain->imageCount ||
+        arrayIndex >= swapchain->ioSurfaceLayerCount) {
+        return 0;
+    }
+
+    if (swapchain->ioSurfaceTextures[imageIndex][arrayIndex] != NULL) {
+        return 1;
+    }
+
+    swapchain->ioSurfaces[imageIndex][arrayIndex] = metalxr_create_iosurface(
+        swapchain->width,
+        swapchain->height,
+        swapchain->format,
+        &swapchain->ioSurfaceBytesPerRow);
+    if (swapchain->ioSurfaces[imageIndex][arrayIndex] == NULL) {
+        metalxr_log("IOSurface export target allocation failed image=%u layer=%u",
+                    imageIndex,
+                    arrayIndex);
+        return 0;
+    }
+
+    swapchain->ioSurfaceTextures[imageIndex][arrayIndex] = metalxr_create_metal_texture_from_iosurface(
+        session->metalDevice,
+        swapchain->ioSurfaces[imageIndex][arrayIndex],
+        swapchain->format,
+        swapchain->width,
+        swapchain->height,
+        swapchain->usageFlags);
+    if (swapchain->ioSurfaceTextures[imageIndex][arrayIndex] == NULL) {
+        metalxr_log("IOSurface export Metal texture allocation failed image=%u layer=%u",
+                    imageIndex,
+                    arrayIndex);
+        CFRelease(swapchain->ioSurfaces[imageIndex][arrayIndex]);
+        swapchain->ioSurfaces[imageIndex][arrayIndex] = NULL;
+        return 0;
+    }
+
+    swapchain->ioSurfaceIds[imageIndex][arrayIndex] =
+        IOSurfaceGetID(swapchain->ioSurfaces[imageIndex][arrayIndex]);
+    metalxr_log("IOSurface export target ready image=%u layer=%u id=%u",
+                imageIndex,
+                arrayIndex,
+                swapchain->ioSurfaceIds[imageIndex][arrayIndex]);
+    return swapchain->ioSurfaceIds[imageIndex][arrayIndex] != 0;
+}
+
+static int metalxr_copy_texture_slice_to_iosurface(
+    XrSession session,
+    XrSwapchain swapchain,
+    uint32_t imageIndex,
+    uint32_t arrayIndex,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || !metalxr_is_session(session) || !metalxr_is_swapchain(swapchain) ||
+        session->metalCommandQueue == NULL ||
+        imageIndex >= swapchain->imageCount ||
+        arrayIndex >= swapchain->ioSurfaceLayerCount ||
+        swapchain->textures[imageIndex] == NULL ||
+        swapchain->ioSurfaceTextures[imageIndex][arrayIndex] == NULL) {
+        return 0;
+    }
+
+    MetalXrObjcId commandBuffer = metalxr_objc_send_id(
+        (MetalXrObjcId)session->metalCommandQueue,
+        metalxr_sel(bridge, "commandBuffer"));
+    if (commandBuffer == NULL) {
+        return 0;
+    }
+
+    MetalXrObjcId blitEncoder = metalxr_objc_send_id(
+        commandBuffer,
+        metalxr_sel(bridge, "blitCommandEncoder"));
+    if (blitEncoder == NULL) {
+        return 0;
+    }
+
+    MetalXrOrigin sourceOrigin = { x, y, 0 };
+    MetalXrOrigin destinationOrigin = { x, y, 0 };
+    MetalXrSize sourceSize = { width, height, 1 };
+    metalxr_objc_send_blit_copy(
+        blitEncoder,
+        metalxr_sel(bridge,
+                    "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:"
+                    "toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
+        (MetalXrObjcId)swapchain->textures[imageIndex],
+        arrayIndex,
+        0,
+        sourceOrigin,
+        sourceSize,
+        (MetalXrObjcId)swapchain->ioSurfaceTextures[imageIndex][arrayIndex],
+        0,
+        0,
+        destinationOrigin);
+    metalxr_objc_send_void(blitEncoder, metalxr_sel(bridge, "endEncoding"));
+    metalxr_objc_send_void(commandBuffer, metalxr_sel(bridge, "commit"));
+    metalxr_objc_send_void(commandBuffer, metalxr_sel(bridge, "waitUntilCompleted"));
+    return 1;
+}
+
 static int metalxr_read_texture_payload(
     XrSession session,
     XrSwapchain swapchain,
@@ -3352,6 +3728,111 @@ static void metalxr_export_projection_view(
         return;
     }
 
+    const char* mode = metalxr_frame_export_mode();
+    if (strcmp(mode, "iosurface") == 0 &&
+        swapchain->ioSurfaceBacked &&
+        swapchain->acquiredImageIndex < swapchain->imageCount &&
+        view->subImage.imageArrayIndex < swapchain->ioSurfaceLayerCount &&
+        metalxr_ensure_iosurface_export_target(session,
+                                               swapchain,
+                                               swapchain->acquiredImageIndex,
+                                               view->subImage.imageArrayIndex) &&
+        metalxr_copy_texture_slice_to_iosurface(session,
+                                                swapchain,
+                                                swapchain->acquiredImageIndex,
+                                                view->subImage.imageArrayIndex,
+                                                x,
+                                                y,
+                                                width,
+                                                height)) {
+        const size_t bytesPerRow = swapchain->ioSurfaceBytesPerRow != 0 ?
+            swapchain->ioSurfaceBytesPerRow :
+            (size_t)swapchain->width * bytesPerPixel;
+        char recordPath[1024];
+        snprintf(recordPath,
+                 sizeof(recordPath),
+                 "%s/frame_%06" PRIu64 "_eye_%u.json",
+                 exportDirectory,
+                 session->frameIndex,
+                 eye);
+
+        char record[8192];
+        snprintf(record,
+                 sizeof(record),
+                 "{\"event\":\"frame_export\",\"frame\":%" PRIu64 ",\"eye\":%u,"
+                 "\"displayTime\":%" PRId64 ",\"swapchain\":%" PRIu64 ",\"imageIndex\":%u,"
+                 "\"texture\":\"%p\",\"pixelFormat\":%" PRId64 ",\"payloadFormat\":\"%s\","
+                 "\"width\":%u,\"height\":%u,\"bytesPerRow\":%zu,\"payloadBytes\":0,"
+                 "\"ioSurfaceId\":%u,"
+                 "\"sourceRect\":{\"x\":%u,\"y\":%u,\"width\":%u,\"height\":%u},"
+                 "\"imageRectX\":%u,\"imageRectY\":%u,\"imageRectWidth\":%u,\"imageRectHeight\":%u,"
+                 "\"imageArrayIndex\":%u,\"projectionFlags\":1,\"referenceSpaceId\":%" PRIu64 ","
+                 "\"posePositionX\":%.9g,\"posePositionY\":%.9g,\"posePositionZ\":%.9g,"
+                 "\"poseOrientationX\":%.9g,\"poseOrientationY\":%.9g,"
+                 "\"poseOrientationZ\":%.9g,\"poseOrientationW\":%.9g,"
+                 "\"fovAngleLeft\":%.9g,\"fovAngleRight\":%.9g,"
+                 "\"fovAngleUp\":%.9g,\"fovAngleDown\":%.9g,"
+                 "\"arrayIndex\":%u,\"storageMode\":%llu,\"mode\":\"%s\",\"payloadPath\":\"\"}",
+                 session->frameIndex,
+                 eye,
+                 frameEndInfo->displayTime,
+                 swapchain->id,
+                 swapchain->acquiredImageIndex,
+                 swapchain->ioSurfaceTextures[swapchain->acquiredImageIndex][view->subImage.imageArrayIndex],
+                 swapchain->format,
+                 metalxr_iosurface_payload_format_name(swapchain->format),
+                 swapchain->width,
+                 swapchain->height,
+                 bytesPerRow,
+                 swapchain->ioSurfaceIds[swapchain->acquiredImageIndex][view->subImage.imageArrayIndex],
+                 x,
+                 y,
+                 width,
+                 height,
+                 x,
+                 y,
+                 width,
+                 height,
+                 view->subImage.imageArrayIndex,
+                 (uint64_t)(uintptr_t)referenceSpace,
+                 view->pose.position.x,
+                 view->pose.position.y,
+                 view->pose.position.z,
+                 view->pose.orientation.x,
+                 view->pose.orientation.y,
+                 view->pose.orientation.z,
+                 view->pose.orientation.w,
+                 view->fov.angleLeft,
+                 view->fov.angleRight,
+                 view->fov.angleUp,
+                 view->fov.angleDown,
+                 view->subImage.imageArrayIndex,
+                 (unsigned long long)swapchain->storageMode,
+                 mode);
+
+        char tempRecordPath[1024];
+        snprintf(tempRecordPath, sizeof(tempRecordPath), "%s.tmp", recordPath);
+        FILE* recordOutput = fopen(tempRecordPath, "w");
+        if (recordOutput == NULL) {
+            metalxr_log("frame export IOSurface record write failed: %s", recordPath);
+            return;
+        }
+        fprintf(recordOutput, "%s\n", record);
+        fclose(recordOutput);
+        if (rename(tempRecordPath, recordPath) != 0) {
+            (void)remove(tempRecordPath);
+            metalxr_log("frame export IOSurface record rename failed: %s", recordPath);
+            return;
+        }
+
+        metalxr_append_frame_export_record(exportDirectory, record);
+        metalxr_log("frame export wrote frame=%" PRIu64 " eye=%u iosurface=%u",
+                    session->frameIndex,
+                    eye,
+                    swapchain->ioSurfaceIds[swapchain->acquiredImageIndex][view->subImage.imageArrayIndex]);
+        return;
+    }
+
     const size_t bytesPerRow = (size_t)width * bytesPerPixel;
     const size_t payloadBytes = bytesPerRow * (size_t)height;
     uint8_t* payload = (uint8_t*)calloc(1, payloadBytes);
@@ -3360,7 +3841,6 @@ static void metalxr_export_projection_view(
         return;
     }
 
-    const char* mode = metalxr_frame_export_mode();
     int payloadReady = 0;
     if (strcmp(mode, "fixture") == 0) {
         metalxr_write_fixture_pixels(payload,

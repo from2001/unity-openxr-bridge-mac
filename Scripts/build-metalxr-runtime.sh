@@ -24,6 +24,9 @@ else
     -I "$repo_root/Runtime/MetalXRProtocol/include" \
     "$runtime_dir/src/metalxr_runtime.c" \
     "$repo_root/Runtime/MetalXRProtocol/src/metalxr_shared_state.c" \
+    -framework CoreFoundation \
+    -framework CoreVideo \
+    -framework IOSurface \
     -install_name "@rpath/libmetalxr_runtime.dylib" \
     -o "$build_dir/libmetalxr_runtime.dylib"
 fi

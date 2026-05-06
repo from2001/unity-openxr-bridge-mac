@@ -28,4 +28,11 @@ if(APPLE)
     set_target_properties(metalxr_runtime PROPERTIES
         INSTALL_NAME_DIR "@rpath"
     )
+
+    target_link_libraries(metalxr_runtime
+        PRIVATE
+            "-framework CoreFoundation"
+            "-framework CoreVideo"
+            "-framework IOSurface"
+    )
 endif()
