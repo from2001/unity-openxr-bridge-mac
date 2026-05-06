@@ -45,6 +45,17 @@ METALXR_PROBE_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1 \
 Scripts/probe-metalxr-runtime.sh
 ```
 
+Validate the same IOSurface path without frame export files:
+
+```sh
+METALXR_PROBE_FRAME_EXPORT_DIR= \
+METALXR_PROBE_FRAME_EXPORT_SOCKET="${TMPDIR:-/tmp}/metalxr-runtime-probe.sock" \
+METALXR_PROBE_FRAME_EXPORT_MODE=iosurface \
+METALXR_PROBE_SWAPCHAIN_RESOURCE_MODE=iosurface \
+METALXR_PROBE_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1 \
+Scripts/probe-metalxr-runtime.sh
+```
+
 ## 3. Build And Install The Quest Client
 
 ```sh
@@ -115,7 +126,7 @@ For USB, the stream script binds to `127.0.0.1`, configures `adb reverse`, and r
 - `METALXR_RUNTIME_JSON` - explicit OpenXR runtime manifest.
 - `METALXR_FRAME_EXPORT_MODE=fixture|readback`; `iosurface` is gated behind `METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1` and should only be used for isolated runtime validation.
 - `METALXR_FRAME_EXPORT_DIR`
-- `METALXR_FRAME_EXPORT_SOCKET` - optional Unix datagram socket path for frame metadata records.
+- `METALXR_FRAME_EXPORT_SOCKET` - optional Unix datagram socket path for frame metadata records. `METALXR_FRAME_EXPORT_MODE=iosurface` can use the socket without a frame export directory because the payload is carried by `ioSurfaceId`; `fixture` and `readback` still require the directory because they write payload files.
 - `METALXR_SWAPCHAIN_STORAGE_MODE=shared|managed|private`
 - `METALXR_STREAM_WIDTH`, `METALXR_STREAM_HEIGHT`, `METALXR_STREAM_FPS`
 - `METALXR_STREAM_BITRATE`, `METALXR_STREAM_QUEUE_DEPTH`

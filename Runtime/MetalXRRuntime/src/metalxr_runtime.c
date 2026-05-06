@@ -3262,6 +3262,12 @@ static const char* metalxr_frame_export_dir(void)
     return exportDirectory != NULL && exportDirectory[0] != '\0' ? exportDirectory : NULL;
 }
 
+static const char* metalxr_frame_export_socket_path(void)
+{
+    const char* socketPath = getenv("METALXR_FRAME_EXPORT_SOCKET");
+    return socketPath != NULL && socketPath[0] != '\0' ? socketPath : NULL;
+}
+
 static const char* metalxr_frame_export_mode(void)
 {
     const char* mode = getenv("METALXR_FRAME_EXPORT_MODE");
@@ -3598,8 +3604,8 @@ static int metalxr_write_binary_file(const char* path, const uint8_t* bytes, siz
 
 static void metalxr_append_frame_export_record(const char* exportDirectory, const char* record)
 {
-    const char* socketPath = getenv("METALXR_FRAME_EXPORT_SOCKET");
-    if (socketPath != NULL && socketPath[0] != '\0') {
+    const char* socketPath = metalxr_frame_export_socket_path();
+    if (socketPath != NULL) {
         if (strlen(socketPath) >= sizeof(((struct sockaddr_un*)0)->sun_path)) {
             metalxr_log("frame export socket path too long: %s", socketPath);
         } else {
@@ -3623,6 +3629,10 @@ static void metalxr_append_frame_export_record(const char* exportDirectory, cons
                 close(socketFd);
             }
         }
+    }
+
+    if (exportDirectory == NULL || exportDirectory[0] == '\0') {
+        return;
     }
 
     char indexPath[1024];
@@ -3761,7 +3771,13 @@ static void metalxr_export_projection_view(
     uint32_t eye)
 {
     const char* exportDirectory = metalxr_frame_export_dir();
-    if (exportDirectory == NULL || !metalxr_is_session(session) ||
+    const char* mode = metalxr_frame_export_mode();
+    const int socketOnlyIosurface =
+        exportDirectory == NULL &&
+        strcmp(mode, "iosurface") == 0 &&
+        metalxr_frame_export_socket_path() != NULL;
+    if ((exportDirectory == NULL && !socketOnlyIosurface) ||
+        !metalxr_is_session(session) ||
         frameEndInfo == NULL || view == NULL) {
         return;
     }
@@ -3791,7 +3807,6 @@ static void metalxr_export_projection_view(
         return;
     }
 
-    const char* mode = metalxr_frame_export_mode();
     if (strcmp(mode, "iosurface") == 0 &&
         swapchain->ioSurfaceBacked &&
         swapchain->acquiredImageIndex < swapchain->imageCount &&
@@ -3811,14 +3826,6 @@ static void metalxr_export_projection_view(
         const size_t bytesPerRow = swapchain->ioSurfaceBytesPerRow != 0 ?
             swapchain->ioSurfaceBytesPerRow :
             (size_t)swapchain->width * bytesPerPixel;
-        char recordPath[1024];
-        snprintf(recordPath,
-                 sizeof(recordPath),
-                 "%s/frame_%06" PRIu64 "_eye_%u.json",
-                 exportDirectory,
-                 session->frameIndex,
-                 eye);
-
         char record[8192];
         snprintf(record,
                  sizeof(record),
@@ -3873,19 +3880,29 @@ static void metalxr_export_projection_view(
                  (unsigned long long)swapchain->storageMode,
                  mode);
 
-        char tempRecordPath[1024];
-        snprintf(tempRecordPath, sizeof(tempRecordPath), "%s.tmp", recordPath);
-        FILE* recordOutput = fopen(tempRecordPath, "w");
-        if (recordOutput == NULL) {
-            metalxr_log("frame export IOSurface record write failed: %s", recordPath);
-            return;
-        }
-        fprintf(recordOutput, "%s\n", record);
-        fclose(recordOutput);
-        if (rename(tempRecordPath, recordPath) != 0) {
-            (void)remove(tempRecordPath);
-            metalxr_log("frame export IOSurface record rename failed: %s", recordPath);
-            return;
+        if (exportDirectory != NULL) {
+            char recordPath[1024];
+            snprintf(recordPath,
+                     sizeof(recordPath),
+                     "%s/frame_%06" PRIu64 "_eye_%u.json",
+                     exportDirectory,
+                     session->frameIndex,
+                     eye);
+
+            char tempRecordPath[1024];
+            snprintf(tempRecordPath, sizeof(tempRecordPath), "%s.tmp", recordPath);
+            FILE* recordOutput = fopen(tempRecordPath, "w");
+            if (recordOutput == NULL) {
+                metalxr_log("frame export IOSurface record write failed: %s", recordPath);
+                return;
+            }
+            fprintf(recordOutput, "%s\n", record);
+            fclose(recordOutput);
+            if (rename(tempRecordPath, recordPath) != 0) {
+                (void)remove(tempRecordPath);
+                metalxr_log("frame export IOSurface record rename failed: %s", recordPath);
+                return;
+            }
         }
 
         metalxr_append_frame_export_record(exportDirectory, record);
@@ -3893,6 +3910,10 @@ static void metalxr_export_projection_view(
                     session->frameIndex,
                     eye,
                     swapchain->ioSurfaceIds[swapchain->acquiredImageIndex][view->subImage.imageArrayIndex]);
+        return;
+    }
+
+    if (exportDirectory == NULL) {
         return;
     }
 
@@ -4044,11 +4065,16 @@ static void metalxr_export_projection_frame(
     const XrCompositionLayerProjection* projectionLayer)
 {
     const char* exportDirectory = metalxr_frame_export_dir();
-    if (exportDirectory == NULL) {
+    const char* mode = metalxr_frame_export_mode();
+    const int socketOnlyIosurface =
+        exportDirectory == NULL &&
+        strcmp(mode, "iosurface") == 0 &&
+        metalxr_frame_export_socket_path() != NULL;
+    if (exportDirectory == NULL && !socketOnlyIosurface) {
         return;
     }
 
-    if (strcmp(metalxr_frame_export_mode(), "fixture") == 0) {
+    if (strcmp(mode, "fixture") == 0) {
         metalxr_export_fixture_frame(session, frameEndInfo, exportDirectory);
         return;
     }
