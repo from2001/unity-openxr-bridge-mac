@@ -77,6 +77,8 @@ By default, the workflow uses `METALXR_FRAME_EXPORT_MODE=fixture` to keep the en
 
 On Quest, the client reads VIDEO_FRAME packets on a background thread, queues encoded access units, and processes decode/display work on the Unity main thread. Android builds attempt MediaCodec H.264 decode first, read `Image.getPlanes()` YUV_420_888 output, convert it to RGBA, and upload the color result into the per-eye Unity textures. If MediaCodec is unavailable, output images are unavailable, or decoded color samples are near-black, the client displays a compressed-payload preview so transport and frame pacing remain visible during development. Display logs include decoder mode, output format, frame id, eye, host encoder latency, local client receive-to-display timing, decode time, submit time, and queue depth.
 
+`Assets/Plugins/Android/com/metalxr/questclient/MetalXRSurfaceDecoder.java` is the first Android-side skeleton for the future Surface decode path. It can create an external OES texture, configure MediaCodec with a `SurfaceTexture` target, queue H.264 frames, and release decoded output to the Surface. The Unity client does not route frames through it yet and does not advertise `METALXR_CAPABILITY_SURFACE_DECODE`; the current active decode path remains the Image-plane diagnostic path until native texture import and presentation are wired end to end.
+
 To make HMD/casting black-frame regressions visible during device smoke tests, capture and analyze a Quest screenshot:
 
 ```sh
