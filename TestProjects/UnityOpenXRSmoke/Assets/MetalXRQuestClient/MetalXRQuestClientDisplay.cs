@@ -1361,7 +1361,19 @@ namespace MetalXR.QuestClient
         private bool _surfaceDecoderLogged;
         private bool _surfaceDecoderFallbackLogged;
         private bool _surfaceDecoderUnavailable;
+        private bool _surfaceTextureCreateRequested;
+        private bool _surfaceTextureWaitingLogged;
+        private bool _surfaceTextureUpdateFallbackLogged;
         private readonly Dictionary<long, MetalXRQuestEncodedVideoFrame> _surfacePendingFrames = new Dictionary<long, MetalXRQuestEncodedVideoFrame>();
+
+        [DllImport("metalxrquestgl")]
+        private static extern IntPtr MetalXRQuestGL_GetRenderEventFunc();
+
+        [DllImport("metalxrquestgl")]
+        private static extern int MetalXRQuestGL_CreateExternalTextureEventId(int slot);
+
+        [DllImport("metalxrquestgl")]
+        private static extern int MetalXRQuestGL_GetExternalTexture(int slot);
 #endif
 
         public MetalXRQuestEyeDecoder(
@@ -1461,6 +1473,12 @@ namespace MetalXR.QuestClient
                 string outputFormat =
                     "external-oes-texture=" + _surfaceTextureName +
                     ";updated=" + textureUpdated;
+                if (_enableExperimentalSurfacePresent && !textureUpdated)
+                {
+                    LogSurfaceTextureUpdateFallbackOnce();
+                    return false;
+                }
+
                 if (_enableExperimentalSurfacePresent && textureUpdated)
                 {
                     decodedFrame = new MetalXRQuestDecodedVideoFrame(
@@ -1506,16 +1524,12 @@ namespace MetalXR.QuestClient
 
             try
             {
-                _surfaceDecoder = new AndroidJavaObject("com.metalxr.questclient.MetalXRSurfaceDecoder", _eyeName);
-                _surfaceTextureName = _surfaceDecoder.Call<int>("createExternalTexture");
-                if (_surfaceTextureName == 0)
+                if (!EnsureRenderThreadExternalTexture())
                 {
-                    LogSurfaceDecoderErrorOnce("experimental Surface decoder could not create an external texture for " + _eyeName + " eye");
-                    _surfaceDecoderUnavailable = true;
-                    DisposeSurfaceDecoder();
                     return false;
                 }
 
+                _surfaceDecoder = new AndroidJavaObject("com.metalxr.questclient.MetalXRSurfaceDecoder", _eyeName);
                 bool configured = _surfaceDecoder.Call<bool>("configure", frame.Width, frame.Height, _surfaceTextureName);
                 if (!configured)
                 {
@@ -1548,6 +1562,75 @@ namespace MetalXR.QuestClient
                 DisposeSurfaceDecoder();
                 return false;
             }
+        }
+
+        private bool EnsureRenderThreadExternalTexture()
+        {
+            int slot = _leftEye ? 0 : 1;
+            try
+            {
+                int textureName = MetalXRQuestGL_GetExternalTexture(slot);
+                if (textureName != 0)
+                {
+                    _surfaceTextureName = textureName;
+                    return true;
+                }
+
+                if (!_surfaceTextureCreateRequested)
+                {
+                    IntPtr renderEventFunc = MetalXRQuestGL_GetRenderEventFunc();
+                    int eventId = MetalXRQuestGL_CreateExternalTextureEventId(slot);
+                    if (renderEventFunc == IntPtr.Zero || eventId == 0)
+                    {
+                        LogSurfaceDecoderErrorOnce("experimental Surface decoder native render event was unavailable for " + _eyeName + " eye");
+                        _surfaceDecoderUnavailable = true;
+                        return false;
+                    }
+
+                    _surfaceTextureCreateRequested = true;
+                    GL.IssuePluginEvent(renderEventFunc, eventId);
+                    if (!_surfaceTextureWaitingLogged)
+                    {
+                        _surfaceTextureWaitingLogged = true;
+                        Log("requested render-thread external OES texture for " + _eyeName + " eye");
+                    }
+                }
+
+                return false;
+            }
+            catch (Exception exception)
+            {
+                LogSurfaceDecoderErrorOnce("experimental Surface decoder native plugin unavailable for " + _eyeName + " eye: " + exception.Message);
+                _surfaceDecoderUnavailable = true;
+                return false;
+            }
+        }
+
+        private void LogSurfaceTextureUpdateFallbackOnce()
+        {
+            if (_surfaceTextureUpdateFallbackLogged)
+            {
+                return;
+            }
+
+            _surfaceTextureUpdateFallbackLogged = true;
+            string error = "";
+            if (_surfaceDecoder != null)
+            {
+                try
+                {
+                    error = _surfaceDecoder.Call<string>("getLastError");
+                }
+                catch (Exception)
+                {
+                    error = "";
+                }
+            }
+
+            Log(
+                string.IsNullOrEmpty(error) ?
+                    "SurfaceTexture update was not ready for " + _eyeName + " eye; falling back to MediaCodec Image-plane decode" :
+                    error + "; falling back to MediaCodec Image-plane decode");
         }
 
         private void LogSurfaceDecoderErrorOnce(string fallbackMessage)
@@ -2130,6 +2213,7 @@ namespace MetalXR.QuestClient
             _surfaceConfiguredWidth = 0;
             _surfaceConfiguredHeight = 0;
             _surfaceTextureName = 0;
+            _surfaceTextureCreateRequested = false;
         }
 #endif
 
