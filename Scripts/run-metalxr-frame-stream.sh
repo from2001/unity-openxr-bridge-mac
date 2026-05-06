@@ -25,6 +25,7 @@ Environment:
                               Reconnect attempts after early finite-stream disconnects. Defaults to 0.
   METALXR_FRAME_SOURCE        synthetic or unity-export. Defaults to synthetic.
   METALXR_FRAME_EXPORT_DIR    Runtime frame export directory for unity-export source.
+  METALXR_FRAME_EXPORT_SOCKET Runtime frame export datagram socket for unity-export source.
   METALXR_PREDICTION_OFFSET_MS
                               Signed prediction offset in milliseconds. Defaults to 0.
   METALXR_CLOCK_SYNC_INTERVAL_MS
@@ -57,6 +58,7 @@ queue_depth="${METALXR_STREAM_QUEUE_DEPTH:-3}"
 reconnect_attempts="${METALXR_STREAM_RECONNECT_ATTEMPTS:-0}"
 frame_source="${METALXR_FRAME_SOURCE:-synthetic}"
 frame_export_dir="${METALXR_FRAME_EXPORT_DIR:-}"
+frame_export_socket="${METALXR_FRAME_EXPORT_SOCKET:-}"
 prediction_offset_ms="${METALXR_PREDICTION_OFFSET_MS:-0}"
 clock_sync_interval_ms="${METALXR_CLOCK_SYNC_INTERVAL_MS:-500}"
 shared_state_name="${METALXR_SHARED_STATE_NAME:-/metalxr_runtime_state}"
@@ -125,8 +127,8 @@ if [[ "$frame_source" != "synthetic" && "$frame_source" != "unity-export" ]]; th
   exit 1
 fi
 
-if [[ "$frame_source" == "unity-export" && -z "$frame_export_dir" ]]; then
-  echo "METALXR_FRAME_EXPORT_DIR is required when METALXR_FRAME_SOURCE=unity-export." >&2
+if [[ "$frame_source" == "unity-export" && -z "$frame_export_dir" && -z "$frame_export_socket" ]]; then
+  echo "METALXR_FRAME_EXPORT_DIR or METALXR_FRAME_EXPORT_SOCKET is required when METALXR_FRAME_SOURCE=unity-export." >&2
   exit 1
 fi
 
@@ -158,6 +160,10 @@ fi
 
 if [[ -n "$frame_export_dir" ]]; then
   streamer_args+=(--frame-export-dir "$frame_export_dir")
+fi
+
+if [[ -n "$frame_export_socket" ]]; then
+  streamer_args+=(--frame-export-socket "$frame_export_socket")
 fi
 
 "$streamer" \

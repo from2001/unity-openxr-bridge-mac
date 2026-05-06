@@ -50,7 +50,7 @@ The stream probe exercises the TCP transport path:
 Scripts/probe-metalxr-frame-stream.sh
 ```
 
-It starts `metalxr_host_streamer` with the synthetic frame source, with a generated file-payload Unity-export fixture, with a generated IOSurface Unity-export fixture, and with a reconnecting synthetic client. Each run performs the Quest HELLO/HELLO_ACK exchange, responds to timing sync probes, receives finite `METALXR_PACKET_VIDEO_FRAME` packets, verifies left/right eye counts, and checks that each packet carries H.264 bytes after the fixed video-frame metadata. The probe also verifies clock-sync, latency, reconnect, frame-source JSON records, and the host's `IOSurfaceLookup`/`CVPixelBufferCreateWithIOSurface` path.
+It starts `metalxr_host_streamer` with the synthetic frame source, with a generated file-payload Unity-export fixture, with a generated IOSurface Unity-export fixture, with a generated Unix-datagram frame-record fixture, and with a reconnecting synthetic client. Each run performs the Quest HELLO/HELLO_ACK exchange, responds to timing sync probes, receives finite `METALXR_PACKET_VIDEO_FRAME` packets, verifies left/right eye counts, and checks that each packet carries H.264 bytes after the fixed video-frame metadata. The probe also verifies clock-sync, latency, reconnect, frame-source JSON records, the host's `IOSurfaceLookup`/`CVPixelBufferCreateWithIOSurface` path, and the socket metadata path.
 
 For a headset session, launch the Quest client APK and then run:
 
@@ -68,7 +68,7 @@ METALXR_FRAME_EXPORT_DIR=/tmp/metalxr_frame_export \
 Scripts/run-metalxr-frame-stream.sh
 ```
 
-The streamer reads `<export-dir>/frames.jsonl`, selects the latest complete left/right eye pair, auto-configures the encoder dimensions from that pair, validates those dimensions against the Quest HELLO device profile, and logs frame age plus repeated-frame counts. Raw `BGRA8` and `RGBA8` records still read a payload file into the encoder pool. Experimental `IOSurfaceBGRA8` and `IOSurfaceRGBA8` records use `ioSurfaceId`, `IOSurfaceLookup`, and `CVPixelBufferCreateWithIOSurface` so the host can submit a VideoToolbox input buffer without reading a frame payload file. If no complete pair is available when the client connects, it exits with a setup error instead of silently falling back to synthetic content.
+The streamer reads `<export-dir>/frames.jsonl`, selects the latest complete left/right eye pair, auto-configures the encoder dimensions from that pair, validates those dimensions against the Quest HELLO device profile, and logs frame age plus repeated-frame counts. As a step away from file-index polling, the streamer can also bind a Unix datagram socket with `METALXR_FRAME_EXPORT_SOCKET=/tmp/metalxr_frame_export.sock`; the runtime sends the same JSONL frame records to that socket while still writing file records for debug capture. Raw `BGRA8` and `RGBA8` records still read a payload file into the encoder pool. Experimental `IOSurfaceBGRA8` and `IOSurfaceRGBA8` records use `ioSurfaceId`, `IOSurfaceLookup`, and `CVPixelBufferCreateWithIOSurface` so the host can submit a VideoToolbox input buffer without reading a frame payload file. If no complete pair is available when the client connects, it exits with a setup error instead of silently falling back to synthetic content.
 
 For normal Play Mode sessions, `METALXR_STREAM_FRAMES=0` keeps the streamer alive and waits for a Quest client to reconnect after the app restarts or USB transport drops. Finite smoke tests can set `METALXR_STREAM_RECONNECT_ATTEMPTS=N`; the streamer logs `client_disconnect` and `reconnect_wait` records before accepting the next client. When `METALXR_STREAM_FPS` is not set, the host uses the Quest HELLO `preferredFps`; explicit FPS values are capped to the client preferred rate. `METALXR_STREAM_QUEUE_DEPTH`, `METALXR_STREAM_BITRATE`, resolution, frame rate, `METALXR_PREDICTION_OFFSET_MS`, and `METALXR_CLOCK_SYNC_INTERVAL_MS` remain the primary tuning controls for latency and backlog.
 
@@ -88,7 +88,7 @@ The streamer also emits `frame_source`, `clock_sync`, `latency`, `client_disconn
 
 ## Current Limitations
 
-- Unity-rendered frames use development payload files by default before being copied into IOSurface-backed `CVPixelBufferPool` encoder slots. The host can consume runtime-emitted IOSurface ids, but that runtime sidecar path is still explicit and experimental. Runtime IOSurface export requires `METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1` in addition to `METALXR_FRAME_EXPORT_MODE=iosurface`.
+- Unity-rendered frames use development payload files by default before being copied into IOSurface-backed `CVPixelBufferPool` encoder slots. Frame metadata can now travel over a Unix datagram socket, but raw payload mode still references payload files. The host can consume runtime-emitted IOSurface ids, but that runtime sidecar path is still explicit and experimental. Runtime IOSurface export requires `METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1` in addition to `METALXR_FRAME_EXPORT_MODE=iosurface`.
 - The encoder uses one H.264 session per eye. A future transport can either keep separate eye streams or add a stereo packing step.
 - There is no HEVC path yet.
 - There is no production GPU synchronization or direct host-owned frame-slot lifecycle yet.
@@ -96,4 +96,4 @@ The streamer also emits `frame_source`, `clock_sync`, `latency`, `client_disconn
 
 ## Next Step
 
-The file-based Unity export bridge should be replaced with a lower-latency IOSurface handoff or a Metal blit into the host's VideoToolbox-compatible pixel buffer pool. The remaining stream work is adaptive stream policy and synchronized runtime/host ownership for frame slots.
+The remaining frame work is replacing raw payload files with a lower-latency IOSurface handoff or a Metal blit into the host's VideoToolbox-compatible pixel buffer pool, then replacing the socket prototype with synchronized runtime/host ownership for frame slots. The remaining stream work is adaptive stream policy and reconnect-friendly control/media separation.

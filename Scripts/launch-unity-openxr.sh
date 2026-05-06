@@ -14,6 +14,8 @@ Environment:
   METALXR_RUNTIME_LOG      Runtime log path. Defaults to TMPDIR/metalxr_unity_runtime.log.
   METALXR_FRAME_DUMP_DIR   Directory for frame metadata dumps from the MetalXR runtime.
   METALXR_FRAME_EXPORT_DIR Directory for per-eye frame export records and payloads.
+  METALXR_FRAME_EXPORT_SOCKET
+                           Optional datagram socket path for per-eye frame export records.
   METALXR_FRAME_EXPORT_MODE
                            Frame export mode: readback or fixture. Defaults to readback.
   METALXR_SWAPCHAIN_STORAGE_MODE
@@ -115,6 +117,7 @@ echo "OpenXR runtime: $runtime_json"
 metalxr_runtime_log="${METALXR_RUNTIME_LOG:-${TMPDIR:-/tmp}/metalxr_unity_runtime.log}"
 metalxr_frame_dump_dir="${METALXR_FRAME_DUMP_DIR:-${TMPDIR:-/tmp}/metalxr_unity_frames}"
 metalxr_frame_export_dir="${METALXR_FRAME_EXPORT_DIR:-}"
+metalxr_frame_export_socket="${METALXR_FRAME_EXPORT_SOCKET:-}"
 metalxr_frame_export_mode="${METALXR_FRAME_EXPORT_MODE:-readback}"
 metalxr_swapchain_storage_mode="${METALXR_SWAPCHAIN_STORAGE_MODE:-}"
 metalxr_view_width="${METALXR_VIEW_WIDTH:-}"
@@ -133,6 +136,9 @@ if [[ -n "$metalxr_frame_export_dir" ]]; then
   echo "MetalXR frame exports: $metalxr_frame_export_dir"
   echo "MetalXR frame export mode: $metalxr_frame_export_mode"
 fi
+if [[ -n "$metalxr_frame_export_socket" ]]; then
+  echo "MetalXR frame export socket: $metalxr_frame_export_socket"
+fi
 if [[ -n "$metalxr_swapchain_storage_mode" ]]; then
   echo "MetalXR swapchain storage mode: $metalxr_swapchain_storage_mode"
 fi
@@ -148,6 +154,7 @@ XR_LOADER_DEBUG="${XR_LOADER_DEBUG:-warn}" \
 METALXR_RUNTIME_LOG="$metalxr_runtime_log" \
 METALXR_FRAME_DUMP_DIR="$metalxr_frame_dump_dir" \
 METALXR_FRAME_EXPORT_DIR="$metalxr_frame_export_dir" \
+METALXR_FRAME_EXPORT_SOCKET="$metalxr_frame_export_socket" \
 METALXR_FRAME_EXPORT_MODE="$metalxr_frame_export_mode" \
 METALXR_SWAPCHAIN_STORAGE_MODE="$metalxr_swapchain_storage_mode" \
 METALXR_VIEW_WIDTH="$metalxr_view_width" \

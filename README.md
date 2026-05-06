@@ -11,6 +11,7 @@ Working:
 - macOS SwiftUI developer dashboard for Quest detection, APK install, Unity launch, stream start/stop, and diagnostics export.
 - Native macOS OpenXR runtime skeleton with lifecycle, session events, reference spaces, Metal swapchains, stereo projection submission, frame metadata, and frame export.
 - VideoToolbox host encoder and TCP streamer for synthetic frames or Unity-exported stereo eye frames, using IOSurface/Metal-compatible `CVPixelBufferPool` encoder slots.
+- Optional Unix-datagram frame metadata channel between the runtime export path and host streamer, with file export retained as the debug capture path.
 - Unity Quest client APK that connects over USB `adb reverse`, advertises a device profile during HELLO, decodes H.264 frames with MediaCodec when available, displays the stream in headset, and sends timing/input samples back to the host.
 - Development tracking/action/haptic bridge for HMD pose, controller buttons, trigger, grip, thumbstick, aim/grip poses, and haptic feedback.
 - Runtime frame timing fed by Quest display samples, OpenXR projection metadata carried with each streamed eye frame, reconnect handling for common Quest client restarts, stale tracking/timing diagnostics, and smoke probes for the full loop.

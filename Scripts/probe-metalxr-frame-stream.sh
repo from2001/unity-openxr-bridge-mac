@@ -88,6 +88,8 @@ run_stream_probe() {
   local height="$4"
   local frame_source="$5"
   local frame_export_dir="${6:-}"
+  local frame_export_socket="${7:-}"
+  local socket_fixture_dir="${8:-}"
   local log_file="$log_dir/metalxr_host_streamer_probe_${name}.log"
 
   rm -f "$log_file"
@@ -108,12 +110,16 @@ run_stream_probe() {
   if [[ -n "$frame_export_dir" ]]; then
     streamer_args+=(--frame-export-dir "$frame_export_dir")
   fi
+  if [[ -n "$frame_export_socket" ]]; then
+    streamer_args+=(--frame-export-socket "$frame_export_socket")
+  fi
 
   "$streamer" "${streamer_args[@]}" >"$log_file" 2>&1 &
   local streamer_pid="$!"
 
   set +e
-  "$python_bin" - "$port" "$frames" "$width" "$height" "$name" <<'PY'
+  "$python_bin" - "$port" "$frames" "$width" "$height" "$name" "$frame_export_socket" "$socket_fixture_dir" <<'PY'
+import pathlib
 import socket
 import struct
 import sys
@@ -124,6 +130,8 @@ frames = int(sys.argv[2])
 expected_width = int(sys.argv[3])
 expected_height = int(sys.argv[4])
 probe_name = sys.argv[5]
+frame_export_socket = sys.argv[6]
+socket_fixture_dir = pathlib.Path(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else None
 target_eye_frames = frames * 2
 
 HEADER = struct.Struct("<IHHHHIQQII")
@@ -198,6 +206,23 @@ hello_payload = HELLO.pack(
     b"MetalXR Probe Quest Client".ljust(64, b"\0"),
 )
 send_packet(sock, PACKET_HELLO, hello_payload)
+
+if frame_export_socket:
+    if socket_fixture_dir is None:
+        raise RuntimeError("socket fixture dir is required when frame export socket is set")
+    socket_deadline = time.time() + 3.0
+    socket_path = pathlib.Path(frame_export_socket)
+    while not socket_path.exists():
+        if time.time() >= socket_deadline:
+            raise RuntimeError(f"frame export socket did not appear: {socket_path}")
+        time.sleep(0.01)
+    datagram = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        lines = (socket_fixture_dir / "frames.jsonl").read_text().splitlines()
+        for line in lines:
+            datagram.sendto(line.encode("utf-8"), frame_export_socket)
+    finally:
+        datagram.close()
 
 ack_header = HEADER.unpack(recv_exact(sock, HEADER_SIZE))
 if ack_header[0] != MAGIC or ack_header[2] != PACKET_HELLO_ACK:
@@ -628,10 +653,23 @@ run_iosurface_export_probe() {
   sed -n '1,4p' "$fixture_log"
 }
 
+run_socket_export_probe() {
+  local port="$1"
+  local width=96
+  local height=64
+  local fixture_dir
+  local socket_path
+  fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/metalxr_socket_export_probe.XXXXXX")"
+  socket_path="$fixture_dir/frame-export.sock"
+  make_unity_export_fixture "$fixture_dir" "$width" "$height" 3
+  run_stream_probe "socket_export" "$port" "$width" "$height" "unity-export" "" "$socket_path" "$fixture_dir"
+}
+
 unity_fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/metalxr_unity_export_probe.XXXXXX")"
 make_unity_export_fixture "$unity_fixture_dir" 96 64 3
 
 run_stream_probe "synthetic" "$base_port" 160 90 "synthetic"
 run_stream_probe "unity_export" "$((base_port + 1))" 96 64 "unity-export" "$unity_fixture_dir"
 run_iosurface_export_probe "$((base_port + 2))"
-run_reconnect_probe "$((base_port + 3))"
+run_socket_export_probe "$((base_port + 3))"
+run_reconnect_probe "$((base_port + 4))"
