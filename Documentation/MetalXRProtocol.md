@@ -39,7 +39,7 @@ The Quest client sends `METALXR_PACKET_HELLO` with `MetalXRHelloPayload`:
 - `controlPort` and `mediaPort`.
 - `deviceName`.
 
-The host replies with `METALXR_PACKET_HELLO_ACK` using the same payload shape and the negotiated host capabilities.
+The host uses the Quest profile to validate the effective stream size and select the stream cadence when `--fps` is not explicitly provided. Unity-exported streams keep the dimensions of the submitted eye frames and are rejected if they exceed the Quest profile limits. Synthetic streams may be resized downward when the default dimensions exceed the profile. The host replies with `METALXR_PACKET_HELLO_ACK` using the same payload shape and the negotiated host capabilities plus the effective stream width, height, and FPS.
 
 ## Heartbeat
 
