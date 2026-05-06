@@ -2763,6 +2763,17 @@ static int receive_client_hello(int fd, MetalXRHelloPayload* hello, uint64_t* fi
            hello->maxVideoHeight,
            hello->preferredFps,
            hello->deviceName);
+    printf("{\"event\":\"client_capabilities\","
+           "\"h264\":%s,\"surface_decode\":%s,"
+           "\"projection_presentation\":%s,\"pose_input\":%s,"
+           "\"controller_input\":%s,\"haptics\":%s}\n",
+           (hello->capabilities & METALXR_CAPABILITY_H264) ? "true" : "false",
+           (hello->capabilities & METALXR_CAPABILITY_SURFACE_DECODE) ? "true" : "false",
+           (hello->capabilities & METALXR_CAPABILITY_PROJECTION_PRESENTATION) ? "true" : "false",
+           (hello->capabilities & METALXR_CAPABILITY_POSE_INPUT) ? "true" : "false",
+           (hello->capabilities & METALXR_CAPABILITY_CONTROLLER_INPUT) ? "true" : "false",
+           (hello->capabilities & METALXR_CAPABILITY_HAPTICS) ? "true" : "false");
+    fflush(stdout);
     return 1;
 }
 
