@@ -30,6 +30,7 @@ static const uint32_t kRecommendedEyeHeight = 1920;
 enum {
     kViewCount = 2,
     kSwapchainImageCount = 3,
+    kTrackingSampleRingCount = 16,
     kMaxSessionSwapchains = 16,
     kMaxSessionActionSets = 16,
     kMaxActionSetActions = 64,
@@ -80,6 +81,27 @@ typedef struct MetalXrEventQueue {
     uint32_t count;
 } MetalXrEventQueue;
 
+typedef struct MetalXrControllerState {
+    uint64_t sampleId;
+    uint64_t timestampNs;
+    uint32_t trackingFlags;
+    uint32_t buttons;
+    float trigger;
+    float grip;
+    XrVector2f thumbstick;
+    XrPosef aimPose;
+    XrPosef gripPose;
+} MetalXrControllerState;
+
+typedef struct MetalXrTrackingState {
+    uint64_t hostTimestampNs;
+    uint64_t hmdSampleId;
+    uint64_t hmdTimestampNs;
+    uint32_t hmdTrackingFlags;
+    XrPosef hmdPose;
+    MetalXrControllerState controllers[2];
+} MetalXrTrackingState;
+
 struct XrInstance_T {
     uint32_t magic;
     uint64_t id;
@@ -96,13 +118,23 @@ struct XrSession_T {
     XrBool32 ownsMetalCommandQueue;
     void* metalDevice;
     XrBool32 running;
+    XrBool32 frameWaited;
     XrBool32 frameBegun;
     uint64_t frameIndex;
     XrTime nextFrameTime;
+    XrTime nextFrameWaitTime;
+    XrTime lastPredictedDisplayTime;
+    XrDuration lastPredictedDisplayPeriod;
     XrSpace spaces[16];
     uint32_t spaceCount;
     XrActionSet actionSets[kMaxSessionActionSets];
     uint32_t actionSetCount;
+    MetalXrTrackingState actionSnapshot;
+    XrBool32 actionSnapshotValid;
+    uint64_t actionSyncIndex;
+    MetalXrTrackingState trackingRing[kTrackingSampleRingCount];
+    uint32_t trackingRingCount;
+    uint32_t trackingRingNext;
     XrSwapchain swapchains[kMaxSessionSwapchains];
     uint32_t swapchainCount;
 };
@@ -317,6 +349,24 @@ static uint64_t metalxr_realtime_ns(void)
     return ((uint64_t)now.tv_sec * 1000000000ull) + (uint64_t)now.tv_nsec;
 }
 
+static void metalxr_sleep_until_ns(XrTime targetTimeNs)
+{
+    for (;;) {
+        const XrTime nowNs = metalxr_now_ns();
+        if (nowNs == 0 || targetTimeNs <= nowNs) {
+            return;
+        }
+
+        const XrDuration remainingNs = targetTimeNs - nowNs;
+        struct timespec request;
+        request.tv_sec = (time_t)(remainingNs / 1000000000ll);
+        request.tv_nsec = (long)(remainingNs % 1000000000ll);
+        if (nanosleep(&request, NULL) == 0 || errno != EINTR) {
+            return;
+        }
+    }
+}
+
 static int api_versions_overlap(XrVersion minVersion, XrVersion maxVersion, XrVersion supportedVersion)
 {
     const uint16_t minMajor = XR_VERSION_MAJOR(minVersion);
@@ -434,6 +484,7 @@ static const char* metalxr_result_name(XrResult result)
         case XR_ERROR_FORM_FACTOR_UNSUPPORTED: return "XR_ERROR_FORM_FACTOR_UNSUPPORTED";
         case XR_ERROR_FORM_FACTOR_UNAVAILABLE: return "XR_ERROR_FORM_FACTOR_UNAVAILABLE";
         case XR_ERROR_CALL_ORDER_INVALID: return "XR_ERROR_CALL_ORDER_INVALID";
+        case XR_ERROR_GRAPHICS_DEVICE_INVALID: return "XR_ERROR_GRAPHICS_DEVICE_INVALID";
         case XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED: return "XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED";
         case XR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED: return "XR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED";
         case XR_ERROR_RUNTIME_UNAVAILABLE: return "XR_ERROR_RUNTIME_UNAVAILABLE";
@@ -499,26 +550,6 @@ static XrPosef metalxr_identity_pose(void)
     pose.orientation.w = 1.0f;
     return pose;
 }
-
-typedef struct MetalXrControllerState {
-    uint64_t sampleId;
-    uint64_t timestampNs;
-    uint32_t trackingFlags;
-    uint32_t buttons;
-    float trigger;
-    float grip;
-    XrVector2f thumbstick;
-    XrPosef aimPose;
-    XrPosef gripPose;
-} MetalXrControllerState;
-
-typedef struct MetalXrTrackingState {
-    uint64_t hmdSampleId;
-    uint64_t hmdTimestampNs;
-    uint32_t hmdTrackingFlags;
-    XrPosef hmdPose;
-    MetalXrControllerState controllers[2];
-} MetalXrTrackingState;
 
 static const char* metalxr_tracking_state_path(void)
 {
@@ -947,6 +978,7 @@ static int metalxr_load_tracking_state(MetalXrTrackingState* state)
         memset(&shared, 0, sizeof(shared));
         uint32_t sequence = 0;
         if (metalxr_shared_state_read_tracking(mapping, &shared, &sequence)) {
+            state->hostTimestampNs = shared.hostTimestampNs;
             state->hmdSampleId = shared.hmd.sampleId;
             state->hmdTimestampNs = shared.hmd.timestampNs;
             state->hmdTrackingFlags = shared.hmd.trackingFlags;
@@ -1035,6 +1067,7 @@ static int metalxr_load_tracking_state(MetalXrTrackingState* state)
     }
 
     fclose(input);
+    state->hostTimestampNs = (uint64_t)metalxr_now_ns();
     metalxr_apply_tracking_stale_policy(state, hasMetadata ? &metadata : NULL);
     return 1;
 }
@@ -1067,6 +1100,159 @@ static XrFovf metalxr_default_fov(void)
     fov.angleUp = 0.7853982f;
     fov.angleDown = -0.7853982f;
     return fov;
+}
+
+static uint64_t metalxr_tracking_sample_time_ns(const MetalXrTrackingState* state)
+{
+    if (state == NULL) {
+        return 0;
+    }
+    if (state->hostTimestampNs != 0) {
+        return state->hostTimestampNs;
+    }
+    return state->hmdTimestampNs;
+}
+
+static uint64_t metalxr_abs_time_delta_ns(uint64_t firstNs, uint64_t secondNs)
+{
+    return firstNs > secondNs ? firstNs - secondNs : secondNs - firstNs;
+}
+
+static int metalxr_tracking_samples_match(
+    const MetalXrTrackingState* first,
+    const MetalXrTrackingState* second)
+{
+    if (first == NULL || second == NULL) {
+        return 0;
+    }
+
+    return first->hostTimestampNs == second->hostTimestampNs &&
+           first->hmdSampleId == second->hmdSampleId &&
+           first->hmdTimestampNs == second->hmdTimestampNs &&
+           first->controllers[0].sampleId == second->controllers[0].sampleId &&
+           first->controllers[1].sampleId == second->controllers[1].sampleId;
+}
+
+static void metalxr_session_record_tracking_sample(
+    XrSession session,
+    const MetalXrTrackingState* sample)
+{
+    if (!metalxr_is_session(session) || sample == NULL) {
+        return;
+    }
+
+    MetalXrTrackingState stored = *sample;
+    if (metalxr_tracking_sample_time_ns(&stored) == 0) {
+        stored.hostTimestampNs = (uint64_t)metalxr_now_ns();
+    }
+
+    if (session->trackingRingCount > 0) {
+        const uint32_t lastIndex =
+            (session->trackingRingNext + kTrackingSampleRingCount - 1) % kTrackingSampleRingCount;
+        if (metalxr_tracking_samples_match(&session->trackingRing[lastIndex], &stored)) {
+            session->trackingRing[lastIndex] = stored;
+            return;
+        }
+    }
+
+    session->trackingRing[session->trackingRingNext] = stored;
+    session->trackingRingNext = (session->trackingRingNext + 1) % kTrackingSampleRingCount;
+    if (session->trackingRingCount < kTrackingSampleRingCount) {
+        ++session->trackingRingCount;
+    }
+}
+
+static MetalXrTrackingState metalxr_session_select_tracking_sample(
+    XrSession session,
+    XrTime displayTime)
+{
+    MetalXrTrackingState fallback = metalxr_default_tracking_state();
+    if (!metalxr_is_session(session) || session->trackingRingCount == 0) {
+        return fallback;
+    }
+
+    const MetalXrTrackingState* best = NULL;
+    uint64_t bestDeltaNs = UINT64_MAX;
+    uint64_t bestSampleTimeNs = 0;
+    const uint64_t targetNs = displayTime > 0 ? (uint64_t)displayTime : 0;
+
+    for (uint32_t i = 0; i < session->trackingRingCount; ++i) {
+        const MetalXrTrackingState* candidate = &session->trackingRing[i];
+        const uint64_t sampleTimeNs = metalxr_tracking_sample_time_ns(candidate);
+        const uint64_t deltaNs = targetNs != 0 && sampleTimeNs != 0 ?
+            metalxr_abs_time_delta_ns(sampleTimeNs, targetNs) :
+            0;
+        if (best == NULL ||
+            deltaNs < bestDeltaNs ||
+            (deltaNs == bestDeltaNs && sampleTimeNs > bestSampleTimeNs)) {
+            best = candidate;
+            bestDeltaNs = deltaNs;
+            bestSampleTimeNs = sampleTimeNs;
+        }
+    }
+
+    return best != NULL ? *best : fallback;
+}
+
+static MetalXrTrackingState metalxr_session_action_tracking_snapshot(XrSession session)
+{
+    if (metalxr_is_session(session) && session->actionSnapshotValid) {
+        return session->actionSnapshot;
+    }
+
+    MetalXrTrackingState tracking;
+    (void)metalxr_load_tracking_state(&tracking);
+    if (metalxr_is_session(session)) {
+        metalxr_session_record_tracking_sample(session, &tracking);
+    }
+    return tracking;
+}
+
+static XrVector3f metalxr_cross_vector(XrVector3f a, XrVector3f b)
+{
+    XrVector3f result;
+    result.x = (a.y * b.z) - (a.z * b.y);
+    result.y = (a.z * b.x) - (a.x * b.z);
+    result.z = (a.x * b.y) - (a.y * b.x);
+    return result;
+}
+
+static XrVector3f metalxr_rotate_vector_by_quaternion(XrVector3f vector, XrQuaternionf orientation)
+{
+    XrVector3f q;
+    q.x = orientation.x;
+    q.y = orientation.y;
+    q.z = orientation.z;
+
+    const XrVector3f uv = metalxr_cross_vector(q, vector);
+    const XrVector3f uuv = metalxr_cross_vector(q, uv);
+    XrVector3f result;
+    result.x = vector.x + (2.0f * ((orientation.w * uv.x) + uuv.x));
+    result.y = vector.y + (2.0f * ((orientation.w * uv.y) + uuv.y));
+    result.z = vector.z + (2.0f * ((orientation.w * uv.z) + uuv.z));
+    return result;
+}
+
+static XrPosef metalxr_view_pose_for_eye(const MetalXrTrackingState* tracking, uint32_t eyeIndex)
+{
+    XrPosef pose = tracking != NULL ? tracking->hmdPose : metalxr_identity_pose();
+    if (pose.orientation.x == 0.0f &&
+        pose.orientation.y == 0.0f &&
+        pose.orientation.z == 0.0f &&
+        pose.orientation.w == 0.0f) {
+        pose.orientation.w = 1.0f;
+    }
+
+    XrVector3f eyeOffset;
+    eyeOffset.x = eyeIndex == 0 ? -0.032f : 0.032f;
+    eyeOffset.y = 0.0f;
+    eyeOffset.z = 0.0f;
+
+    const XrVector3f rotatedOffset = metalxr_rotate_vector_by_quaternion(eyeOffset, pose.orientation);
+    pose.position.x += rotatedOffset.x;
+    pose.position.y += rotatedOffset.y;
+    pose.position.z += rotatedOffset.z;
+    return pose;
 }
 
 static void metalxr_clear_events_for_session(XrSession session)
@@ -2243,7 +2429,13 @@ static XrResult XRAPI_CALL metalxr_xrCreateSession(
     if (metalBinding != NULL && metalBinding->type == XR_TYPE_GRAPHICS_BINDING_METAL_KHR) {
         metalxr_log("xrCreateSession received Metal commandQueue=%p", metalBinding->commandQueue);
         commandQueue = metalBinding->commandQueue;
-        metalDevice = metalxr_get_command_queue_device(commandQueue);
+        if (commandQueue != NULL) {
+            metalDevice = metalxr_get_command_queue_device(commandQueue);
+            if (metalDevice == NULL) {
+                metalxr_log("xrCreateSession failed: Metal commandQueue has no device");
+                return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+            }
+        }
     } else if (createInfo->next != NULL) {
         const XrStructureType* nextType = (const XrStructureType*)createInfo->next;
         metalxr_log("xrCreateSession ignoring unsupported next struct %s",
@@ -2285,6 +2477,7 @@ static XrResult XRAPI_CALL metalxr_xrCreateSession(
     created->ownsMetalCommandQueue = ownsCommandQueue;
     created->metalDevice = metalxr_retain_objc(metalDevice);
     created->nextFrameTime = metalxr_now_ns() + metalxr_configured_frame_period_ns();
+    created->nextFrameWaitTime = metalxr_now_ns();
     instance->session = created;
     *session = created;
 
@@ -2334,7 +2527,13 @@ static XrResult XRAPI_CALL metalxr_xrBeginSession(
     }
 
     session->running = XR_TRUE;
-    session->nextFrameTime = metalxr_now_ns() + metalxr_configured_frame_period_ns();
+    session->frameWaited = XR_FALSE;
+    session->frameBegun = XR_FALSE;
+    session->lastPredictedDisplayTime = 0;
+    session->lastPredictedDisplayPeriod = 0;
+    session->actionSnapshotValid = XR_FALSE;
+    session->nextFrameWaitTime = metalxr_now_ns();
+    session->nextFrameTime = session->nextFrameWaitTime + metalxr_configured_frame_period_ns();
     metalxr_queue_session_state(session, XR_SESSION_STATE_SYNCHRONIZED);
     metalxr_queue_session_state(session, XR_SESSION_STATE_VISIBLE);
     metalxr_queue_session_state(session, XR_SESSION_STATE_FOCUSED);
@@ -2355,7 +2554,9 @@ static XrResult XRAPI_CALL metalxr_xrEndSession(XrSession session)
     }
 
     session->running = XR_FALSE;
+    session->frameWaited = XR_FALSE;
     session->frameBegun = XR_FALSE;
+    session->actionSnapshotValid = XR_FALSE;
     metalxr_queue_session_state(session, XR_SESSION_STATE_IDLE);
 
     return XR_SUCCESS;
@@ -2688,6 +2889,23 @@ static XrResult XRAPI_CALL metalxr_xrSyncActions(
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
+    if (syncInfo->countActiveActionSets > 0 && syncInfo->activeActionSets == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    for (uint32_t i = 0; i < syncInfo->countActiveActionSets; ++i) {
+        if (!metalxr_is_action_set(syncInfo->activeActionSets[i].actionSet)) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+    }
+
+    MetalXrTrackingState tracking;
+    (void)metalxr_load_tracking_state(&tracking);
+    session->actionSnapshot = tracking;
+    session->actionSnapshotValid = XR_TRUE;
+    ++session->actionSyncIndex;
+    metalxr_session_record_tracking_sample(session, &tracking);
+
     return XR_SUCCESS;
 }
 
@@ -2709,8 +2927,7 @@ static XrResult XRAPI_CALL metalxr_xrGetActionStateBoolean(
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    MetalXrTrackingState tracking;
-    (void)metalxr_load_tracking_state(&tracking);
+    MetalXrTrackingState tracking = metalxr_session_action_tracking_snapshot(session);
     MetalXrControllerState* controller = &tracking.controllers[metalxr_hand_from_action_info(getInfo)];
 
     uint32_t buttonMask = 0;
@@ -2742,8 +2959,7 @@ static XrResult XRAPI_CALL metalxr_xrGetActionStateFloat(
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    MetalXrTrackingState tracking;
-    (void)metalxr_load_tracking_state(&tracking);
+    MetalXrTrackingState tracking = metalxr_session_action_tracking_snapshot(session);
     MetalXrControllerState* controller = &tracking.controllers[metalxr_hand_from_action_info(getInfo)];
 
     state->type = XR_TYPE_ACTION_STATE_FLOAT;
@@ -2763,8 +2979,7 @@ static XrResult XRAPI_CALL metalxr_xrGetActionStateVector2f(
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    MetalXrTrackingState tracking;
-    (void)metalxr_load_tracking_state(&tracking);
+    MetalXrTrackingState tracking = metalxr_session_action_tracking_snapshot(session);
     MetalXrControllerState* controller = &tracking.controllers[metalxr_hand_from_action_info(getInfo)];
 
     state->type = XR_TYPE_ACTION_STATE_VECTOR2F;
@@ -2784,8 +2999,7 @@ static XrResult XRAPI_CALL metalxr_xrGetActionStatePose(
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    MetalXrTrackingState tracking;
-    (void)metalxr_load_tracking_state(&tracking);
+    MetalXrTrackingState tracking = metalxr_session_action_tracking_snapshot(session);
     MetalXrControllerState* controller = &tracking.controllers[metalxr_hand_from_action_info(getInfo)];
 
     state->type = XR_TYPE_ACTION_STATE_POSE;
@@ -3158,6 +3372,10 @@ static XrResult XRAPI_CALL metalxr_xrReleaseSwapchainImage(
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
+    if (!swapchain->imageWaited) {
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+
     ++swapchain->releaseCount;
 
     if (swapchain->releaseCount <= 5 || (swapchain->releaseCount % 300) == 0) {
@@ -3187,12 +3405,24 @@ static XrResult XRAPI_CALL metalxr_xrWaitFrame(
         return XR_ERROR_SESSION_NOT_RUNNING;
     }
 
-    const XrTime now = metalxr_now_ns();
+    if (session->frameWaited || session->frameBegun) {
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+
     const MetalXrRuntimeTimingState timing = metalxr_load_runtime_timing_state();
     const XrDuration framePeriodNs =
         timing.measuredFramePeriodNs > 0 ?
             (XrDuration)timing.measuredFramePeriodNs :
             metalxr_configured_frame_period_ns();
+
+    XrTime now = metalxr_now_ns();
+    const XrTime waitStartNs = now;
+    if (session->nextFrameWaitTime > now) {
+        metalxr_sleep_until_ns(session->nextFrameWaitTime);
+        now = metalxr_now_ns();
+    }
+    const uint64_t pacedWaitMs =
+        waitStartNs > 0 && now > waitStartNs ? (uint64_t)((now - waitStartNs) / 1000000ll) : 0;
 
     XrTime predictedDisplayTime = 0;
     const int timingFresh = timing.loaded && timing.lastDisplayHostNs > 0 &&
@@ -3222,17 +3452,23 @@ static XrResult XRAPI_CALL metalxr_xrWaitFrame(
     frameState->predictedDisplayTime = predictedDisplayTime;
     frameState->predictedDisplayPeriod = framePeriodNs;
     frameState->shouldRender = XR_TRUE;
+    session->frameWaited = XR_TRUE;
+    session->lastPredictedDisplayTime = predictedDisplayTime;
+    session->lastPredictedDisplayPeriod = framePeriodNs;
+    session->nextFrameWaitTime = now + framePeriodNs;
     ++session->frameIndex;
 
     if (session->frameIndex <= 5 || (session->frameIndex % 300) == 0) {
         const char* timingSource = timingFresh ? "quest" : (timing.loaded ? "stale" : "local");
         metalxr_log("xrWaitFrame frame=%" PRIu64 " predicted=%" PRId64
-                    " period=%" PRId64 " timing=%s timing_age_ms=%" PRIu64,
+                    " period=%" PRId64 " timing=%s timing_age_ms=%" PRIu64
+                    " paced_wait_ms=%" PRIu64,
                     session->frameIndex,
                     frameState->predictedDisplayTime,
                     frameState->predictedDisplayPeriod,
                     timingSource,
-                    timingAgeMs);
+                    timingAgeMs,
+                    pacedWaitMs);
     }
 
     return XR_SUCCESS;
@@ -3252,6 +3488,11 @@ static XrResult XRAPI_CALL metalxr_xrBeginFrame(
         return XR_ERROR_SESSION_NOT_RUNNING;
     }
 
+    if (!session->frameWaited || session->frameBegun) {
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+
+    session->frameWaited = XR_FALSE;
     session->frameBegun = XR_TRUE;
     return XR_SUCCESS;
 }
@@ -4243,6 +4484,10 @@ static XrResult XRAPI_CALL metalxr_xrEndFrame(
         return XR_ERROR_SESSION_NOT_RUNNING;
     }
 
+    if (!session->frameBegun) {
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+
     if (frameEndInfo->environmentBlendMode != XR_ENVIRONMENT_BLEND_MODE_OPAQUE) {
         return XR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED;
     }
@@ -4287,8 +4532,13 @@ static XrResult XRAPI_CALL metalxr_xrLocateViews(
 
     *viewCountOutput = kViewCount;
     viewState->type = XR_TYPE_VIEW_STATE;
-    MetalXrTrackingState tracking;
-    (void)metalxr_load_tracking_state(&tracking);
+    MetalXrTrackingState latestTracking;
+    (void)metalxr_load_tracking_state(&latestTracking);
+    metalxr_make_hmd_pose_renderable(&latestTracking);
+    metalxr_session_record_tracking_sample(session, &latestTracking);
+
+    MetalXrTrackingState tracking =
+        metalxr_session_select_tracking_sample(session, viewLocateInfo->displayTime);
     metalxr_make_hmd_pose_renderable(&tracking);
     viewState->viewStateFlags = metalxr_openxr_location_flags(tracking.hmdTrackingFlags);
 
@@ -4306,8 +4556,7 @@ static XrResult XRAPI_CALL metalxr_xrLocateViews(
 
     for (uint32_t i = 0; i < kViewCount; ++i) {
         views[i].type = XR_TYPE_VIEW;
-        views[i].pose = tracking.hmdPose;
-        views[i].pose.position.x += i == 0 ? -0.032f : 0.032f;
+        views[i].pose = metalxr_view_pose_for_eye(&tracking, i);
         views[i].fov = metalxr_default_fov();
     }
 

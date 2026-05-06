@@ -390,6 +390,13 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    XrFrameBeginInfo earlyBeginInfo = { XR_TYPE_FRAME_BEGIN_INFO, NULL };
+    result = xrBeginFrame(session, &earlyBeginInfo);
+    printf("beginFrameWithoutWait=%d\n", result);
+    if (result != XR_ERROR_CALL_ORDER_INVALID) {
+        return 1;
+    }
+
     for (int i = 0; i < 3; ++i) {
         eventData.type = XR_TYPE_EVENT_DATA_BUFFER;
         result = xrPollEvent(instance, &eventData);
@@ -473,6 +480,43 @@ int main(int argc, char** argv)
         if (result != XR_SUCCESS || swapchainImageCount != 3 || swapchainImages[eye][0].texture == NULL) {
             return 1;
         }
+    }
+
+    XrSwapchainImageAcquireInfo orderAcquireInfo = {
+        XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO,
+        NULL
+    };
+    uint32_t orderImageIndex = 0;
+    result = xrAcquireSwapchainImage(swapchains[0], &orderAcquireInfo, &orderImageIndex);
+    printf("acquireSwapchainImageWithoutWaitProbe=%d index=%u\n", result, orderImageIndex);
+    if (result != XR_SUCCESS) {
+        return 1;
+    }
+
+    XrSwapchainImageReleaseInfo orderReleaseInfo = {
+        XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO,
+        NULL
+    };
+    result = xrReleaseSwapchainImage(swapchains[0], &orderReleaseInfo);
+    printf("releaseSwapchainImageWithoutWait=%d\n", result);
+    if (result != XR_ERROR_CALL_ORDER_INVALID) {
+        return 1;
+    }
+
+    XrSwapchainImageWaitInfo orderWaitInfo = {
+        XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO,
+        NULL,
+        0
+    };
+    result = xrWaitSwapchainImage(swapchains[0], &orderWaitInfo);
+    printf("waitSwapchainImageAfterInvalidRelease=%d\n", result);
+    if (result != XR_SUCCESS) {
+        return 1;
+    }
+    result = xrReleaseSwapchainImage(swapchains[0], &orderReleaseInfo);
+    printf("releaseSwapchainImageAfterWait=%d\n", result);
+    if (result != XR_SUCCESS) {
+        return 1;
     }
 
     for (int frame = 0; frame < 3; ++frame) {

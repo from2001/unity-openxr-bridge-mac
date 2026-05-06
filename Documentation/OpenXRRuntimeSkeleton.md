@@ -89,7 +89,7 @@ Tradeoffs and limitations:
 - `METALXR_FRAME_DUMP_DIR` writes metadata for submitted projection frames, including swapchain ids, Metal texture pointers, image indices, formats, and rectangles.
 - `METALXR_FRAME_EXPORT_DIR` writes per-eye JSON records and BGRA/raw payload files for submitted projection views. `METALXR_FRAME_EXPORT_SOCKET` additionally sends each JSON frame record over a Unix datagram socket so the host can consume metadata without polling `frames.jsonl`. By default the runtime attempts CPU readback from the submitted Metal texture; `METALXR_FRAME_EXPORT_MODE=fixture` writes deterministic probe pixels instead.
 - The runtime now has an experimental IOSurface sidecar export path behind `METALXR_SWAPCHAIN_RESOURCE_MODE=iosurface`, `METALXR_FRAME_EXPORT_MODE=iosurface`, and `METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1`. Unity still receives its normal runtime-owned Metal swapchain texture; at frame submission time the runtime can lazily create per-image/per-eye IOSurface-backed 2D textures, GPU-blit the submitted array slice into them, and emit `IOSurfaceBGRA8` or `IOSurfaceRGBA8` records with `ioSurfaceId` instead of a raw payload file. When `METALXR_FRAME_EXPORT_SOCKET` is set, the IOSurface path can publish records without `METALXR_FRAME_EXPORT_DIR`; file records remain optional debug artifacts. This path is intentionally gated out of the default Play Mode workflow because Unity's current 2D-array render setup needs more validation before it can replace readback.
-- Synchronization is minimal and uses a development Metal blit synchronization. If the application does not provide a Metal command queue in `XrGraphicsBindingMetalKHR`, the runtime creates an internal command queue for debug readback and IOSurface sidecar validation. Real GPU fences must be added before production encoding or streaming.
+- Synchronization is minimal and uses a development Metal blit synchronization. If the application does not provide a Metal command queue in `XrGraphicsBindingMetalKHR`, the runtime creates an internal command queue for debug readback and IOSurface sidecar validation. When an application does provide a command queue, the runtime validates that a Metal device can be obtained from it and returns `XR_ERROR_GRAPHICS_DEVICE_INVALID` for invalid queues. Real GPU fences must be added before production encoding or streaming.
 
 ## Tracking, Actions, And Haptics
 
@@ -100,7 +100,7 @@ The development input bridge uses a text state file so the host streamer and nat
 - `METALXR_TIMING_STATE_PATH=/tmp/metalxr_timing_state.txt`
 - `METALXR_TRACKING_STALE_TIMEOUT_MS=1000`
 
-`xrLocateViews` reads the latest HMD pose and offsets the left and right eye views by a fixed 64 mm IPD. Action-space locations read the controller aim or grip pose based on the action name. Boolean, float, and vector action states map to Oculus Touch-style primary/secondary/menu/thumbstick buttons, trigger, grip, and thumbstick axes.
+`xrLocateViews` records timestamped tracking samples in a small session-local ring and selects the sample closest to the requested `displayTime`. The left and right eye views still use a fixed 64 mm IPD, but the local eye offsets are now rotated by the selected HMD orientation before being added to the view pose. Action-space locations read the controller aim or grip pose based on the action name. `xrSyncActions` snapshots the latest input state for the session, and boolean, float, and vector action state reads serve that stable snapshot until the next sync call.
 
 Tracking samples remain timestamped with Quest sample ids and timestamps. If the state file stops updating past `METALXR_TRACKING_STALE_TIMEOUT_MS`, the runtime logs the stale age, preserves the last or identity HMD pose as a valid view pose so Unity keeps rendering, and clears live tracking bits plus controller action flags and inputs so consumers can distinguish stale data from live tracking.
 
@@ -108,7 +108,7 @@ Tracking samples remain timestamped with Quest sample ids and timestamps. If the
 
 This path is intentionally narrow. It is enough for Unity Play Mode smoke tests, but it does not replace production action binding coverage, richer interaction profiles, or a direct synchronized runtime/host bridge.
 
-`xrWaitFrame` reads measured Quest timing from `METALXR_TIMING_STATE_PATH` when it is fresh. The runtime uses the measured display period and latest Quest display time to predict the next frame; otherwise it falls back to local timing. `METALXR_VIEW_WIDTH`, `METALXR_VIEW_HEIGHT`, `METALXR_REFRESH_RATE`, and `METALXR_PREDICTION_OFFSET_MS` can tune the runtime before launch without rebuilding.
+`xrWaitFrame` reads measured Quest timing from `METALXR_TIMING_STATE_PATH` when it is fresh. The runtime uses the measured display period and latest Quest display time to predict the next frame; otherwise it falls back to local timing. The frame loop now enforces the `xrWaitFrame` -> `xrBeginFrame` -> `xrEndFrame` order and throttles `xrWaitFrame` to the current frame period instead of returning immediately on tight render loops. Swapchain release also requires the acquire -> wait -> release order. `METALXR_VIEW_WIDTH`, `METALXR_VIEW_HEIGHT`, `METALXR_REFRESH_RATE`, and `METALXR_PREDICTION_OFFSET_MS` can tune the runtime before launch without rebuilding.
 
 ## Build
 
