@@ -33,13 +33,18 @@ Major version mismatch is fatal and returns `METALXR_PACKET_ERROR` with `METALXR
 The Quest client sends `METALXR_PACKET_HELLO` with `MetalXRHelloPayload`:
 
 - `role`: host or Quest client.
-- `capabilities`: codec, stereo packing, pose/controller/haptics/log capability flags.
+- `capabilities`: codec, stereo packing, pose/controller/haptics/log, decode backend, and presentation backend flags.
 - `maxVideoWidth` and `maxVideoHeight`.
 - `preferredFps`.
 - `controlPort` and `mediaPort`.
 - `deviceName`.
 
 The host uses the Quest profile to validate the effective stream size and select the stream cadence when `--fps` is not explicitly provided. Unity-exported streams keep the dimensions of the submitted eye frames and are rejected if they exceed the Quest profile limits. Synthetic streams may be resized downward when the default dimensions exceed the profile. The host replies with `METALXR_PACKET_HELLO_ACK` using the same payload shape and the negotiated host capabilities plus the effective stream width, height, and FPS.
+
+Current Quest presentation flags are:
+
+- `METALXR_CAPABILITY_PROJECTION_PRESENTATION`: the client can consume per-eye OpenXR projection metadata and resize its per-eye presentation surfaces from frame FOV.
+- `METALXR_CAPABILITY_SURFACE_DECODE`: reserved for a future MediaCodec Surface/native texture decode path. The current Unity client does not advertise this flag yet, because Image-plane readback is still the active decode path.
 
 ## Heartbeat
 

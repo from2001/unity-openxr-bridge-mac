@@ -37,12 +37,14 @@ namespace MetalXR.QuestClient
         public const uint ControllerButtonThumbstick = 0x00000008;
 
         private const uint RoleQuestClient = 2;
-        private const uint CapabilityH264 = 0x00000001;
-        private const uint CapabilityStereoSeparateEyes = 0x00000004;
-        private const uint CapabilityPoseInput = 0x00000010;
-        private const uint CapabilityControllerInput = 0x00000020;
-        private const uint CapabilityHaptics = 0x00000040;
-        private const uint CapabilityLogStream = 0x00000080;
+        public const uint CapabilityH264 = 0x00000001;
+        public const uint CapabilityStereoSeparateEyes = 0x00000004;
+        public const uint CapabilityPoseInput = 0x00000010;
+        public const uint CapabilityControllerInput = 0x00000020;
+        public const uint CapabilityHaptics = 0x00000040;
+        public const uint CapabilityLogStream = 0x00000080;
+        public const uint CapabilitySurfaceDecode = 0x00000100;
+        public const uint CapabilityProjectionPresentation = 0x00000200;
         private const int HelloPayloadSize = 96;
         private const int VideoFramePayloadSize = 132;
         private const int PoseSamplePayloadSize = 60;
@@ -116,7 +118,8 @@ namespace MetalXR.QuestClient
                 CapabilityPoseInput |
                 CapabilityControllerInput |
                 CapabilityHaptics |
-                CapabilityLogStream);
+                CapabilityLogStream |
+                CapabilityProjectionPresentation);
             WriteUInt32(packet, ref offset, activeProfile.MaxVideoWidth);
             WriteUInt32(packet, ref offset, activeProfile.MaxVideoHeight);
             WriteUInt32(packet, ref offset, activeProfile.PreferredFps);

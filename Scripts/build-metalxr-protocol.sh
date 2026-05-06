@@ -22,9 +22,10 @@ if command -v cmake >/dev/null 2>&1; then
   cmake --build "$build_dir" --target metalxr_protocol_loopback >/dev/null
 else
   mkdir -p "$build_dir"
-  "$clang_bin" -std=c11 -Wall -Wextra -Werror \
+    "$clang_bin" -std=c11 -Wall -Wextra -Werror \
     -I "$protocol_dir/include" \
     "$protocol_dir/src/metalxr_protocol.c" \
+    "$protocol_dir/src/metalxr_shared_state.c" \
     "$protocol_dir/src/metalxr_protocol_loopback.c" \
     -o "$build_dir/metalxr_protocol_loopback"
 fi
