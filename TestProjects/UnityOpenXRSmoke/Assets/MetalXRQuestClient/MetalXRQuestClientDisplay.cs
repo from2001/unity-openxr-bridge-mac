@@ -15,16 +15,24 @@ namespace MetalXR.QuestClient
         private const int TextureHeight = 360;
         private const float FrameUpdateIntervalSeconds = 1.0f / 12.0f;
         private const float InputSampleIntervalSeconds = 1.0f / 72.0f;
+        private const float PresentationPanelDistance = 2.0f;
+        private const float DefaultVerticalFovDegrees = 62.0f;
+        private const float MinVerticalFovDegrees = 20.0f;
+        private const float MaxVerticalFovDegrees = 140.0f;
         private const int MaxStreamFrameSetsPerUpdate = 4;
         private const int MaxDecodedFrameSets = 8;
         private const int MaxHapticCommandsPerUpdate = 4;
-        private static readonly Vector3 PresentationPanelScale = new Vector3(2.2f, 1.2375f, 1.0f);
+        private static readonly Vector3 DefaultPresentationPanelScale = new Vector3(2.2f, 1.2375f, 1.0f);
 
         private Texture2D _leftTexture;
         private Texture2D _rightTexture;
         private Material _leftMaterial;
         private Material _rightMaterial;
         private Mesh _quadMesh;
+        private Camera _leftPresentationCamera;
+        private Camera _rightPresentationCamera;
+        private Transform _leftPresentationPanel;
+        private Transform _rightPresentationPanel;
         private Color32[] _leftPixels;
         private Color32[] _rightPixels;
         private MetalXRQuestHandshakeClient _handshakeClient;
@@ -50,7 +58,7 @@ namespace MetalXR.QuestClient
             Application.targetFrameRate = 72;
             Screen.sleepTimeout = SleepTimeout.NeverSleep;
 
-            CreateDiagnosticRig();
+            CreatePresentationRig();
             UpdateDiagnosticTexture(true, 0);
             UpdateDiagnosticTexture(false, 0);
 
@@ -254,6 +262,7 @@ namespace MetalXR.QuestClient
             bool updatedRight = UpdateStreamTexture(latestComplete.Right);
             if (updatedLeft && updatedRight)
             {
+                ApplyPresentationMetadata(latestComplete.Left, latestComplete.Right);
                 _displayedFrameSetId = latestComplete.FrameId;
                 _displayedStereoFrameSets++;
                 if (_displayedStereoFrameSets <= 4 || (_displayedStereoFrameSets % 120) == 0)
@@ -558,7 +567,7 @@ namespace MetalXR.QuestClient
             }
         }
 
-        private void CreateDiagnosticRig()
+        private void CreatePresentationRig()
         {
             Shader unlitShader = Shader.Find("Universal Render Pipeline/Unlit");
             if (unlitShader == null)
@@ -577,10 +586,10 @@ namespace MetalXR.QuestClient
 
             GameObject rigRoot = CreateRigRoot();
 
-            CreateEyePanel(rigRoot.transform, "MetalXR Left Presentation Panel", EyeLayerLeft, _leftMaterial);
-            CreateEyePanel(rigRoot.transform, "MetalXR Right Presentation Panel", EyeLayerRight, _rightMaterial);
-            CreateEyeCamera(rigRoot.transform, "MetalXR Left Presentation Camera", EyeLayerLeft, StereoTargetEyeMask.Left);
-            CreateEyeCamera(rigRoot.transform, "MetalXR Right Presentation Camera", EyeLayerRight, StereoTargetEyeMask.Right);
+            _leftPresentationPanel = CreateEyePanel(rigRoot.transform, "MetalXR Left Presentation Panel", EyeLayerLeft, _leftMaterial);
+            _rightPresentationPanel = CreateEyePanel(rigRoot.transform, "MetalXR Right Presentation Panel", EyeLayerRight, _rightMaterial);
+            _leftPresentationCamera = CreateEyeCamera(rigRoot.transform, "MetalXR Left Presentation Camera", EyeLayerLeft, StereoTargetEyeMask.Left);
+            _rightPresentationCamera = CreateEyeCamera(rigRoot.transform, "MetalXR Right Presentation Camera", EyeLayerRight, StereoTargetEyeMask.Right);
         }
 
         private static Texture2D CreateTexture(string name)
@@ -654,21 +663,98 @@ namespace MetalXR.QuestClient
             return camera;
         }
 
-        private void CreateEyePanel(Transform parent, string name, int layer, Material material)
+        private Transform CreateEyePanel(Transform parent, string name, int layer, Material material)
         {
             GameObject panel = new GameObject(name);
             panel.name = name;
             panel.layer = layer;
             panel.transform.SetParent(parent, false);
-            panel.transform.localPosition = new Vector3(0.0f, 0.0f, 2.0f);
+            panel.transform.localPosition = new Vector3(0.0f, 0.0f, PresentationPanelDistance);
             panel.transform.localRotation = Quaternion.identity;
-            panel.transform.localScale = PresentationPanelScale;
+            panel.transform.localScale = DefaultPresentationPanelScale;
 
             MeshFilter meshFilter = panel.AddComponent<MeshFilter>();
             meshFilter.sharedMesh = _quadMesh;
 
             MeshRenderer meshRenderer = panel.AddComponent<MeshRenderer>();
             meshRenderer.sharedMaterial = material;
+            return panel.transform;
+        }
+
+        private void ApplyPresentationMetadata(MetalXRQuestDecodedVideoFrame leftFrame, MetalXRQuestDecodedVideoFrame rightFrame)
+        {
+            ApplyEyePresentationMetadata(_leftPresentationCamera, _leftPresentationPanel, leftFrame);
+            ApplyEyePresentationMetadata(_rightPresentationCamera, _rightPresentationPanel, rightFrame);
+        }
+
+        private static void ApplyEyePresentationMetadata(Camera camera, Transform panel, MetalXRQuestDecodedVideoFrame frame)
+        {
+            if (camera == null || panel == null || frame == null)
+            {
+                return;
+            }
+
+            float angleLeft;
+            float angleRight;
+            float angleUp;
+            float angleDown;
+            if (!TryReadFov(frame.Fov, out angleLeft, out angleRight, out angleUp, out angleDown))
+            {
+                camera.fieldOfView = DefaultVerticalFovDegrees;
+                camera.aspect = DefaultPresentationPanelScale.x / DefaultPresentationPanelScale.y;
+                panel.localPosition = new Vector3(0.0f, 0.0f, PresentationPanelDistance);
+                panel.localScale = DefaultPresentationPanelScale;
+                return;
+            }
+
+            float leftTangent = Mathf.Tan(angleLeft);
+            float rightTangent = Mathf.Tan(angleRight);
+            float upTangent = Mathf.Tan(angleUp);
+            float downTangent = Mathf.Tan(angleDown);
+            float width = Mathf.Max(0.1f, PresentationPanelDistance * (rightTangent - leftTangent));
+            float height = Mathf.Max(0.1f, PresentationPanelDistance * (upTangent - downTangent));
+            float centerX = PresentationPanelDistance * (rightTangent + leftTangent) * 0.5f;
+            float centerY = PresentationPanelDistance * (upTangent + downTangent) * 0.5f;
+            float verticalFovDegrees = Mathf.Clamp(
+                (angleUp - angleDown) * Mathf.Rad2Deg,
+                MinVerticalFovDegrees,
+                MaxVerticalFovDegrees);
+
+            camera.fieldOfView = verticalFovDegrees;
+            camera.aspect = width / height;
+            panel.localPosition = new Vector3(centerX, centerY, PresentationPanelDistance);
+            panel.localScale = new Vector3(width, height, 1.0f);
+        }
+
+        private static bool TryReadFov(
+            float[] fov,
+            out float angleLeft,
+            out float angleRight,
+            out float angleUp,
+            out float angleDown)
+        {
+            angleLeft = 0.0f;
+            angleRight = 0.0f;
+            angleUp = 0.0f;
+            angleDown = 0.0f;
+
+            if (fov == null || fov.Length < 4)
+            {
+                return false;
+            }
+
+            angleLeft = fov[0];
+            angleRight = fov[1];
+            angleUp = fov[2];
+            angleDown = fov[3];
+            if (angleLeft >= 0.0f || angleRight <= 0.0f || angleUp <= 0.0f || angleDown >= 0.0f)
+            {
+                return false;
+            }
+
+            float horizontalFov = angleRight - angleLeft;
+            float verticalFov = angleUp - angleDown;
+            return horizontalFov > 0.1f && verticalFov > 0.1f;
         }
 
         private static Mesh CreateQuadMesh()
