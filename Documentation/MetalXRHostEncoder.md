@@ -6,7 +6,7 @@ This document tracks the macOS host encoder added for issue #5.
 
 The host encoder is an independent macOS command-line component that converts frame sources into a low-latency H.264 stream with VideoToolbox. It supports synthetic stereo BGRA frames for diagnostics and file-based Unity exports written by the OpenXR runtime for development integration.
 
-The implementation does not call Unity APIs. Frame generation, pixel buffer creation, and VideoToolbox encoding all run in the host process.
+The implementation does not call Unity APIs. Frame generation, IOSurface-backed pixel buffer pool ownership, and VideoToolbox encoding all run in the host process.
 
 ## Build
 
@@ -86,12 +86,12 @@ The streamer also emits `frame_source`, `clock_sync`, `latency`, `client_disconn
 
 ## Current Limitations
 
-- Unity-rendered frames currently move through development BGRA files before becoming `CVPixelBuffer` data.
+- Unity-rendered frames currently move through development BGRA files before being copied into IOSurface-backed `CVPixelBufferPool` encoder slots.
 - The encoder uses one H.264 session per eye. A future transport can either keep separate eye streams or add a stereo packing step.
 - There is no HEVC path yet.
-- There is no production GPU synchronization, IOSurface export, or direct VideoToolbox handoff from the OpenXR swapchain yet.
+- There is no production GPU synchronization, IOSurface export from the OpenXR swapchain, or direct VideoToolbox handoff from runtime-owned textures yet.
 - The stream path is TCP-only for now. USB adb reverse and Wi-Fi are both usable for evaluation, but automatic bitrate adaptation, packet loss handling, and production-grade clock sync are still future work.
 
 ## Next Step
 
-The file-based Unity export bridge should be replaced with a lower-latency IOSurface-backed path or a Metal blit into VideoToolbox-compatible pixel buffers. The remaining stream work is adaptive stream policy and a synchronized runtime/host bridge that replaces the development state files.
+The file-based Unity export bridge should be replaced with a lower-latency IOSurface handoff or a Metal blit into the host's VideoToolbox-compatible pixel buffer pool. The remaining stream work is adaptive stream policy and synchronized runtime/host ownership for frame slots.

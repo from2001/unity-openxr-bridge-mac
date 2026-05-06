@@ -10,18 +10,17 @@ Working:
 
 - macOS SwiftUI developer dashboard for Quest detection, APK install, Unity launch, stream start/stop, and diagnostics export.
 - Native macOS OpenXR runtime skeleton with lifecycle, session events, reference spaces, Metal swapchains, stereo projection submission, frame metadata, and frame export.
-- VideoToolbox host encoder and TCP streamer for synthetic frames or Unity-exported stereo eye frames.
+- VideoToolbox host encoder and TCP streamer for synthetic frames or Unity-exported stereo eye frames, using IOSurface/Metal-compatible `CVPixelBufferPool` encoder slots.
 - Unity Quest client APK that connects over USB `adb reverse`, advertises a device profile during HELLO, decodes H.264 frames with MediaCodec when available, displays the stream in headset, and sends timing/input samples back to the host.
 - Development tracking/action/haptic bridge for HMD pose, controller buttons, trigger, grip, thumbstick, aim/grip poses, and haptic feedback.
 - Runtime frame timing fed by Quest display samples, OpenXR projection metadata carried with each streamed eye frame, reconnect handling for common Quest client restarts, stale tracking/timing diagnostics, and smoke probes for the full loop.
 
 Not MVP-ready yet:
 
-- Production zero-copy or IOSurface frame handoff.
-- Production runtime-host IPC or shared-memory state. Frame transfer currently uses CPU readback and file-based export.
+- Production zero-copy runtime-to-host IOSurface frame handoff. Frame transfer currently still uses CPU readback and file-based export before the host copies pixels into encoder slots.
+- Production runtime-host IPC/ring ownership beyond the current single-slot shared-state bridge.
 - Production Quest presentation. The Quest APK is currently a diagnostic Unity OpenXR client that displays streamed eye textures through an in-headset debug presentation path.
 - Pose/FOV-aware Quest presentation, rotational reprojection, or compositor-layer style presentation.
-- Runtime-host tracking, timing, and haptics still have development text-file boundaries.
 - Datagram transport, packet loss recovery, audio, foveation, or automatic bitrate adaptation.
 - Full OpenXR interaction profile/action binding coverage.
 - SteamVR/OpenComposite compatibility.
@@ -42,12 +41,12 @@ Unity camera data should not become a separate bridge API. The runtime should ca
 
 The current implementation deliberately keeps several development-only boundaries because they are easy to probe and debug:
 
-- Unity-submitted Metal frames are exported through CPU readback and files before the host encoder reads them.
+- Unity-submitted Metal frames are exported through CPU readback and files before the host copies them into IOSurface-backed encoder pixel buffers.
 - The host applies the Quest HELLO device profile for stream compatibility, but the runtime still uses a fixed development view configuration until the profile bridge moves into runtime-host IPC.
 - Runtime-host tracking, timing, and haptics now have a POSIX shared-state bridge; debug text files remain as fallback and diagnostics.
 - The Quest client uses a Unity diagnostic presentation path and keeps a CPU MediaCodec Image-plane fallback.
 
-The next production-oriented milestones are to move the shared-state bridge to richer IPC/ring ownership, replace file-based frame export with shared GPU or encoder-compatible frame resources, and add a Quest presentation path that is aware of frame pose/FOV rather than just showing diagnostic panels.
+The next production-oriented milestones are to connect runtime-owned textures to host encoder slots through shared GPU resources, move the shared-state bridge to richer IPC/ring ownership, and add a Quest presentation path that is aware of frame pose/FOV rather than just showing diagnostic panels.
 
 ## Repository Layout
 
