@@ -18,6 +18,7 @@ namespace MetalXR.QuestClient
         private const int MaxStreamFrameSetsPerUpdate = 4;
         private const int MaxDecodedFrameSets = 8;
         private const int MaxHapticCommandsPerUpdate = 4;
+        private static readonly Vector3 PresentationPanelScale = new Vector3(2.2f, 1.2375f, 1.0f);
 
         private Texture2D _leftTexture;
         private Texture2D _rightTexture;
@@ -576,8 +577,10 @@ namespace MetalXR.QuestClient
 
             GameObject rigRoot = CreateRigRoot();
 
-            CreateEyePanel(rigRoot.transform, "MetalXR Left Diagnostic Panel", EyeLayerLeft, _leftMaterial, -0.55f);
-            CreateEyePanel(rigRoot.transform, "MetalXR Right Diagnostic Panel", EyeLayerRight, _rightMaterial, 0.55f);
+            CreateEyePanel(rigRoot.transform, "MetalXR Left Presentation Panel", EyeLayerLeft, _leftMaterial);
+            CreateEyePanel(rigRoot.transform, "MetalXR Right Presentation Panel", EyeLayerRight, _rightMaterial);
+            CreateEyeCamera(rigRoot.transform, "MetalXR Left Presentation Camera", EyeLayerLeft, StereoTargetEyeMask.Left);
+            CreateEyeCamera(rigRoot.transform, "MetalXR Right Presentation Camera", EyeLayerRight, StereoTargetEyeMask.Right);
         }
 
         private static Texture2D CreateTexture(string name)
@@ -621,33 +624,45 @@ namespace MetalXR.QuestClient
 
         private GameObject CreateRigRoot()
         {
-            GameObject root = new GameObject("MetalXR Diagnostic Rig");
+            GameObject root = new GameObject("MetalXR Presentation Rig");
             root.transform.SetParent(transform, false);
+            return root;
+        }
 
-            Camera camera = root.AddComponent<Camera>();
+        private static Camera CreateEyeCamera(
+            Transform parent,
+            string name,
+            int layer,
+            StereoTargetEyeMask stereoTargetEye)
+        {
+            GameObject cameraObject = new GameObject(name);
+            cameraObject.transform.SetParent(parent, false);
+            cameraObject.transform.localPosition = Vector3.zero;
+            cameraObject.transform.localRotation = Quaternion.identity;
+            Camera camera = cameraObject.AddComponent<Camera>();
             camera.clearFlags = CameraClearFlags.SolidColor;
             camera.backgroundColor = new Color(0.015f, 0.017f, 0.02f, 1.0f);
             camera.nearClipPlane = 0.01f;
             camera.farClipPlane = 20.0f;
             camera.fieldOfView = 62.0f;
             camera.depth = 10.0f;
-            camera.cullingMask = (1 << EyeLayerLeft) | (1 << EyeLayerRight);
+            camera.cullingMask = 1 << layer;
+            camera.stereoTargetEye = stereoTargetEye;
             camera.useOcclusionCulling = false;
             camera.allowHDR = false;
             camera.allowMSAA = true;
-
-            return root;
+            return camera;
         }
 
-        private void CreateEyePanel(Transform parent, string name, int layer, Material material, float localX)
+        private void CreateEyePanel(Transform parent, string name, int layer, Material material)
         {
             GameObject panel = new GameObject(name);
             panel.name = name;
             panel.layer = layer;
             panel.transform.SetParent(parent, false);
-            panel.transform.localPosition = new Vector3(localX, 0.0f, 2.0f);
+            panel.transform.localPosition = new Vector3(0.0f, 0.0f, 2.0f);
             panel.transform.localRotation = Quaternion.identity;
-            panel.transform.localScale = new Vector3(0.98f, 0.55f, 1.0f);
+            panel.transform.localScale = PresentationPanelScale;
 
             MeshFilter meshFilter = panel.AddComponent<MeshFilter>();
             meshFilter.sharedMesh = _quadMesh;
