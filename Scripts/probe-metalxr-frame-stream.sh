@@ -90,6 +90,7 @@ run_stream_probe() {
   local frame_export_dir="${6:-}"
   local frame_export_socket="${7:-}"
   local socket_fixture_dir="${8:-}"
+  local frame_export_ack_socket="${9:-}"
   local log_file="$log_dir/metalxr_host_streamer_probe_${name}.log"
 
   rm -f "$log_file"
@@ -112,6 +113,9 @@ run_stream_probe() {
   fi
   if [[ -n "$frame_export_socket" ]]; then
     streamer_args+=(--frame-export-socket "$frame_export_socket")
+  fi
+  if [[ -n "$frame_export_ack_socket" ]]; then
+    streamer_args+=(--frame-export-ack-socket "$frame_export_ack_socket")
   fi
 
   "$streamer" "${streamer_args[@]}" >"$log_file" 2>&1 &
@@ -669,11 +673,52 @@ run_iosurface_socket_export_probe() {
   local height=64
   local fixture_dir
   local socket_path
+  local ack_socket_path
+  local ack_capture
   local fixture_log
   fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/metalxr_iosurface_socket_export_probe.XXXXXX")"
   socket_path="/tmp/metalxr-iosurface-socket-export-${port}-$$.sock"
+  ack_socket_path="$socket_path.ack"
+  ack_capture="$log_dir/metalxr_iosurface_socket_export_acks.jsonl"
   fixture_log="$log_dir/metalxr_iosurface_socket_export_fixture.log"
-  rm -f "$fixture_log" "$socket_path"
+  rm -f "$fixture_log" "$socket_path" "$ack_socket_path" "$ack_capture"
+
+  "$python_bin" - "$ack_socket_path" "$ack_capture" <<'PY' &
+import pathlib
+import socket
+import sys
+import time
+
+socket_path = pathlib.Path(sys.argv[1])
+capture_path = pathlib.Path(sys.argv[2])
+try:
+    socket_path.unlink()
+except FileNotFoundError:
+    pass
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+sock.bind(str(socket_path))
+sock.settimeout(0.5)
+deadline = time.time() + 10.0
+captured = 0
+with capture_path.open("w", encoding="utf-8") as output:
+    while time.time() < deadline and captured < 2:
+        try:
+            data, _ = sock.recvfrom(65535)
+        except socket.timeout:
+            continue
+        output.write(data.decode("utf-8") + "\n")
+        output.flush()
+        captured += 1
+sock.close()
+PY
+  local ack_listener_pid="$!"
+  for _ in $(seq 1 50); do
+    if [[ -S "$ack_socket_path" ]]; then
+      break
+    fi
+    sleep 0.05
+  done
 
   "$iosurface_fixture" "$fixture_dir" "$width" "$height" 3 20 >"$fixture_log" 2>&1 &
   local fixture_pid="$!"
@@ -701,9 +746,16 @@ run_iosurface_socket_export_probe() {
     exit 1
   fi
 
-  run_stream_probe "iosurface_socket_export" "$port" "$width" "$height" "unity-export" "" "$socket_path" "$fixture_dir"
+  run_stream_probe "iosurface_socket_export" "$port" "$width" "$height" "unity-export" "" "$socket_path" "$fixture_dir" "$ack_socket_path"
 
-  rm -f "$socket_path"
+  wait "$ack_listener_pid" || true
+  if ! grep -q '"event":"frame_slot_release"' "$ack_capture"; then
+    echo "IOSurface socket export probe did not receive frame slot release acks." >&2
+    cat "$ack_capture" >&2 || true
+    exit 1
+  fi
+
+  rm -f "$socket_path" "$ack_socket_path"
   if kill -0 "$fixture_pid" >/dev/null 2>&1; then
     kill "$fixture_pid" >/dev/null 2>&1 || true
   fi

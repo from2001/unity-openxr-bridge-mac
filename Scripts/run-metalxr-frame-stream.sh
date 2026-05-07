@@ -26,6 +26,8 @@ Environment:
   METALXR_FRAME_SOURCE        synthetic or unity-export. Defaults to synthetic.
   METALXR_FRAME_EXPORT_DIR    Runtime frame export directory for unity-export source.
   METALXR_FRAME_EXPORT_SOCKET Runtime frame export datagram socket for unity-export source.
+  METALXR_FRAME_EXPORT_ACK_SOCKET
+                              Runtime frame slot release ack datagram socket for IOSurface export.
   METALXR_FRAME_EXPORT_WAIT_MS
                               Initial wait for a complete unity-export stereo pair. Defaults to 3000.
   METALXR_PREDICTION_OFFSET_MS
@@ -61,6 +63,7 @@ reconnect_attempts="${METALXR_STREAM_RECONNECT_ATTEMPTS:-0}"
 frame_source="${METALXR_FRAME_SOURCE:-synthetic}"
 frame_export_dir="${METALXR_FRAME_EXPORT_DIR:-}"
 frame_export_socket="${METALXR_FRAME_EXPORT_SOCKET:-}"
+frame_export_ack_socket="${METALXR_FRAME_EXPORT_ACK_SOCKET:-}"
 frame_export_wait_ms="${METALXR_FRAME_EXPORT_WAIT_MS:-3000}"
 prediction_offset_ms="${METALXR_PREDICTION_OFFSET_MS:-0}"
 clock_sync_interval_ms="${METALXR_CLOCK_SYNC_INTERVAL_MS:-500}"
@@ -168,6 +171,10 @@ fi
 
 if [[ -n "$frame_export_socket" ]]; then
   streamer_args+=(--frame-export-socket "$frame_export_socket")
+fi
+
+if [[ -n "$frame_export_ack_socket" ]]; then
+  streamer_args+=(--frame-export-ack-socket "$frame_export_ack_socket")
 fi
 
 "$streamer" \

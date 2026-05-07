@@ -13,6 +13,7 @@ probe_log="${TMPDIR:-/tmp}/metalxr_runtime_probe.log"
 probe_dump_dir="${TMPDIR:-/tmp}/metalxr_frame_dump"
 probe_export_dir="${METALXR_PROBE_FRAME_EXPORT_DIR-"${TMPDIR:-/tmp}/metalxr_frame_export"}"
 probe_export_socket="${METALXR_PROBE_FRAME_EXPORT_SOCKET:-}"
+probe_export_ack_socket="${METALXR_PROBE_FRAME_EXPORT_ACK_SOCKET:-}"
 probe_export_socket_capture="${TMPDIR:-/tmp}/metalxr_runtime_probe_socket_records.jsonl"
 probe_timing_state="${TMPDIR:-/tmp}/metalxr_runtime_probe_timing_state.txt"
 probe_export_mode="${METALXR_PROBE_FRAME_EXPORT_MODE:-fixture}"
@@ -700,7 +701,11 @@ if [[ -n "$probe_export_dir" ]]; then
 fi
 if [[ -n "$probe_export_socket" ]]; then
   rm -f "$probe_export_socket"
-  python3 - "$probe_export_socket" "$probe_export_socket_capture" <<'PY' &
+  if [[ -n "$probe_export_ack_socket" ]]; then
+    rm -f "$probe_export_ack_socket"
+  fi
+  python3 - "$probe_export_socket" "$probe_export_socket_capture" "$probe_export_ack_socket" <<'PY' &
+import json
 import pathlib
 import socket
 import sys
@@ -708,6 +713,7 @@ import time
 
 socket_path = pathlib.Path(sys.argv[1])
 capture_path = pathlib.Path(sys.argv[2])
+ack_socket_path = sys.argv[3]
 try:
     socket_path.unlink()
 except FileNotFoundError:
@@ -725,8 +731,27 @@ with capture_path.open("w", encoding="utf-8") as output:
             data, _ = sock.recvfrom(65535)
         except socket.timeout:
             continue
-        output.write(data.decode("utf-8") + "\n")
+        decoded = data.decode("utf-8")
+        output.write(decoded + "\n")
         output.flush()
+        if ack_socket_path:
+            try:
+                record = json.loads(decoded)
+                ack = {
+                    "event": "frame_slot_release",
+                    "ioSurfaceId": int(record.get("ioSurfaceId", 0)),
+                    "frameSlotId": int(record.get("frameSlotId", 0)),
+                    "frameSlotGeneration": int(record.get("frameSlotGeneration", 0)),
+                    "sourceFrame": int(record.get("frame", 0)),
+                    "eye": int(record.get("eye", 0)),
+                    "state": "released",
+                    "mode": "probe",
+                }
+                ack_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+                ack_sock.sendto(json.dumps(ack, separators=(",", ":")).encode("utf-8"), ack_socket_path)
+                ack_sock.close()
+            except Exception:
+                pass
         captured_count += 1
 sock.close()
 PY
@@ -742,6 +767,7 @@ METALXR_RUNTIME_LOG="$probe_log" \
 METALXR_FRAME_DUMP_DIR="$probe_dump_dir" \
 METALXR_FRAME_EXPORT_DIR="$probe_export_dir" \
 METALXR_FRAME_EXPORT_SOCKET="$probe_export_socket" \
+METALXR_FRAME_EXPORT_ACK_SOCKET="$probe_export_ack_socket" \
 METALXR_FRAME_EXPORT_MODE="$probe_export_mode" \
 METALXR_SWAPCHAIN_RESOURCE_MODE="$probe_swapchain_resource_mode" \
 METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT="$probe_enable_iosurface_export" \
@@ -759,6 +785,9 @@ echo "Runtime log: $probe_log"
 echo "Frame export mode: $probe_export_mode"
 if [[ -n "$probe_export_socket" ]]; then
   echo "Frame export socket: $probe_export_socket"
+fi
+if [[ -n "$probe_export_ack_socket" ]]; then
+  echo "Frame export ack socket: $probe_export_ack_socket"
 fi
 sed -n '1,180p' "$probe_log"
 
@@ -803,6 +832,8 @@ for eye in 0 1; do
   if [[ "$probe_export_mode" == "iosurface" ]]; then
     grep -q "\"payloadFormat\":\"IOSurface" "$record_source"
     grep -q "\"ioSurfaceId\":" "$record_source"
+    grep -q "\"frameSlotGeneration\":" "$record_source"
+    grep -q "\"frameSlotFence\":\"metal-command-buffer-completed\"" "$record_source"
   else
     if [[ ! -s "$payload_file" ]]; then
       echo "Expected non-empty frame export payload was not written: $payload_file" >&2

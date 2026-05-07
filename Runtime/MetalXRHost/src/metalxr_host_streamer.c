@@ -54,6 +54,7 @@ typedef struct StreamerOptions {
     FrameSourceMode frameSource;
     char frameExportDir[1024];
     char frameExportSocketPath[1024];
+    char frameExportAckSocketPath[1024];
     int frameExportWaitMs;
     int clockSyncIntervalMs;
     int64_t predictionOffsetNs;
@@ -83,9 +84,19 @@ typedef struct UnityExportRecord {
     size_t bytesPerRow;
     size_t payloadBytes;
     uint32_t ioSurfaceId;
+    uint64_t frameSlotId;
+    uint64_t frameSlotGeneration;
     char payloadFormat[32];
     char payloadPath[1024];
 } UnityExportRecord;
+
+typedef struct PendingSharedSurface {
+    uint32_t ioSurfaceId;
+    uint64_t frameSlotId;
+    uint64_t frameSlotGeneration;
+    uint64_t sourceFrameId;
+    int eye;
+} PendingSharedSurface;
 
 typedef struct UnityExportFramePair {
     uint64_t sourceFrameId;
@@ -201,8 +212,9 @@ typedef struct EncoderContext {
     int queueLockInitialized;
     uint32_t pendingFrames;
     uint32_t maxQueueDepth;
-    uint32_t pendingSharedSurfaceIds[METALXR_MAX_PENDING_SHARED_SURFACES];
+    PendingSharedSurface pendingSharedSurfaces[METALXR_MAX_PENDING_SHARED_SURFACES];
     uint32_t pendingSharedSurfaceCount;
+    char frameExportAckSocketPath[1024];
 } EncoderContext;
 
 typedef struct FrameRefcon {
@@ -224,6 +236,9 @@ typedef struct FrameRefcon {
     uint64_t predictedDisplayTimeNs;
     uint64_t encodeStartTimeNs;
     uint32_t sharedIoSurfaceId;
+    uint64_t frameSlotId;
+    uint64_t frameSlotGeneration;
+    uint64_t sourceFrameId;
 } FrameRefcon;
 
 static uint64_t host_time_ns(void)
@@ -234,7 +249,7 @@ static uint64_t host_time_ns(void)
 static int reserve_encoder_queue_slot(EncoderContext* context, uint64_t frameId);
 static void release_encoder_queue_slot(EncoderContext* context);
 static int shared_iosurface_is_pending(EncoderContext* context, uint32_t ioSurfaceId);
-static int reserve_shared_iosurface(EncoderContext* context, uint32_t ioSurfaceId);
+static int reserve_shared_iosurface(EncoderContext* context, const UnityExportRecord* record, uint32_t ioSurfaceId);
 static void release_shared_iosurface(EncoderContext* context, uint32_t ioSurfaceId);
 
 static void sleep_until_ns(uint64_t targetNs)
@@ -262,7 +277,8 @@ static void print_usage(const char* argv0)
             "[--width N] [--height N] [--bitrate BPS] [--tracking-state-path PATH] "
             "[--haptic-command-path PATH] [--timing-state-path PATH] [--queue-depth N] "
             "[--frame-source synthetic|unity-export] [--frame-export-dir PATH] "
-            "[--frame-export-socket PATH] [--frame-export-wait-ms N] "
+            "[--frame-export-socket PATH] [--frame-export-ack-socket PATH] "
+            "[--frame-export-wait-ms N] "
             "[--shared-state-name NAME] [--no-shared-state] "
             "[--prediction-offset-ms N] [--clock-sync-interval-ms N] "
             "[--reconnect-attempts N] [--no-realtime]\n\n"
@@ -300,6 +316,7 @@ static StreamerOptions parse_options(int argc, char** argv)
     options.frameSource = FRAME_SOURCE_SYNTHETIC;
     options.frameExportDir[0] = '\0';
     options.frameExportSocketPath[0] = '\0';
+    options.frameExportAckSocketPath[0] = '\0';
     options.frameExportWaitMs = 3000;
     snprintf(options.sharedStateName, sizeof(options.sharedStateName), "%s", metalxr_shared_state_default_name());
     options.useSharedState = 1;
@@ -355,6 +372,8 @@ static StreamerOptions parse_options(int argc, char** argv)
             snprintf(options.frameExportDir, sizeof(options.frameExportDir), "%s", argv[++i]);
         } else if (strcmp(arg, "--frame-export-socket") == 0 && i + 1 < argc) {
             snprintf(options.frameExportSocketPath, sizeof(options.frameExportSocketPath), "%s", argv[++i]);
+        } else if (strcmp(arg, "--frame-export-ack-socket") == 0 && i + 1 < argc) {
+            snprintf(options.frameExportAckSocketPath, sizeof(options.frameExportAckSocketPath), "%s", argv[++i]);
         } else if (strcmp(arg, "--frame-export-wait-ms") == 0 && i + 1 < argc) {
             options.frameExportWaitMs = parse_int_arg(argv[++i], "frame export wait ms", 0, 600000);
         } else if (strcmp(arg, "--shared-state-name") == 0 && i + 1 < argc) {
@@ -544,6 +563,8 @@ static int parse_unity_export_record(const char* line, UnityExportRecord* record
     uint64_t bytesPerRow = 0;
     uint64_t payloadBytes = 0;
     uint64_t ioSurfaceId = 0;
+    uint64_t frameSlotId = 0;
+    uint64_t frameSlotGeneration = 0;
     uint64_t imageArrayIndex = 0;
     uint64_t imageRectWidth = 0;
     uint64_t imageRectHeight = 0;
@@ -577,6 +598,8 @@ static int parse_unity_export_record(const char* line, UnityExportRecord* record
         record->payloadPath,
         sizeof(record->payloadPath));
     (void)json_read_u64_field(line, "\"ioSurfaceId\":", &ioSurfaceId);
+    (void)json_read_u64_field(line, "\"frameSlotId\":", &frameSlotId);
+    (void)json_read_u64_field(line, "\"frameSlotGeneration\":", &frameSlotGeneration);
 
     if (eye > 1 || width > INT_MAX || height > INT_MAX ||
         bytesPerRow > SIZE_MAX || payloadBytes > SIZE_MAX ||
@@ -653,6 +676,8 @@ static int parse_unity_export_record(const char* line, UnityExportRecord* record
     record->bytesPerRow = (size_t)bytesPerRow;
     record->payloadBytes = (size_t)payloadBytes;
     record->ioSurfaceId = (uint32_t)ioSurfaceId;
+    record->frameSlotId = frameSlotId;
+    record->frameSlotGeneration = frameSlotGeneration;
     return 1;
 }
 
@@ -1374,6 +1399,89 @@ static int unity_export_record_is_iosurface(const UnityExportRecord* record)
             strcmp(record->payloadFormat, "IOSurfaceRGBA8") == 0);
 }
 
+static void send_frame_slot_release_ack(
+    EncoderContext* context,
+    uint32_t ioSurfaceId,
+    uint64_t frameSlotId,
+    uint64_t frameSlotGeneration,
+    uint64_t sourceFrameId,
+    int eye,
+    const char* releaseMode)
+{
+    if (context == NULL ||
+        context->frameExportAckSocketPath[0] == '\0' ||
+        ioSurfaceId == 0 ||
+        frameSlotGeneration == 0) {
+        return;
+    }
+    if (strlen(context->frameExportAckSocketPath) >= sizeof(((struct sockaddr_un*)0)->sun_path)) {
+        fprintf(stderr,
+                "{\"event\":\"frame_slot_ack_error\",\"reason\":\"path_too_long\","
+                "\"path\":\"%s\"}\n",
+                context->frameExportAckSocketPath);
+        return;
+    }
+
+    const int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return;
+    }
+
+    char message[512];
+    snprintf(message,
+             sizeof(message),
+             "{\"event\":\"frame_slot_release\",\"ioSurfaceId\":%u,"
+             "\"frameSlotId\":%" PRIu64 ",\"frameSlotGeneration\":%" PRIu64 ","
+             "\"sourceFrame\":%" PRIu64 ",\"eye\":%d,\"state\":\"released\","
+             "\"mode\":\"%s\"}",
+             ioSurfaceId,
+             frameSlotId,
+             frameSlotGeneration,
+             sourceFrameId,
+             eye,
+             releaseMode != NULL ? releaseMode : "unknown");
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", context->frameExportAckSocketPath);
+
+    if (sendto(fd,
+               message,
+               strlen(message),
+               0,
+               (struct sockaddr*)&address,
+               sizeof(address)) < 0 &&
+        errno != ENOENT &&
+        errno != ECONNREFUSED) {
+        fprintf(stderr,
+                "{\"event\":\"frame_slot_ack_error\",\"reason\":\"send_failed\","
+                "\"errno\":%d,\"io_surface_id\":%u,\"frame_slot_generation\":%" PRIu64 "}\n",
+                errno,
+                ioSurfaceId,
+                frameSlotGeneration);
+    }
+    close(fd);
+}
+
+static void send_frame_slot_release_ack_for_record(
+    EncoderContext* context,
+    const UnityExportRecord* record,
+    const char* releaseMode)
+{
+    if (record == NULL) {
+        return;
+    }
+
+    send_frame_slot_release_ack(context,
+                                record->ioSurfaceId,
+                                record->frameSlotId,
+                                record->frameSlotGeneration,
+                                record->sourceFrameId,
+                                record->eye,
+                                releaseMode);
+}
+
 static CVPixelBufferRef copy_iosurface_to_encoder_pixel_buffer(
     EncoderContext* context,
     const UnityExportRecord* record,
@@ -1466,13 +1574,19 @@ static CVPixelBufferRef create_unity_export_iosurface_pixel_buffer(
     if (sourceIsRgba || reuseHazard) {
         CVPixelBufferRef copiedPixelBuffer =
             copy_iosurface_to_encoder_pixel_buffer(context, record, surface);
-        if (copiedPixelBuffer != NULL && reuseHazard) {
-            printf("{\"event\":\"iosurface_reuse_guard\",\"eye\":%d,"
+        if (copiedPixelBuffer != NULL) {
+            send_frame_slot_release_ack_for_record(context, record, "host_copy");
+        }
+        if (copiedPixelBuffer != NULL && (reuseHazard || sourceIsRgba)) {
+            printf("{\"event\":\"iosurface_host_copy\",\"eye\":%d,"
                    "\"source_frame\":%" PRIu64 ",\"io_surface_id\":%u,"
-                   "\"mode\":\"host_copy\"}\n",
+                   "\"frame_slot_generation\":%" PRIu64 ","
+                   "\"reason\":\"%s\",\"mode\":\"host_copy\"}\n",
                    record->eye,
                    record->sourceFrameId,
-                   record->ioSurfaceId);
+                   record->ioSurfaceId,
+                   record->frameSlotGeneration,
+                   reuseHazard ? "reuse_guard" : "rgba_swizzle");
             fflush(stdout);
         }
         CFRelease(surface);
@@ -1606,6 +1720,10 @@ static int create_encoder(EncoderContext* context, const StreamerOptions* option
     context->fps = options->fps;
     context->stream = stream;
     context->maxQueueDepth = (uint32_t)options->queueDepth;
+    snprintf(context->frameExportAckSocketPath,
+             sizeof(context->frameExportAckSocketPath),
+             "%s",
+             options->frameExportAckSocketPath);
     pthread_mutex_init(&context->queueLock, NULL);
     context->queueLockInitialized = 1;
     context->pixelBufferPool = create_encoder_pixel_buffer_pool(
@@ -1695,10 +1813,11 @@ static int submit_pixel_buffer_frame(
     const UnityExportRecord* unityRecord)
 {
     if (!reserve_encoder_queue_slot(context, frameId)) {
+        send_frame_slot_release_ack_for_record(context, unityRecord, "queue_full");
         return 1;
     }
 
-    if (sharedIoSurfaceId != 0 && !reserve_shared_iosurface(context, sharedIoSurfaceId)) {
+    if (sharedIoSurfaceId != 0 && !reserve_shared_iosurface(context, unityRecord, sharedIoSurfaceId)) {
         fprintf(stderr,
                 "{\"event\":\"drop\",\"reason\":\"shared_iosurface_pending\","
                 "\"frame\":%" PRIu64 ",\"eye\":%d,\"io_surface_id\":%u}\n",
@@ -1706,6 +1825,7 @@ static int submit_pixel_buffer_frame(
                 context->eyeIndex,
                 sharedIoSurfaceId);
         ++context->stats.droppedFrames;
+        send_frame_slot_release_ack_for_record(context, unityRecord, "shared_iosurface_pending");
         release_encoder_queue_slot(context);
         return 0;
     }
@@ -1715,6 +1835,7 @@ static int submit_pixel_buffer_frame(
                 context->eyeName,
                 frameId);
         ++context->stats.droppedFrames;
+        send_frame_slot_release_ack_for_record(context, unityRecord, "missing_pixel_buffer");
         release_shared_iosurface(context, sharedIoSurfaceId);
         release_encoder_queue_slot(context);
         return 0;
@@ -1722,6 +1843,7 @@ static int submit_pixel_buffer_frame(
 
     FrameRefcon* frame = (FrameRefcon*)calloc(1, sizeof(*frame));
     if (frame == NULL) {
+        send_frame_slot_release_ack_for_record(context, unityRecord, "frame_refcon_alloc_failed");
         release_shared_iosurface(context, sharedIoSurfaceId);
         release_encoder_queue_slot(context);
         return 0;
@@ -1759,6 +1881,11 @@ static int submit_pixel_buffer_frame(
     frame->predictedDisplayTimeNs = predictedDisplayTimeNs;
     frame->encodeStartTimeNs = host_time_ns();
     frame->sharedIoSurfaceId = sharedIoSurfaceId;
+    if (unityRecord != NULL) {
+        frame->frameSlotId = unityRecord->frameSlotId;
+        frame->frameSlotGeneration = unityRecord->frameSlotGeneration;
+        frame->sourceFrameId = unityRecord->sourceFrameId;
+    }
 
     const CMTime presentationTimeStamp = CMTimeMake((int64_t)frameId, context->fps);
     const CMTime duration = CMTimeMake(1, context->fps);
@@ -1848,6 +1975,7 @@ static int encode_unity_export_eye_frame(
                 record->payloadPath,
                 record->ioSurfaceId);
         ++context->stats.droppedFrames;
+        send_frame_slot_release_ack_for_record(context, record, "payload_error");
         return 0;
     }
 
@@ -2109,7 +2237,7 @@ static int shared_iosurface_is_pending(EncoderContext* context, uint32_t ioSurfa
     int pending = 0;
     pthread_mutex_lock(&context->queueLock);
     for (uint32_t i = 0; i < context->pendingSharedSurfaceCount; ++i) {
-        if (context->pendingSharedSurfaceIds[i] == ioSurfaceId) {
+        if (context->pendingSharedSurfaces[i].ioSurfaceId == ioSurfaceId) {
             pending = 1;
             break;
         }
@@ -2118,7 +2246,7 @@ static int shared_iosurface_is_pending(EncoderContext* context, uint32_t ioSurfa
     return pending;
 }
 
-static int reserve_shared_iosurface(EncoderContext* context, uint32_t ioSurfaceId)
+static int reserve_shared_iosurface(EncoderContext* context, const UnityExportRecord* record, uint32_t ioSurfaceId)
 {
     if (context == NULL || ioSurfaceId == 0) {
         return 1;
@@ -2127,14 +2255,24 @@ static int reserve_shared_iosurface(EncoderContext* context, uint32_t ioSurfaceI
     int reserved = 0;
     pthread_mutex_lock(&context->queueLock);
     for (uint32_t i = 0; i < context->pendingSharedSurfaceCount; ++i) {
-        if (context->pendingSharedSurfaceIds[i] == ioSurfaceId) {
+        if (context->pendingSharedSurfaces[i].ioSurfaceId == ioSurfaceId) {
             pthread_mutex_unlock(&context->queueLock);
             return 0;
         }
     }
 
     if (context->pendingSharedSurfaceCount < METALXR_MAX_PENDING_SHARED_SURFACES) {
-        context->pendingSharedSurfaceIds[context->pendingSharedSurfaceCount] = ioSurfaceId;
+        PendingSharedSurface* pending =
+            &context->pendingSharedSurfaces[context->pendingSharedSurfaceCount];
+        memset(pending, 0, sizeof(*pending));
+        pending->ioSurfaceId = ioSurfaceId;
+        pending->eye = context->eyeIndex;
+        if (record != NULL) {
+            pending->frameSlotId = record->frameSlotId;
+            pending->frameSlotGeneration = record->frameSlotGeneration;
+            pending->sourceFrameId = record->sourceFrameId;
+            pending->eye = record->eye;
+        }
         ++context->pendingSharedSurfaceCount;
         reserved = 1;
     }
@@ -2148,19 +2286,32 @@ static void release_shared_iosurface(EncoderContext* context, uint32_t ioSurface
         return;
     }
 
+    PendingSharedSurface released;
+    memset(&released, 0, sizeof(released));
     pthread_mutex_lock(&context->queueLock);
     for (uint32_t i = 0; i < context->pendingSharedSurfaceCount; ++i) {
-        if (context->pendingSharedSurfaceIds[i] != ioSurfaceId) {
+        if (context->pendingSharedSurfaces[i].ioSurfaceId != ioSurfaceId) {
             continue;
         }
 
+        released = context->pendingSharedSurfaces[i];
         const uint32_t last = context->pendingSharedSurfaceCount - 1u;
-        context->pendingSharedSurfaceIds[i] = context->pendingSharedSurfaceIds[last];
-        context->pendingSharedSurfaceIds[last] = 0;
+        context->pendingSharedSurfaces[i] = context->pendingSharedSurfaces[last];
+        memset(&context->pendingSharedSurfaces[last], 0, sizeof(context->pendingSharedSurfaces[last]));
         --context->pendingSharedSurfaceCount;
         break;
     }
     pthread_mutex_unlock(&context->queueLock);
+
+    if (released.ioSurfaceId != 0) {
+        send_frame_slot_release_ack(context,
+                                    released.ioSurfaceId,
+                                    released.frameSlotId,
+                                    released.frameSlotGeneration,
+                                    released.sourceFrameId,
+                                    released.eye,
+                                    "encoder_complete");
+    }
 }
 
 static HostInputState make_default_input_state(void)
@@ -2953,13 +3104,14 @@ static int configure_unity_export_stream(
     printf("{\"event\":\"frame_source\",\"source\":\"unity-export\","
            "\"state\":\"ready\",\"source_frame\":%" PRIu64 ",\"width\":%d,"
            "\"height\":%d,\"age_ms\":%" PRIu64 ",\"export_dir\":\"%s\","
-           "\"export_socket\":\"%s\"}\n",
+           "\"export_socket\":\"%s\",\"export_ack_socket\":\"%s\"}\n",
            initialPair->sourceFrameId,
            activeOptions->width,
            activeOptions->height,
            unity_export_pair_age_ms(initialPair),
            activeOptions->frameExportDir[0] != '\0' ? activeOptions->frameExportDir : "-",
-           activeOptions->frameExportSocketPath[0] != '\0' ? activeOptions->frameExportSocketPath : "-");
+           activeOptions->frameExportSocketPath[0] != '\0' ? activeOptions->frameExportSocketPath : "-",
+           activeOptions->frameExportAckSocketPath[0] != '\0' ? activeOptions->frameExportAckSocketPath : "-");
     fflush(stdout);
     return 1;
 }
@@ -3169,7 +3321,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d reconnect_attempts=%d source=%s export_dir=%s export_socket=%s export_wait_ms=%d prediction_offset_ns=%" PRId64 " shared_state=%s tracking=%s haptics=%s timing=%s\n",
+    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d reconnect_attempts=%d source=%s export_dir=%s export_socket=%s export_ack_socket=%s export_wait_ms=%d prediction_offset_ns=%" PRId64 " shared_state=%s tracking=%s haptics=%s timing=%s\n",
            options.bindHost,
            options.port,
            options.width,
@@ -3182,6 +3334,7 @@ int main(int argc, char** argv)
            frame_source_name(options.frameSource),
            options.frameExportDir[0] != '\0' ? options.frameExportDir : "-",
            options.frameExportSocketPath[0] != '\0' ? options.frameExportSocketPath : "-",
+           options.frameExportAckSocketPath[0] != '\0' ? options.frameExportAckSocketPath : "-",
            options.frameExportWaitMs,
            options.predictionOffsetNs,
            options.useSharedState ? options.sharedStateName : "disabled",
