@@ -114,6 +114,8 @@ static int write_fixture_record(
         "\"payloadFormat\":\"IOSurfaceBGRA8\","
         "\"width\":%d,\"height\":%d,\"bytesPerRow\":%zu,\"payloadBytes\":0,"
         "\"ioSurfaceId\":%u,"
+        "\"frameSlotId\":%u,\"frameSlotGeneration\":%" PRIu64 ","
+        "\"frameSlotState\":\"ready\",\"frameSlotFence\":\"fixture-ready\","
         "\"sourceRect\":{\"x\":0,\"y\":0,\"width\":%d,\"height\":%d},"
         "\"imageRectX\":0,\"imageRectY\":0,\"imageRectWidth\":%d,\"imageRectHeight\":%d,"
         "\"imageArrayIndex\":0,\"projectionFlags\":1,\"referenceSpaceId\":0,"
@@ -134,6 +136,8 @@ static int write_fixture_record(
             height,
             bytesPerRow,
             ioSurfaceId,
+            ioSurfaceId,
+            frame + 1u,
             width,
             height,
             width,
@@ -149,6 +153,8 @@ static int write_fixture_record(
             height,
             bytesPerRow,
             ioSurfaceId,
+            ioSurfaceId,
+            frame + 1u,
             width,
             height,
             width,

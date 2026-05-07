@@ -26,6 +26,8 @@ Environment:
   METALXR_FRAME_EXPORT_DIR             Shared frame export directory. Defaults to TMPDIR/metalxr_frame_export.
                                       Set to an empty value with METALXR_FRAME_EXPORT_SOCKET for socket-only export.
   METALXR_FRAME_EXPORT_SOCKET          Runtime frame export datagram socket for unity-export source.
+  METALXR_FRAME_EXPORT_ACK_SOCKET      Runtime frame slot release ack datagram socket for IOSurface export.
+                                      Defaults to METALXR_FRAME_EXPORT_SOCKET.ack when socket export is enabled.
   METALXR_FRAME_EXPORT_MODE            readback or fixture. Defaults to fixture for smoke reliability.
                                       iosurface is experimental and requires
                                       METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1.
@@ -67,6 +69,13 @@ else
   frame_export_dir="$tmp_root/metalxr_frame_export"
 fi
 frame_export_socket="${METALXR_FRAME_EXPORT_SOCKET:-}"
+if [[ "${METALXR_FRAME_EXPORT_ACK_SOCKET+x}" == "x" ]]; then
+  frame_export_ack_socket="$METALXR_FRAME_EXPORT_ACK_SOCKET"
+elif [[ -n "$frame_export_socket" ]]; then
+  frame_export_ack_socket="$frame_export_socket.ack"
+else
+  frame_export_ack_socket=""
+fi
 frame_export_mode="${METALXR_FRAME_EXPORT_MODE:-fixture}"
 swapchain_storage_mode="${METALXR_SWAPCHAIN_STORAGE_MODE:-shared}"
 view_width="${METALXR_VIEW_WIDTH:-640}"
@@ -370,6 +379,7 @@ EOF
     METALXR_FRAME_DUMP_DIR="$frame_dump_dir" \
     METALXR_FRAME_EXPORT_DIR="$frame_export_dir" \
     METALXR_FRAME_EXPORT_SOCKET="$frame_export_socket" \
+    METALXR_FRAME_EXPORT_ACK_SOCKET="$frame_export_ack_socket" \
     METALXR_FRAME_EXPORT_MODE="$frame_export_mode" \
     METALXR_SWAPCHAIN_STORAGE_MODE="$swapchain_storage_mode" \
     METALXR_VIEW_WIDTH="$view_width" \
@@ -429,6 +439,7 @@ EOF
   METALXR_FRAME_DUMP_DIR="$frame_dump_dir" \
   METALXR_FRAME_EXPORT_DIR="$frame_export_dir" \
   METALXR_FRAME_EXPORT_SOCKET="$frame_export_socket" \
+  METALXR_FRAME_EXPORT_ACK_SOCKET="$frame_export_ack_socket" \
   METALXR_FRAME_EXPORT_MODE="$frame_export_mode" \
   METALXR_SWAPCHAIN_STORAGE_MODE="$swapchain_storage_mode" \
   METALXR_VIEW_WIDTH="$view_width" \
@@ -452,6 +463,7 @@ start_unity_export_streamer() {
   METALXR_FRAME_SOURCE=unity-export \
   METALXR_FRAME_EXPORT_DIR="$frame_export_dir" \
   METALXR_FRAME_EXPORT_SOCKET="$frame_export_socket" \
+  METALXR_FRAME_EXPORT_ACK_SOCKET="$frame_export_ack_socket" \
   METALXR_FRAME_EXPORT_WAIT_MS="$((export_wait_seconds * 1000))" \
   METALXR_TRACKING_STATE_PATH="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}" \
   METALXR_HAPTIC_COMMAND_PATH="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}" \

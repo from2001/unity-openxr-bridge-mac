@@ -7,6 +7,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -187,6 +188,8 @@ struct XrSwapchain_T {
     void* ioSurfaceTextures[kSwapchainImageCount][kViewCount];
     IOSurfaceRef ioSurfaces[kSwapchainImageCount][kViewCount];
     uint32_t ioSurfaceIds[kSwapchainImageCount][kViewCount];
+    uint64_t ioSurfaceSlotGenerations[kSwapchainImageCount][kViewCount];
+    XrBool32 ioSurfaceSlotPending[kSwapchainImageCount][kViewCount];
     size_t ioSurfaceBytesPerRow;
     uint32_t ioSurfaceLayerCount;
     XrBool32 ioSurfaceBacked;
@@ -272,6 +275,12 @@ typedef struct MetalXrObjcBridge {
     XrBool32 available;
 } MetalXrObjcBridge;
 
+typedef struct MetalXrFrameSlotAckSocket {
+    int fd;
+    XrBool32 initialized;
+    char path[sizeof(((struct sockaddr_un*)0)->sun_path)];
+} MetalXrFrameSlotAckSocket;
+
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static MetalXrEventQueue g_eventQueue;
 static uint64_t g_nextInstanceId = 1;
@@ -284,6 +293,7 @@ static uint64_t g_nextHapticCommandId = 1;
 static XrPath g_nextPath = 1;
 static void* g_metalDevice;
 static MetalXrObjcBridge g_objcBridge;
+static MetalXrFrameSlotAckSocket g_frameSlotAckSocket = { -1, XR_FALSE, { 0 } };
 
 typedef struct MetalXrPathEntry {
     XrPath path;
@@ -3509,10 +3519,49 @@ static const char* metalxr_frame_export_socket_path(void)
     return socketPath != NULL && socketPath[0] != '\0' ? socketPath : NULL;
 }
 
+static const char* metalxr_frame_export_ack_socket_path(void)
+{
+    const char* socketPath = getenv("METALXR_FRAME_EXPORT_ACK_SOCKET");
+    return socketPath != NULL && socketPath[0] != '\0' ? socketPath : NULL;
+}
+
+static int metalxr_frame_slot_ack_timeout_ms(void)
+{
+    return metalxr_env_int("METALXR_FRAME_SLOT_ACK_TIMEOUT_MS", 50, 0, 5000);
+}
+
 static const char* metalxr_frame_export_mode(void)
 {
     const char* mode = getenv("METALXR_FRAME_EXPORT_MODE");
     return mode != NULL && mode[0] != '\0' ? mode : "readback";
+}
+
+static const char* metalxr_json_value(const char* json, const char* key)
+{
+    if (json == NULL || key == NULL) {
+        return NULL;
+    }
+
+    const char* value = strstr(json, key);
+    return value != NULL ? value + strlen(key) : NULL;
+}
+
+static int metalxr_json_read_u64_field(const char* json, const char* key, uint64_t* output)
+{
+    const char* value = metalxr_json_value(json, key);
+    if (value == NULL || output == NULL) {
+        return 0;
+    }
+
+    errno = 0;
+    char* end = NULL;
+    const unsigned long long parsed = strtoull(value, &end, 10);
+    if (errno != 0 || end == value) {
+        return 0;
+    }
+
+    *output = (uint64_t)parsed;
+    return 1;
 }
 
 static size_t metalxr_pixel_format_bytes_per_pixel(int64_t format)
@@ -3634,6 +3683,184 @@ static void metalxr_write_fixture_pixels(
             }
         }
     }
+}
+
+static int metalxr_frame_slot_ack_enabled(void)
+{
+    return metalxr_frame_export_ack_socket_path() != NULL;
+}
+
+static int metalxr_frame_slot_ack_socket_fd(void)
+{
+    const char* socketPath = metalxr_frame_export_ack_socket_path();
+    if (socketPath == NULL) {
+        return -1;
+    }
+
+    if (g_frameSlotAckSocket.initialized &&
+        strcmp(g_frameSlotAckSocket.path, socketPath) == 0) {
+        return g_frameSlotAckSocket.fd;
+    }
+
+    if (g_frameSlotAckSocket.fd >= 0) {
+        close(g_frameSlotAckSocket.fd);
+        g_frameSlotAckSocket.fd = -1;
+    }
+    if (g_frameSlotAckSocket.path[0] != '\0') {
+        (void)unlink(g_frameSlotAckSocket.path);
+        g_frameSlotAckSocket.path[0] = '\0';
+    }
+
+    g_frameSlotAckSocket.initialized = XR_TRUE;
+    if (strlen(socketPath) >= sizeof(g_frameSlotAckSocket.path)) {
+        metalxr_log("frame export ack socket path too long: %s", socketPath);
+        return -1;
+    }
+
+    const int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        metalxr_log("frame export ack socket create failed errno=%d", errno);
+        return -1;
+    }
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", socketPath);
+
+    (void)unlink(socketPath);
+    if (bind(fd, (struct sockaddr*)&address, sizeof(address)) != 0) {
+        metalxr_log("frame export ack socket bind failed: %s errno=%d", socketPath, errno);
+        close(fd);
+        return -1;
+    }
+
+    const int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+
+    g_frameSlotAckSocket.fd = fd;
+    snprintf(g_frameSlotAckSocket.path, sizeof(g_frameSlotAckSocket.path), "%s", socketPath);
+    metalxr_log("frame export ack socket listening: %s", socketPath);
+    return fd;
+}
+
+static void metalxr_session_apply_frame_slot_ack(
+    XrSession session,
+    uint32_t ioSurfaceId,
+    uint64_t frameSlotGeneration)
+{
+    if (!metalxr_is_session(session) || ioSurfaceId == 0 || frameSlotGeneration == 0) {
+        return;
+    }
+
+    for (uint32_t swapchainIndex = 0; swapchainIndex < session->swapchainCount; ++swapchainIndex) {
+        XrSwapchain swapchain = session->swapchains[swapchainIndex];
+        if (!metalxr_is_swapchain(swapchain)) {
+            continue;
+        }
+
+        for (uint32_t imageIndex = 0; imageIndex < swapchain->imageCount; ++imageIndex) {
+            for (uint32_t arrayIndex = 0; arrayIndex < swapchain->ioSurfaceLayerCount; ++arrayIndex) {
+                if (swapchain->ioSurfaceIds[imageIndex][arrayIndex] != ioSurfaceId) {
+                    continue;
+                }
+
+                const uint64_t pendingGeneration =
+                    swapchain->ioSurfaceSlotGenerations[imageIndex][arrayIndex];
+                if (swapchain->ioSurfaceSlotPending[imageIndex][arrayIndex] &&
+                    frameSlotGeneration >= pendingGeneration) {
+                    swapchain->ioSurfaceSlotPending[imageIndex][arrayIndex] = XR_FALSE;
+                    metalxr_log("IOSurface frame slot released id=%u generation=%" PRIu64,
+                                ioSurfaceId,
+                                frameSlotGeneration);
+                }
+                return;
+            }
+        }
+    }
+}
+
+static void metalxr_session_poll_frame_slot_acks(XrSession session)
+{
+    const int fd = metalxr_frame_slot_ack_socket_fd();
+    if (fd < 0) {
+        return;
+    }
+
+    for (;;) {
+        char message[1024];
+        const ssize_t received = recv(fd, message, sizeof(message) - 1u, 0);
+        if (received < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                metalxr_log("frame slot ack recv failed errno=%d", errno);
+            }
+            return;
+        }
+        if (received == 0) {
+            return;
+        }
+
+        message[received] = '\0';
+        uint64_t ioSurfaceId = 0;
+        uint64_t frameSlotGeneration = 0;
+        if (!metalxr_json_read_u64_field(message, "\"ioSurfaceId\":", &ioSurfaceId) ||
+            !metalxr_json_read_u64_field(message, "\"frameSlotGeneration\":", &frameSlotGeneration) ||
+            ioSurfaceId > UINT32_MAX) {
+            metalxr_log("ignored invalid frame slot ack: %s", message);
+            continue;
+        }
+
+        metalxr_session_apply_frame_slot_ack(session, (uint32_t)ioSurfaceId, frameSlotGeneration);
+    }
+}
+
+static int metalxr_wait_for_iosurface_slot_release(
+    XrSession session,
+    XrSwapchain swapchain,
+    uint32_t imageIndex,
+    uint32_t arrayIndex)
+{
+    if (!metalxr_frame_slot_ack_enabled()) {
+        return 1;
+    }
+    if (!metalxr_is_session(session) || !metalxr_is_swapchain(swapchain) ||
+        imageIndex >= swapchain->imageCount ||
+        arrayIndex >= swapchain->ioSurfaceLayerCount) {
+        return 0;
+    }
+
+    metalxr_session_poll_frame_slot_acks(session);
+    if (!swapchain->ioSurfaceSlotPending[imageIndex][arrayIndex]) {
+        return 1;
+    }
+
+    const uint32_t ioSurfaceId = swapchain->ioSurfaceIds[imageIndex][arrayIndex];
+    const uint64_t pendingGeneration = swapchain->ioSurfaceSlotGenerations[imageIndex][arrayIndex];
+    const int timeoutMs = metalxr_frame_slot_ack_timeout_ms();
+    const XrTime deadlineNs = metalxr_now_ns() + ((XrTime)timeoutMs * 1000000);
+    while (swapchain->ioSurfaceSlotPending[imageIndex][arrayIndex]) {
+        metalxr_session_poll_frame_slot_acks(session);
+        if (!swapchain->ioSurfaceSlotPending[imageIndex][arrayIndex]) {
+            return 1;
+        }
+        if (timeoutMs == 0 || metalxr_now_ns() >= deadlineNs) {
+            metalxr_log("IOSurface frame slot ack timeout id=%u generation=%" PRIu64
+                        " timeout_ms=%d; skipping export to avoid overwrite",
+                        ioSurfaceId,
+                        pendingGeneration,
+                        timeoutMs);
+            return 0;
+        }
+
+        struct timespec request;
+        request.tv_sec = 0;
+        request.tv_nsec = 1000000;
+        (void)nanosleep(&request, NULL);
+    }
+
+    return 1;
 }
 
 static void metalxr_synchronize_texture_for_cpu(XrSession session, void* texture)
@@ -4056,14 +4283,31 @@ static void metalxr_export_projection_view(
                                                swapchain,
                                                swapchain->acquiredImageIndex,
                                                view->subImage.imageArrayIndex) &&
-        metalxr_copy_texture_slice_to_iosurface(session,
+        metalxr_wait_for_iosurface_slot_release(session,
                                                 swapchain,
                                                 swapchain->acquiredImageIndex,
-                                                view->subImage.imageArrayIndex,
-                                                x,
-                                                y,
-                                                width,
-                                                height)) {
+                                                view->subImage.imageArrayIndex)) {
+        const uint64_t frameSlotGeneration =
+            swapchain->ioSurfaceSlotGenerations
+                [swapchain->acquiredImageIndex][view->subImage.imageArrayIndex] + 1u;
+        if (!metalxr_copy_texture_slice_to_iosurface(session,
+                                                     swapchain,
+                                                     swapchain->acquiredImageIndex,
+                                                     view->subImage.imageArrayIndex,
+                                                     x,
+                                                     y,
+                                                     width,
+                                                     height)) {
+            metalxr_log("frame export IOSurface copy failed eye=%u", eye);
+            return;
+        }
+
+        swapchain->ioSurfaceSlotGenerations
+            [swapchain->acquiredImageIndex][view->subImage.imageArrayIndex] = frameSlotGeneration;
+        swapchain->ioSurfaceSlotPending
+            [swapchain->acquiredImageIndex][view->subImage.imageArrayIndex] =
+                metalxr_frame_slot_ack_enabled() ? XR_TRUE : XR_FALSE;
+
         const size_t bytesPerRow = swapchain->ioSurfaceBytesPerRow != 0 ?
             swapchain->ioSurfaceBytesPerRow :
             (size_t)swapchain->width * bytesPerPixel;
@@ -4075,6 +4319,8 @@ static void metalxr_export_projection_view(
                  "\"texture\":\"%p\",\"pixelFormat\":%" PRId64 ",\"payloadFormat\":\"%s\","
                  "\"width\":%u,\"height\":%u,\"bytesPerRow\":%zu,\"payloadBytes\":0,"
                  "\"ioSurfaceId\":%u,"
+                 "\"frameSlotId\":%u,\"frameSlotGeneration\":%" PRIu64 ","
+                 "\"frameSlotState\":\"ready\",\"frameSlotFence\":\"metal-command-buffer-completed\","
                  "\"sourceRect\":{\"x\":%u,\"y\":%u,\"width\":%u,\"height\":%u},"
                  "\"imageRectX\":%u,\"imageRectY\":%u,\"imageRectWidth\":%u,\"imageRectHeight\":%u,"
                  "\"imageArrayIndex\":%u,\"projectionFlags\":1,\"referenceSpaceId\":%" PRIu64 ","
@@ -4096,6 +4342,8 @@ static void metalxr_export_projection_view(
                  swapchain->height,
                  bytesPerRow,
                  swapchain->ioSurfaceIds[swapchain->acquiredImageIndex][view->subImage.imageArrayIndex],
+                 swapchain->ioSurfaceIds[swapchain->acquiredImageIndex][view->subImage.imageArrayIndex],
+                 frameSlotGeneration,
                  x,
                  y,
                  width,
