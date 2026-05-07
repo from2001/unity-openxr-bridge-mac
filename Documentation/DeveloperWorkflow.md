@@ -143,11 +143,13 @@ Manual `unity-export` streaming defaults to `METALXR_STREAM_QUALITY=balanced` so
 - `UNITY_APP` - explicit Unity.app path for batch builds.
 - `UNITY_PROJECT_PATH` - Unity project path, defaulting to `TestProjects/UnityOpenXRSmoke`.
 - `METALXR_RUNTIME_JSON` - explicit OpenXR runtime manifest.
-- `METALXR_FRAME_EXPORT_MODE=fixture|readback`; `iosurface` is gated behind `METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1` and should only be used for isolated runtime validation.
+- `METALXR_WORKFLOW_FRAME_TRANSPORT=iosurface` to run the coordinated Play Mode workflow with socket-only IOSurface frame metadata and release acks. The default transport keeps the existing fixture/readback debug modes.
+- `METALXR_FRAME_EXPORT_MODE=fixture|readback`; `iosurface` is still gated for direct/manual use, but the coordinated workflow enables the guard automatically when `METALXR_WORKFLOW_FRAME_TRANSPORT=iosurface` is selected.
 - `METALXR_FRAME_EXPORT_DIR`
 - `METALXR_FRAME_EXPORT_SOCKET` - optional Unix datagram socket path for frame metadata records. `METALXR_FRAME_EXPORT_MODE=iosurface` can use the socket without a frame export directory because the payload is carried by `ioSurfaceId`; `fixture` and `readback` still require the directory because they write payload files.
 - `METALXR_FRAME_EXPORT_ACK_SOCKET` - optional Unix datagram socket path for IOSurface frame slot release acks. `Scripts/run-metalxr-playmode-workflow.sh` defaults this to `METALXR_FRAME_EXPORT_SOCKET.ack` when socket export is enabled.
 - `METALXR_SWAPCHAIN_STORAGE_MODE=shared|managed|private`
+- `METALXR_SWAPCHAIN_RESOURCE_MODE=iosurface` for direct/manual IOSurface runtime validation. The coordinated IOSurface workflow sets this automatically.
 - `METALXR_WORKFLOW_QUALITY=debug|balanced|native`
 - `METALXR_STREAM_QUALITY=debug|balanced|native`
 - `METALXR_STREAM_WIDTH`, `METALXR_STREAM_HEIGHT`, `METALXR_STREAM_FPS`

@@ -110,6 +110,14 @@ METALXR_FRAME_EXPORT_MODE=readback Scripts/run-metalxr-playmode-workflow.sh
 
 `readback` mode defaults to the `debug` quality preset for smoke reliability because the current CPU Image-plane decode path on Quest can fall behind at higher resolutions. Use `METALXR_WORKFLOW_QUALITY=balanced` for `1344x1408` per eye at 40 Mbps, `native` for isolated quality experiments, or override `METALXR_VIEW_WIDTH`, `METALXR_VIEW_HEIGHT`, and `METALXR_STREAM_BITRATE` explicitly.
 
+To validate the guarded IOSurface/socket transport path in the coordinated workflow, run:
+
+```sh
+METALXR_WORKFLOW_FRAME_TRANSPORT=iosurface Scripts/run-metalxr-playmode-workflow.sh
+```
+
+This mode uses socket-only IOSurface frame records with release acks and keeps readback/file export available as the debug fallback.
+
 The Quest client now starts in `projection` presentation mode by default. It uses the per-eye projection metadata carried by each VIDEO_FRAME packet to size the in-headset eye panels and applies a default Quest render scale of 1.2 so the diagnostic Unity presentation does not render below headset resolution. Use `METALXR_QUEST_PRESENTATION_MODE=diagnostic` to force the old fixed debug panel layout, or `METALXR_QUEST_RENDER_SCALE=1.0` to lower the Quest app render scale for stability experiments.
 
 For restart and reconnect smoke testing, run the workflow repeat probe:

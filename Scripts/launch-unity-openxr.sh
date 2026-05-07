@@ -22,6 +22,10 @@ Environment:
                            Frame export mode: readback or fixture. Defaults to readback.
   METALXR_SWAPCHAIN_STORAGE_MODE
                            Metal storage mode: shared, managed, or private. Defaults to runtime policy.
+  METALXR_SWAPCHAIN_RESOURCE_MODE
+                           Metal swapchain resource mode. Set iosurface for guarded IOSurface export.
+  METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT
+                           Required by the runtime when METALXR_SWAPCHAIN_RESOURCE_MODE=iosurface.
   METALXR_VIEW_WIDTH       Runtime eye width. Defaults to runtime fallback.
   METALXR_VIEW_HEIGHT      Runtime eye height. Defaults to runtime fallback.
   METALXR_REFRESH_RATE     Runtime refresh rate in Hz. Defaults to runtime fallback.
@@ -162,6 +166,7 @@ metalxr_frame_export_socket="${METALXR_FRAME_EXPORT_SOCKET:-}"
 metalxr_frame_export_ack_socket="${METALXR_FRAME_EXPORT_ACK_SOCKET:-}"
 metalxr_frame_export_mode="${METALXR_FRAME_EXPORT_MODE:-readback}"
 metalxr_swapchain_storage_mode="${METALXR_SWAPCHAIN_STORAGE_MODE:-}"
+metalxr_swapchain_resource_mode="${METALXR_SWAPCHAIN_RESOURCE_MODE:-}"
 metalxr_view_width="${METALXR_VIEW_WIDTH:-}"
 metalxr_view_height="${METALXR_VIEW_HEIGHT:-}"
 metalxr_tracking_state_path="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}"
@@ -187,6 +192,9 @@ fi
 if [[ -n "$metalxr_swapchain_storage_mode" ]]; then
   echo "MetalXR swapchain storage mode: $metalxr_swapchain_storage_mode"
 fi
+if [[ -n "$metalxr_swapchain_resource_mode" ]]; then
+  echo "MetalXR swapchain resource mode: $metalxr_swapchain_resource_mode"
+fi
 if [[ -n "$metalxr_view_width" || -n "$metalxr_view_height" ]]; then
   echo "MetalXR view size: ${metalxr_view_width:-runtime}x${metalxr_view_height:-runtime}"
 fi
@@ -203,6 +211,8 @@ METALXR_FRAME_EXPORT_SOCKET="$metalxr_frame_export_socket" \
 METALXR_FRAME_EXPORT_ACK_SOCKET="$metalxr_frame_export_ack_socket" \
 METALXR_FRAME_EXPORT_MODE="$metalxr_frame_export_mode" \
 METALXR_SWAPCHAIN_STORAGE_MODE="$metalxr_swapchain_storage_mode" \
+METALXR_SWAPCHAIN_RESOURCE_MODE="$metalxr_swapchain_resource_mode" \
+METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT="${METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT:-0}" \
 METALXR_VIEW_WIDTH="$metalxr_view_width" \
 METALXR_VIEW_HEIGHT="$metalxr_view_height" \
 METALXR_START_ULOOP_SERVER="${METALXR_START_ULOOP_SERVER:-0}" \

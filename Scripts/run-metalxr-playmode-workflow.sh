@@ -38,7 +38,10 @@ Environment:
   METALXR_FRAME_EXPORT_MODE            readback or fixture. Defaults to fixture for smoke reliability.
                                       iosurface is experimental and requires
                                       METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1.
+  METALXR_WORKFLOW_FRAME_TRANSPORT     default or iosurface. Defaults to default.
+                                      iosurface configures socket-only IOSurface export with release acks.
   METALXR_SWAPCHAIN_STORAGE_MODE       shared, managed, or private. Defaults to shared for Unity export.
+  METALXR_SWAPCHAIN_RESOURCE_MODE      default or iosurface. Set automatically by the iosurface workflow transport.
   METALXR_WORKFLOW_QUALITY             debug, balanced, or native. Defaults to debug for smoke reliability.
                                       debug: 640x360 at 8 Mbps. balanced: 1344x1408 at 40 Mbps.
                                       native: 1832x1920 at 80 Mbps.
@@ -82,12 +85,29 @@ export_wait_seconds="${METALXR_WORKFLOW_EXPORT_WAIT_SECONDS:-120}"
 stream_wait_seconds="${METALXR_WORKFLOW_STREAM_WAIT_SECONDS:-60}"
 tmp_root="${TMPDIR:-/tmp}"
 scene_recovery_archive_dir="${METALXR_WORKFLOW_SCENE_RECOVERY_ARCHIVE_DIR:-$tmp_root/metalxr_unity_scene_recovery}"
+workflow_frame_transport="${METALXR_WORKFLOW_FRAME_TRANSPORT:-default}"
+case "$workflow_frame_transport" in
+  default|iosurface)
+    ;;
+  *)
+    echo "METALXR_WORKFLOW_FRAME_TRANSPORT must be default or iosurface, got: $workflow_frame_transport" >&2
+    exit 1
+    ;;
+esac
 if [[ "${METALXR_FRAME_EXPORT_DIR+x}" == "x" ]]; then
   frame_export_dir="$METALXR_FRAME_EXPORT_DIR"
+elif [[ "$workflow_frame_transport" == "iosurface" ]]; then
+  frame_export_dir=""
 else
   frame_export_dir="$tmp_root/metalxr_frame_export"
 fi
-frame_export_socket="${METALXR_FRAME_EXPORT_SOCKET:-}"
+if [[ "${METALXR_FRAME_EXPORT_SOCKET+x}" == "x" ]]; then
+  frame_export_socket="$METALXR_FRAME_EXPORT_SOCKET"
+elif [[ "$workflow_frame_transport" == "iosurface" ]]; then
+  frame_export_socket="/tmp/metalxr-workflow-iosurface-${host_port}-$$.sock"
+else
+  frame_export_socket=""
+fi
 if [[ "${METALXR_FRAME_EXPORT_ACK_SOCKET+x}" == "x" ]]; then
   frame_export_ack_socket="$METALXR_FRAME_EXPORT_ACK_SOCKET"
 elif [[ -n "$frame_export_socket" ]]; then
@@ -95,8 +115,27 @@ elif [[ -n "$frame_export_socket" ]]; then
 else
   frame_export_ack_socket=""
 fi
-frame_export_mode="${METALXR_FRAME_EXPORT_MODE:-fixture}"
+if [[ "$workflow_frame_transport" == "iosurface" ]]; then
+  if [[ "${METALXR_FRAME_EXPORT_MODE+x}" == "x" && "$METALXR_FRAME_EXPORT_MODE" != "iosurface" ]]; then
+    echo "METALXR_WORKFLOW_FRAME_TRANSPORT=iosurface requires METALXR_FRAME_EXPORT_MODE=iosurface or no explicit mode." >&2
+    exit 1
+  fi
+  frame_export_mode="iosurface"
+else
+  frame_export_mode="${METALXR_FRAME_EXPORT_MODE:-fixture}"
+fi
 swapchain_storage_mode="${METALXR_SWAPCHAIN_STORAGE_MODE:-shared}"
+if [[ "${METALXR_SWAPCHAIN_RESOURCE_MODE+x}" == "x" ]]; then
+  swapchain_resource_mode="$METALXR_SWAPCHAIN_RESOURCE_MODE"
+elif [[ "$workflow_frame_transport" == "iosurface" ]]; then
+  swapchain_resource_mode="iosurface"
+else
+  swapchain_resource_mode=""
+fi
+enable_iosurface_export="${METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT:-0}"
+if [[ "$workflow_frame_transport" == "iosurface" ]]; then
+  enable_iosurface_export="1"
+fi
 workflow_quality="${METALXR_WORKFLOW_QUALITY:-}"
 if [[ -z "$workflow_quality" ]]; then
   if [[ "$frame_export_mode" == "readback" &&
@@ -149,9 +188,9 @@ if [[ -z "$frame_export_dir" && -n "$frame_export_socket" ]]; then
 fi
 
 if [[ "$frame_export_mode" == "iosurface" &&
-      "${METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT:-0}" != "1" ]]; then
+      "$enable_iosurface_export" != "1" ]]; then
   echo "METALXR_FRAME_EXPORT_MODE=iosurface is experimental and is disabled by default." >&2
-  echo "Set METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1 only for isolated IOSurface runtime validation." >&2
+  echo "Set METALXR_WORKFLOW_FRAME_TRANSPORT=iosurface for the guarded workflow path." >&2
   exit 1
 fi
 if [[ -z "$frame_export_dir" && -z "$frame_export_socket" ]]; then
@@ -336,6 +375,30 @@ wait_for_file_pattern() {
   done
 }
 
+wait_for_unix_socket() {
+  local description="$1"
+  local timeout_seconds="$2"
+  local socket_path="$3"
+  local start
+  start="$(date +%s)"
+  while true; do
+    if [[ -S "$socket_path" ]]; then
+      return 0
+    fi
+    if [[ -n "$streamer_pid" ]] && ! kill -0 "$streamer_pid" >/dev/null 2>&1; then
+      echo "Streamer exited before $description was ready. Check $streamer_log." >&2
+      return 1
+    fi
+    local now
+    now="$(date +%s)"
+    if (( now - start >= timeout_seconds )); then
+      echo "Timed out waiting for $description: $socket_path" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 wait_for_export_pair() {
   local index="$frame_export_dir/frames.jsonl"
   local start
@@ -433,8 +496,11 @@ MetalXR runtime log: $runtime_log
 MetalXR frame dumps: $frame_dump_dir
 MetalXR frame exports: ${frame_export_dir:-disabled}
 MetalXR frame export socket: ${frame_export_socket:-disabled}
+MetalXR frame export ack socket: ${frame_export_ack_socket:-disabled}
 MetalXR frame export mode: $frame_export_mode
+MetalXR workflow frame transport: $workflow_frame_transport
 MetalXR swapchain storage mode: $swapchain_storage_mode
+MetalXR swapchain resource mode: ${swapchain_resource_mode:-default}
 MetalXR workflow quality: $workflow_quality
 MetalXR view size: ${view_width}x${view_height}
 MetalXR stream bitrate: $stream_bitrate
@@ -470,6 +536,8 @@ EOF
     METALXR_FRAME_EXPORT_ACK_SOCKET="$frame_export_ack_socket" \
     METALXR_FRAME_EXPORT_MODE="$frame_export_mode" \
     METALXR_SWAPCHAIN_STORAGE_MODE="$swapchain_storage_mode" \
+    METALXR_SWAPCHAIN_RESOURCE_MODE="$swapchain_resource_mode" \
+    METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT="$enable_iosurface_export" \
     METALXR_VIEW_WIDTH="$view_width" \
     METALXR_VIEW_HEIGHT="$view_height" \
     METALXR_START_ULOOP_SERVER=1 \
@@ -512,6 +580,7 @@ EOF
     if [[ "$socket_only_export" == "1" && -z "$streamer_pid" ]]; then
       start_unity_export_streamer
       start_quest_client_activity
+      wait_for_unix_socket "IOSurface frame export socket" "$stream_wait_seconds" "$frame_export_socket"
     fi
 
     local play_ready=0
@@ -554,6 +623,8 @@ EOF
   METALXR_FRAME_EXPORT_ACK_SOCKET="$frame_export_ack_socket" \
   METALXR_FRAME_EXPORT_MODE="$frame_export_mode" \
   METALXR_SWAPCHAIN_STORAGE_MODE="$swapchain_storage_mode" \
+  METALXR_SWAPCHAIN_RESOURCE_MODE="$swapchain_resource_mode" \
+  METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT="$enable_iosurface_export" \
   METALXR_VIEW_WIDTH="$view_width" \
   METALXR_VIEW_HEIGHT="$view_height" \
   METALXR_TRACKING_STATE_PATH="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}" \
@@ -564,12 +635,22 @@ EOF
   "$repo_root/Scripts/launch-unity-openxr.sh" "$project_path" >>"$unity_log" 2>&1 &
   unity_pid="$!"
 
-  echo "Unity launched. Enter Play Mode manually, then wait for frame exports in $frame_export_dir."
+  if [[ "$socket_only_export" == "1" ]]; then
+    echo "Unity launched. Enter Play Mode manually; frame records will be streamed over $frame_export_socket."
+  else
+    echo "Unity launched. Enter Play Mode manually, then wait for frame exports in $frame_export_dir."
+  fi
 }
 
 start_unity_export_streamer() {
   mkdir -p "$(dirname "$streamer_log")"
   rm -f "$streamer_log"
+  if [[ -n "$frame_export_socket" ]]; then
+    rm -f "$frame_export_socket"
+  fi
+  if [[ -n "$frame_export_ack_socket" ]]; then
+    rm -f "$frame_export_ack_socket"
+  fi
   METALXR_TRANSPORT=usb \
   METALXR_HOST_PORT="$host_port" \
   METALXR_FRAME_SOURCE=unity-export \
@@ -613,6 +694,7 @@ launch_unity_and_enter_play_mode
 if [[ "$socket_only_export" == "1" && -z "$streamer_pid" ]]; then
   start_unity_export_streamer
   start_quest_client_activity
+  wait_for_unix_socket "IOSurface frame export socket" "$stream_wait_seconds" "$frame_export_socket"
 fi
 if [[ "$socket_only_export" != "1" ]]; then
   wait_for_export_pair

@@ -3320,12 +3320,19 @@ static int stream_client(int clientFd, const StreamerOptions* options, uint64_t 
                 fprintf(stderr,
                         "{\"event\":\"drop\",\"reason\":\"unity_export_dimensions\","
                         "\"frame\":%d,\"source_frame\":%" PRIu64 ","
-                        "\"expected_width\":%d,\"expected_height\":%d}\n",
+                        "\"expected_width\":%d,\"expected_height\":%d,"
+                        "\"left_width\":%d,\"left_height\":%d,"
+                        "\"right_width\":%d,\"right_height\":%d}\n",
                         frame,
                         pair.sourceFrameId,
                         activeOptions.width,
-                        activeOptions.height);
-                ok = 0;
+                        activeOptions.height,
+                        pair.eyes[0].width,
+                        pair.eyes[0].height,
+                        pair.eyes[1].width,
+                        pair.eyes[1].height);
+                send_frame_slot_release_ack_for_record(&left, &pair.eyes[0], "dimension_mismatch");
+                send_frame_slot_release_ack_for_record(&right, &pair.eyes[1], "dimension_mismatch");
             } else {
                 const uint64_t pairAgeMs = unity_export_pair_age_ms(&pair);
                 if (activeOptions.maxFrameAgeMs > 0 &&
@@ -3338,6 +3345,8 @@ static int stream_client(int clientFd, const StreamerOptions* options, uint64_t 
                             pair.sourceFrameId,
                             pairAgeMs,
                             activeOptions.maxFrameAgeMs);
+                    send_frame_slot_release_ack_for_record(&left, &pair.eyes[0], "stale_unity_export");
+                    send_frame_slot_release_ack_for_record(&right, &pair.eyes[1], "stale_unity_export");
                 } else {
                     if (is_plausible_host_display_time(pair.eyes[0].displayTimeNs, captureTimeNs)) {
                         predictedDisplayTimeNs = pair.eyes[0].displayTimeNs;
