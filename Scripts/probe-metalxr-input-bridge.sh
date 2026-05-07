@@ -19,7 +19,7 @@ fi
 
 cat >"$tracking_state" <<'STATE'
 hmd 7 1000 15 1.25 1.5 -0.5 0 0 0 1
-controller 0 8 1100 15 1 0.7 0.4 0.1 -0.2 -0.2 1.2 -0.6 0 0 0 1 -0.25 1.1 -0.55 0 0 0 1
+controller 0 8 1100 15 1 0.7 0.4 0.1 -0.2 -0.2 1.2 -0.6 0.1 0.2 0.3 0.9 -0.25 1.1 -0.55 0.1 0.2 0.3 0.9
 controller 1 9 1200 15 2 0.2 0.9 0.5 0.25 0.2 1.2 -0.6 0 0 0 1 0.25 1.1 -0.55 0 0 0 1
 STATE
 rm -f "$haptic_command"
@@ -258,7 +258,11 @@ int main(int argc, char** argv)
     XrView views[2] = { { XR_TYPE_VIEW, NULL, { {0, 0, 0, 1}, {0, 0, 0} }, {0, 0, 0, 0} }, { XR_TYPE_VIEW, NULL, { {0, 0, 0, 1}, {0, 0, 0} }, {0, 0, 0, 0} } };
     uint32_t viewCount = 0;
     xrLocateViews(session, &locateInfo, &viewState, 2, &viewCount, views);
-    printf("views left=%f right=%f flags=0x%llx\n", views[0].pose.position.x, views[1].pose.position.x, (unsigned long long)viewState.viewStateFlags);
+    printf("views left=%f right=%f z=%f flags=0x%llx\n",
+           views[0].pose.position.x,
+           views[1].pose.position.x,
+           views[0].pose.position.z,
+           (unsigned long long)viewState.viewStateFlags);
     if (expectStale) {
         XrSpaceLocationFlags requiredViewFlags =
             XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
@@ -269,10 +273,13 @@ int main(int argc, char** argv)
         if ((viewState.viewStateFlags & requiredViewFlags) != requiredViewFlags ||
             (viewState.viewStateFlags & trackedViewFlags) != 0 ||
             !near(views[0].pose.position.x, 1.218f) ||
-            !near(views[1].pose.position.x, 1.282f)) {
+            !near(views[1].pose.position.x, 1.282f) ||
+            !near(views[0].pose.position.z, 0.5f)) {
             return 1;
         }
-    } else if (!near(views[0].pose.position.x, 1.218f) || !near(views[1].pose.position.x, 1.282f)) {
+    } else if (!near(views[0].pose.position.x, 1.218f) ||
+               !near(views[1].pose.position.x, 1.282f) ||
+               !near(views[0].pose.position.z, 0.5f)) {
         return 1;
     }
 
@@ -326,12 +333,24 @@ int main(int argc, char** argv)
     xrCreateActionSpace(session, &actionSpaceCreate, &aimSpace);
     XrSpaceLocation location = { XR_TYPE_SPACE_LOCATION, NULL, 0, { {0, 0, 0, 1}, {0, 0, 0} } };
     xrLocateSpace(aimSpace, localSpace, 0, &location);
-    printf("leftAim x=%f y=%f z=%f\n", location.pose.position.x, location.pose.position.y, location.pose.position.z);
+    printf("leftAim x=%f y=%f z=%f q=(%f,%f,%f,%f)\n",
+           location.pose.position.x,
+           location.pose.position.y,
+           location.pose.position.z,
+           location.pose.orientation.x,
+           location.pose.orientation.y,
+           location.pose.orientation.z,
+           location.pose.orientation.w);
     if (expectStale) {
         if (location.locationFlags != 0) {
             return 1;
         }
-    } else if (!near(location.pose.position.x, -0.2f)) {
+    } else if (!near(location.pose.position.x, -0.2f) ||
+               !near(location.pose.position.z, 0.6f) ||
+               !near(location.pose.orientation.x, -0.1f) ||
+               !near(location.pose.orientation.y, -0.2f) ||
+               !near(location.pose.orientation.z, 0.3f) ||
+               !near(location.pose.orientation.w, 0.9f)) {
         return 1;
     }
 
@@ -357,6 +376,7 @@ METALXR_TRACKING_STATE_PATH="$tracking_state" \
 METALXR_HAPTIC_COMMAND_PATH="$haptic_command" \
 METALXR_TIMING_STATE_PATH="$timing_state" \
 METALXR_TRACKING_STALE_TIMEOUT_MS=60000 \
+METALXR_DISABLE_SHARED_STATE=1 \
 METALXR_RUNTIME_LOG="$runtime_log" \
   "$probe_binary" "$runtime_dylib"
 
@@ -368,6 +388,7 @@ METALXR_TRACKING_STATE_PATH="$tracking_state" \
 METALXR_HAPTIC_COMMAND_PATH="$haptic_command" \
 METALXR_TIMING_STATE_PATH="$timing_state" \
 METALXR_TRACKING_STALE_TIMEOUT_MS=1 \
+METALXR_DISABLE_SHARED_STATE=1 \
 METALXR_RUNTIME_LOG="$runtime_log" \
   "$probe_binary" "$runtime_dylib" --expect-stale
 
