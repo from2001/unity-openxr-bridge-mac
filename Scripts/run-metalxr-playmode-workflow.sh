@@ -18,6 +18,10 @@ Environment:
   METALXR_WORKFLOW_RESTART_UNITY       Quit an existing Unity editor before launch. Defaults to 1.
   METALXR_WORKFLOW_KEEP_RUNNING        Keep Unity and streamer running after smoke checks. Defaults to 1.
   METALXR_WORKFLOW_UNITY_READY_SECONDS Seconds to wait for Unity/uloop readiness. Defaults to 600.
+  METALXR_WORKFLOW_ARCHIVE_SCENE_RECOVERY
+                                       Archive Unity scene recovery backups before launch. Defaults to 1.
+  METALXR_WORKFLOW_SCENE_RECOVERY_ARCHIVE_DIR
+                                       Archive destination. Defaults to TMPDIR/metalxr_unity_scene_recovery.
   METALXR_QUEST_ACTIVITY               Android activity class. Defaults to UnityPlayerGameActivity.
   METALXR_QUEST_LAUNCH_CATEGORY        Android launch category. Defaults to Quest VR category.
   METALXR_QUEST_SURFACE_DECODE         Pass the experimental Surface decode opt-in to Quest. Defaults to 0.
@@ -35,12 +39,15 @@ Environment:
                                       iosurface is experimental and requires
                                       METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1.
   METALXR_SWAPCHAIN_STORAGE_MODE       shared, managed, or private. Defaults to shared for Unity export.
-  METALXR_WORKFLOW_QUALITY             debug, balanced, or native. Defaults to debug for fixture and balanced for readback.
+  METALXR_WORKFLOW_QUALITY             debug, balanced, or native. Defaults to debug for smoke reliability.
                                       debug: 640x360 at 8 Mbps. balanced: 1344x1408 at 40 Mbps.
                                       native: 1832x1920 at 80 Mbps.
   METALXR_VIEW_WIDTH                   Runtime eye width. Defaults to the selected quality preset.
   METALXR_VIEW_HEIGHT                  Runtime eye height. Defaults to the selected quality preset.
   METALXR_STREAM_BITRATE               H.264 bitrate. Defaults to the selected quality preset.
+  METALXR_STREAM_MAX_FRAME_AGE_MS      Host-side stale unity-export frame limit. Defaults to 500.
+  METALXR_WORKFLOW_MAX_FRAME_AGE_MS    Post-smoke frame age failure threshold. Defaults to 1000.
+  METALXR_WORKFLOW_MAX_QUEUE_DEPTH     Post-smoke Quest queue depth failure threshold. Defaults to 16.
   METALXR_FRAME_DUMP_DIR               Runtime frame dump directory. Defaults to TMPDIR/metalxr_unity_frames.
   METALXR_RUNTIME_LOG                  Runtime log path. Defaults to TMPDIR/metalxr_unity_runtime.log.
   METALXR_UNITY_LAUNCH_LOG             Unity launch log path. Defaults to TMPDIR/metalxr_unity_launch.log.
@@ -70,9 +77,11 @@ auto_play="${METALXR_WORKFLOW_AUTO_PLAY:-1}"
 restart_unity="${METALXR_WORKFLOW_RESTART_UNITY:-1}"
 keep_running="${METALXR_WORKFLOW_KEEP_RUNNING:-1}"
 unity_ready_seconds="${METALXR_WORKFLOW_UNITY_READY_SECONDS:-600}"
+archive_scene_recovery="${METALXR_WORKFLOW_ARCHIVE_SCENE_RECOVERY:-1}"
 export_wait_seconds="${METALXR_WORKFLOW_EXPORT_WAIT_SECONDS:-120}"
 stream_wait_seconds="${METALXR_WORKFLOW_STREAM_WAIT_SECONDS:-60}"
 tmp_root="${TMPDIR:-/tmp}"
+scene_recovery_archive_dir="${METALXR_WORKFLOW_SCENE_RECOVERY_ARCHIVE_DIR:-$tmp_root/metalxr_unity_scene_recovery}"
 if [[ "${METALXR_FRAME_EXPORT_DIR+x}" == "x" ]]; then
   frame_export_dir="$METALXR_FRAME_EXPORT_DIR"
 else
@@ -90,7 +99,9 @@ frame_export_mode="${METALXR_FRAME_EXPORT_MODE:-fixture}"
 swapchain_storage_mode="${METALXR_SWAPCHAIN_STORAGE_MODE:-shared}"
 workflow_quality="${METALXR_WORKFLOW_QUALITY:-}"
 if [[ -z "$workflow_quality" ]]; then
-  if [[ "$frame_export_mode" == "readback" ]]; then
+  if [[ "$frame_export_mode" == "readback" &&
+        "$quest_surface_decode" == "1" &&
+        "$quest_surface_present" == "1" ]]; then
     workflow_quality="balanced"
   else
     workflow_quality="debug"
@@ -120,6 +131,9 @@ esac
 view_width="${METALXR_VIEW_WIDTH:-$preset_view_width}"
 view_height="${METALXR_VIEW_HEIGHT:-$preset_view_height}"
 stream_bitrate="${METALXR_STREAM_BITRATE:-$preset_stream_bitrate}"
+stream_max_frame_age_ms="${METALXR_STREAM_MAX_FRAME_AGE_MS:-500}"
+workflow_max_frame_age_ms="${METALXR_WORKFLOW_MAX_FRAME_AGE_MS:-1000}"
+workflow_max_queue_depth="${METALXR_WORKFLOW_MAX_QUEUE_DEPTH:-16}"
 frame_dump_dir="${METALXR_FRAME_DUMP_DIR:-$tmp_root/metalxr_unity_frames}"
 runtime_log="${METALXR_RUNTIME_LOG:-$tmp_root/metalxr_unity_runtime.log}"
 unity_log="${METALXR_UNITY_LAUNCH_LOG:-$tmp_root/metalxr_unity_launch.log}"
@@ -238,6 +252,38 @@ cleanup() {
   terminate_pid_with_timeout "$unity_pid" 5
 }
 trap cleanup EXIT
+
+archive_path_if_exists() {
+  local source_path="$1"
+  local archive_label="$2"
+
+  if [[ ! -e "$source_path" ]]; then
+    return
+  fi
+
+  if [[ "$archive_scene_recovery" != "1" ]]; then
+    echo "Unity scene recovery preflight left existing path in place: $source_path" >>"$unity_log"
+    return
+  fi
+
+  mkdir -p "$scene_recovery_archive_dir"
+  local timestamp
+  timestamp="$(date +%Y%m%d_%H%M%S)"
+  local destination="$scene_recovery_archive_dir/${archive_label}_${timestamp}"
+  local suffix=1
+  while [[ -e "$destination" ]]; do
+    destination="$scene_recovery_archive_dir/${archive_label}_${timestamp}_$suffix"
+    suffix=$((suffix + 1))
+  done
+
+  mv "$source_path" "$destination"
+  echo "Archived Unity scene recovery path: $source_path -> $destination" >>"$unity_log"
+}
+
+prepare_unity_scene_recovery_state() {
+  archive_path_if_exists "$project_path/Temp/__Backupscenes" "backupscenes"
+  archive_path_if_exists "$project_path/Assets/_Recovery" "assets_recovery"
+}
 
 require_ready_device() {
   "$adb_path" start-server >/dev/null
@@ -392,12 +438,18 @@ MetalXR swapchain storage mode: $swapchain_storage_mode
 MetalXR workflow quality: $workflow_quality
 MetalXR view size: ${view_width}x${view_height}
 MetalXR stream bitrate: $stream_bitrate
+MetalXR stream max frame age ms: $stream_max_frame_age_ms
+MetalXR workflow max frame age ms: $workflow_max_frame_age_ms
+MetalXR workflow max queue depth: $workflow_max_queue_depth
 MetalXR Unity ready timeout: ${unity_ready_seconds}s
+MetalXR archive scene recovery: $archive_scene_recovery
+MetalXR scene recovery archive dir: $scene_recovery_archive_dir
 MetalXR tracking state: ${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}
 MetalXR haptic commands: ${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}
 MetalXR timing state: ${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}
 MetalXR shared state: ${METALXR_SHARED_STATE_NAME:-/metalxr_runtime_state}
 EOF
+  prepare_unity_scene_recovery_state
 
   if [[ "$auto_play" == "1" ]]; then
     if ! command -v uloop >/dev/null 2>&1; then
@@ -509,7 +561,7 @@ EOF
   METALXR_TIMING_STATE_PATH="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}" \
   METALXR_SHARED_STATE_NAME="${METALXR_SHARED_STATE_NAME:-/metalxr_runtime_state}" \
   METALXR_DISABLE_SHARED_STATE="${METALXR_DISABLE_SHARED_STATE:-0}" \
-  "$repo_root/Scripts/launch-unity-openxr.sh" "$project_path" >"$unity_log" 2>&1 &
+  "$repo_root/Scripts/launch-unity-openxr.sh" "$project_path" >>"$unity_log" 2>&1 &
   unity_pid="$!"
 
   echo "Unity launched. Enter Play Mode manually, then wait for frame exports in $frame_export_dir."
@@ -526,6 +578,7 @@ start_unity_export_streamer() {
   METALXR_FRAME_EXPORT_ACK_SOCKET="$frame_export_ack_socket" \
   METALXR_FRAME_EXPORT_WAIT_MS="$((export_wait_seconds * 1000))" \
   METALXR_STREAM_BITRATE="$stream_bitrate" \
+  METALXR_STREAM_MAX_FRAME_AGE_MS="$stream_max_frame_age_ms" \
   METALXR_TRACKING_STATE_PATH="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}" \
   METALXR_HAPTIC_COMMAND_PATH="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}" \
   METALXR_TIMING_STATE_PATH="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}" \
@@ -539,7 +592,8 @@ wait_for_quest_display_logs() {
   local start
   start="$(date +%s)"
   while true; do
-    if adb_cmd logcat -d Unity:D '*:S' | grep -q 'MetalXRQuestClient displayed VIDEO_FRAME'; then
+    if adb_cmd logcat -d Unity:D '*:S' |
+        grep -Eq 'MetalXRQuestClient (displayed VIDEO_FRAME|displayed stereo FrameSet)'; then
       return 0
     fi
     local now
@@ -569,6 +623,44 @@ wait_for_file_pattern "Quest streamer connection" "$stream_wait_seconds" "$strea
 wait_for_file_pattern "streamed VIDEO_FRAME packets" "$stream_wait_seconds" "$streamer_log" '"event":"streamed"'
 wait_for_quest_display_logs
 
+json_number_from_line() {
+  local line="$1"
+  local key="$2"
+  local value
+  value="$(printf '%s\n' "$line" | sed -nE "s/.*\"$key\":([0-9]+).*/\\1/p" | tail -1)"
+  printf '%s' "${value:-0}"
+}
+
+check_latency_metrics() {
+  local latest_frame_source
+  latest_frame_source="$(grep '"event":"frame_source"' "$streamer_log" | grep '"source":"unity-export"' | grep '"frame":' | tail -1 || true)"
+  local latest_latency
+  latest_latency="$(grep '"event":"latency"' "$streamer_log" | tail -1 || true)"
+
+  local frame_age_ms=0
+  if [[ -n "$latest_frame_source" ]]; then
+    frame_age_ms="$(json_number_from_line "$latest_frame_source" "age_ms")"
+  fi
+
+  local queue_depth=0
+  local total_latency_us=0
+  if [[ -n "$latest_latency" ]]; then
+    queue_depth="$(json_number_from_line "$latest_latency" "queue_depth")"
+    total_latency_us="$(json_number_from_line "$latest_latency" "total_us")"
+  fi
+
+  echo "MetalXR latency metrics: frame_age_ms=$frame_age_ms queue_depth=$queue_depth total_latency_us=$total_latency_us"
+  if (( frame_age_ms > workflow_max_frame_age_ms )); then
+    echo "Frame age exceeded METALXR_WORKFLOW_MAX_FRAME_AGE_MS: $frame_age_ms > $workflow_max_frame_age_ms" >&2
+    return 1
+  fi
+  if (( queue_depth > workflow_max_queue_depth )); then
+    echo "Quest queue depth exceeded METALXR_WORKFLOW_MAX_QUEUE_DEPTH: $queue_depth > $workflow_max_queue_depth" >&2
+    return 1
+  fi
+}
+
+check_latency_metrics
 METALXR_SCREENSHOT_PATH="$screenshot_path" "$repo_root/Scripts/probe-quest-client-screenshot.sh"
 
 echo "MetalXR Play Mode workflow smoke passed."

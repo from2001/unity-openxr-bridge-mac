@@ -27,6 +27,8 @@ Environment:
   METALXR_STREAM_QUEUE_DEPTH  Max pending encoder frames per eye. Defaults to 3.
   METALXR_STREAM_RECONNECT_ATTEMPTS
                               Reconnect attempts after early finite-stream disconnects. Defaults to 0.
+  METALXR_STREAM_MAX_FRAME_AGE_MS
+                              Drop unity-export source frames older than this. Defaults to 500, set 0 to disable.
   METALXR_FRAME_SOURCE        synthetic or unity-export. Defaults to synthetic.
   METALXR_FRAME_EXPORT_DIR    Runtime frame export directory for unity-export source.
   METALXR_FRAME_EXPORT_SOCKET Runtime frame export datagram socket for unity-export source.
@@ -94,6 +96,7 @@ bitrate="${METALXR_STREAM_BITRATE:-$preset_bitrate}"
 frames="${METALXR_STREAM_FRAMES:-0}"
 queue_depth="${METALXR_STREAM_QUEUE_DEPTH:-3}"
 reconnect_attempts="${METALXR_STREAM_RECONNECT_ATTEMPTS:-0}"
+max_frame_age_ms="${METALXR_STREAM_MAX_FRAME_AGE_MS:-500}"
 frame_export_dir="${METALXR_FRAME_EXPORT_DIR:-}"
 frame_export_socket="${METALXR_FRAME_EXPORT_SOCKET:-}"
 frame_export_ack_socket="${METALXR_FRAME_EXPORT_ACK_SOCKET:-}"
@@ -180,6 +183,7 @@ streamer_args=(
   --bitrate "$bitrate"
   --queue-depth "$queue_depth"
   --reconnect-attempts "$reconnect_attempts"
+  --max-frame-age-ms "$max_frame_age_ms"
   --frame-source "$frame_source"
   --frame-export-wait-ms "$frame_export_wait_ms"
   --prediction-offset-ms "$prediction_offset_ms"

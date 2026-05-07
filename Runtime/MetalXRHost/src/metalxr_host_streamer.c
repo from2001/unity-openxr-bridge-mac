@@ -52,6 +52,7 @@ typedef struct StreamerOptions {
     int realtime;
     int queueDepth;
     int reconnectAttempts;
+    int maxFrameAgeMs;
     FrameSourceMode frameSource;
     char frameExportDir[1024];
     char frameExportSocketPath[1024];
@@ -295,7 +296,7 @@ static void print_usage(const char* argv0)
             "[--frame-export-wait-ms N] "
             "[--shared-state-name NAME] [--no-shared-state] "
             "[--prediction-offset-ms N] [--clock-sync-interval-ms N] "
-            "[--reconnect-attempts N] [--no-realtime]\n\n"
+            "[--reconnect-attempts N] [--max-frame-age-ms N] [--no-realtime]\n\n"
             "frames=0 streams until the client disconnects. The default bind host is 127.0.0.1,\n"
             "which is suitable for adb reverse. Use --bind-host 0.0.0.0 for Wi-Fi tests.\n",
             argv0);
@@ -327,6 +328,7 @@ static StreamerOptions parse_options(int argc, char** argv)
     options.realtime = 1;
     options.queueDepth = 3;
     options.reconnectAttempts = 0;
+    options.maxFrameAgeMs = 500;
     options.frameSource = FRAME_SOURCE_SYNTHETIC;
     options.frameExportDir[0] = '\0';
     options.frameExportSocketPath[0] = '\0';
@@ -372,6 +374,8 @@ static StreamerOptions parse_options(int argc, char** argv)
             options.queueDepth = parse_int_arg(argv[++i], "queue depth", 1, 64);
         } else if (strcmp(arg, "--reconnect-attempts") == 0 && i + 1 < argc) {
             options.reconnectAttempts = parse_int_arg(argv[++i], "reconnect attempts", 0, 1000);
+        } else if (strcmp(arg, "--max-frame-age-ms") == 0 && i + 1 < argc) {
+            options.maxFrameAgeMs = parse_int_arg(argv[++i], "max frame age ms", 0, 60000);
         } else if (strcmp(arg, "--frame-source") == 0 && i + 1 < argc) {
             const char* source = argv[++i];
             if (strcmp(source, "synthetic") == 0) {
@@ -3323,31 +3327,44 @@ static int stream_client(int clientFd, const StreamerOptions* options, uint64_t 
                         activeOptions.height);
                 ok = 0;
             } else {
-                if (is_plausible_host_display_time(pair.eyes[0].displayTimeNs, captureTimeNs)) {
-                    predictedDisplayTimeNs = pair.eyes[0].displayTimeNs;
-                }
-                if (frame < 4 || (frame % (activeOptions.fps * 2)) == 0) {
-                    printf("{\"event\":\"frame_source\",\"source\":\"unity-export\","
-                           "\"frame\":%d,\"source_frame\":%" PRIu64 ","
-                           "\"age_ms\":%" PRIu64 ",\"repeated\":%" PRIu64 "}\n",
-                           frame,
-                           pair.sourceFrameId,
-                           unity_export_pair_age_ms(&pair),
-                           unityExportSource.repeatedFrames);
-                    fflush(stdout);
-                }
+                const uint64_t pairAgeMs = unity_export_pair_age_ms(&pair);
+                if (activeOptions.maxFrameAgeMs > 0 &&
+                    pairAgeMs > (uint64_t)activeOptions.maxFrameAgeMs) {
+                    fprintf(stderr,
+                            "{\"event\":\"drop\",\"reason\":\"stale_unity_export\","
+                            "\"frame\":%d,\"source_frame\":%" PRIu64
+                            ",\"age_ms\":%" PRIu64 ",\"limit_ms\":%d}\n",
+                            frame,
+                            pair.sourceFrameId,
+                            pairAgeMs,
+                            activeOptions.maxFrameAgeMs);
+                } else {
+                    if (is_plausible_host_display_time(pair.eyes[0].displayTimeNs, captureTimeNs)) {
+                        predictedDisplayTimeNs = pair.eyes[0].displayTimeNs;
+                    }
+                    if (frame < 4 || (frame % (activeOptions.fps * 2)) == 0) {
+                        printf("{\"event\":\"frame_source\",\"source\":\"unity-export\","
+                               "\"frame\":%d,\"source_frame\":%" PRIu64 ","
+                               "\"age_ms\":%" PRIu64 ",\"repeated\":%" PRIu64 "}\n",
+                               frame,
+                               pair.sourceFrameId,
+                               pairAgeMs,
+                               unityExportSource.repeatedFrames);
+                        fflush(stdout);
+                    }
 
-                if (!encode_unity_export_eye_frame(&left,
-                                                   (uint64_t)frame,
-                                                   captureTimeNs,
-                                                   predictedDisplayTimeNs,
-                                                   &pair.eyes[0]) ||
-                    !encode_unity_export_eye_frame(&right,
-                                                   (uint64_t)frame,
-                                                   captureTimeNs,
-                                                   predictedDisplayTimeNs,
-                                                   &pair.eyes[1])) {
-                    ok = 0;
+                    if (!encode_unity_export_eye_frame(&left,
+                                                       (uint64_t)frame,
+                                                       captureTimeNs,
+                                                       predictedDisplayTimeNs,
+                                                       &pair.eyes[0]) ||
+                        !encode_unity_export_eye_frame(&right,
+                                                       (uint64_t)frame,
+                                                       captureTimeNs,
+                                                       predictedDisplayTimeNs,
+                                                       &pair.eyes[1])) {
+                        ok = 0;
+                    }
                 }
             }
         } else if (!encode_synthetic_eye_frame(&left, (uint64_t)frame, captureTimeNs, predictedDisplayTimeNs) ||
@@ -3412,7 +3429,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d reconnect_attempts=%d source=%s export_dir=%s export_socket=%s export_ack_socket=%s export_wait_ms=%d prediction_offset_ns=%" PRId64 " shared_state=%s tracking=%s haptics=%s timing=%s\n",
+    printf("MetalXR host streamer listening on %s:%d width=%d height=%d fps=%d bitrate=%d frames=%d queue_depth=%d reconnect_attempts=%d max_frame_age_ms=%d source=%s export_dir=%s export_socket=%s export_ack_socket=%s export_wait_ms=%d prediction_offset_ns=%" PRId64 " shared_state=%s tracking=%s haptics=%s timing=%s\n",
            options.bindHost,
            options.port,
            options.width,
@@ -3422,6 +3439,7 @@ int main(int argc, char** argv)
            options.frames,
            options.queueDepth,
            options.reconnectAttempts,
+           options.maxFrameAgeMs,
            frame_source_name(options.frameSource),
            options.frameExportDir[0] != '\0' ? options.frameExportDir : "-",
            options.frameExportSocketPath[0] != '\0' ? options.frameExportSocketPath : "-",
