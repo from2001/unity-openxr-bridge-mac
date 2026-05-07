@@ -103,6 +103,14 @@ METALXR_FRAME_EXPORT_MODE=readback Scripts/run-metalxr-playmode-workflow.sh
 
 Readback defaults to `METALXR_SWAPCHAIN_STORAGE_MODE=shared`. `managed` is retained only as a debugging override because it can stop Unity's OpenXR session on Apple Silicon.
 
+To exercise restart cleanup and Quest reconnect behavior, run the repeat probe:
+
+```sh
+METALXR_WORKFLOW_REPEAT_COUNT=2 Scripts/probe-metalxr-playmode-workflow-repeat.sh
+```
+
+The repeat probe forces `METALXR_WORKFLOW_KEEP_RUNNING=0` and writes each run's Unity log, runtime log, streamer log, frame export directory, frame dump directory, and Quest screenshot into a separate output folder under `${TMPDIR:-/tmp}`.
+
 ## 5. Manual Play Mode Loop
 
 Launch Unity with the runtime:

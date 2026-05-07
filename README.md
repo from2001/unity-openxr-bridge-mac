@@ -112,6 +112,12 @@ METALXR_FRAME_EXPORT_MODE=readback Scripts/run-metalxr-playmode-workflow.sh
 
 The Quest client now starts in `projection` presentation mode by default. It uses the per-eye projection metadata carried by each VIDEO_FRAME packet to size the in-headset eye panels and applies a default Quest render scale of 1.2 so the diagnostic Unity presentation does not render below headset resolution. Use `METALXR_QUEST_PRESENTATION_MODE=diagnostic` to force the old fixed debug panel layout, or `METALXR_QUEST_RENDER_SCALE=1.0` to lower the Quest app render scale for stability experiments.
 
+For restart and reconnect smoke testing, run the workflow repeat probe:
+
+```sh
+METALXR_WORKFLOW_REPEAT_COUNT=2 Scripts/probe-metalxr-playmode-workflow-repeat.sh
+```
+
 For a manual stream after Unity is already exporting frames:
 
 ```sh

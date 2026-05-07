@@ -222,6 +222,7 @@ cleanup() {
   fi
   terminate_pid_with_timeout "$streamer_pid" 5
   run_cleanup_command_with_timeout 10 adb_cmd shell am force-stop "$package_name"
+  run_cleanup_command_with_timeout 10 adb_cmd reverse --remove "tcp:$host_port"
   if command -v uloop >/dev/null 2>&1; then
     run_cleanup_command_with_timeout 10 uloop control-play-mode --project-path "$project_path" --action Stop
     run_cleanup_command_with_timeout 10 uloop launch --quit "$project_path"
