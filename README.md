@@ -110,6 +110,8 @@ METALXR_FRAME_EXPORT_MODE=readback Scripts/run-metalxr-playmode-workflow.sh
 
 `readback` mode defaults to the `balanced` quality preset, which raises the runtime eye texture to `1344x1408` per eye and the H.264 target bitrate to 40 Mbps. Use `METALXR_WORKFLOW_QUALITY=debug` for the old `640x360` smoke-test path, or override `METALXR_VIEW_WIDTH`, `METALXR_VIEW_HEIGHT`, and `METALXR_STREAM_BITRATE` explicitly.
 
+The Quest client now starts in `projection` presentation mode by default. It uses the per-eye projection metadata carried by each VIDEO_FRAME packet to size the in-headset eye panels and applies a default Quest render scale of 1.2 so the diagnostic Unity presentation does not render below headset resolution. Use `METALXR_QUEST_PRESENTATION_MODE=diagnostic` to force the old fixed debug panel layout, or `METALXR_QUEST_RENDER_SCALE=1.0` to lower the Quest app render scale for stability experiments.
+
 For a manual stream after Unity is already exporting frames:
 
 ```sh
