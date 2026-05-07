@@ -22,6 +22,8 @@ Environment:
   METALXR_QUEST_LAUNCH_CATEGORY        Android launch category. Defaults to Quest VR category.
   METALXR_QUEST_SURFACE_DECODE         Pass the experimental Surface decode opt-in to Quest. Defaults to 0.
   METALXR_QUEST_SURFACE_PRESENT        Pass the experimental Surface external-texture presentation opt-in to Quest. Defaults to 0.
+  METALXR_QUEST_PRESENTATION_MODE      Quest presentation mode: projection or diagnostic. Defaults to projection.
+  METALXR_QUEST_RENDER_SCALE           Quest XR render scale for the presentation client. Defaults to app-side 1.2.
   METALXR_WORKFLOW_EXPORT_WAIT_SECONDS Seconds to wait for Unity frame exports. Defaults to 120.
   METALXR_WORKFLOW_STREAM_WAIT_SECONDS Seconds to wait for streamer/client logs. Defaults to 60.
   METALXR_FRAME_EXPORT_DIR             Shared frame export directory. Defaults to TMPDIR/metalxr_frame_export.
@@ -59,6 +61,8 @@ quest_activity="${METALXR_QUEST_ACTIVITY:-com.unity3d.player.UnityPlayerGameActi
 quest_launch_category="${METALXR_QUEST_LAUNCH_CATEGORY:-com.oculus.intent.category.VR}"
 quest_surface_decode="${METALXR_QUEST_SURFACE_DECODE:-0}"
 quest_surface_present="${METALXR_QUEST_SURFACE_PRESENT:-0}"
+quest_presentation_mode="${METALXR_QUEST_PRESENTATION_MODE:-}"
+quest_render_scale="${METALXR_QUEST_RENDER_SCALE:-}"
 host_port="${METALXR_HOST_PORT:-47000}"
 build_missing="${METALXR_WORKFLOW_BUILD_MISSING:-1}"
 install_apk="${METALXR_WORKFLOW_INSTALL_APK:-1}"
@@ -331,38 +335,29 @@ start_quest_client_activity() {
   adb_cmd shell am force-stop "$package_name" >/dev/null 2>&1 || true
   adb_cmd logcat -c >/dev/null 2>&1 || true
 
+  local start_args=(
+    shell am start -W
+    -a android.intent.action.MAIN
+    -c "$quest_launch_category"
+    -n "$package_name/$quest_activity"
+  )
   if [[ "$quest_surface_decode" == "1" && "$quest_surface_present" == "1" ]]; then
-    adb_cmd shell am start -W \
-      -a android.intent.action.MAIN \
-      -c "$quest_launch_category" \
-      -n "$package_name/$quest_activity" \
-      --ez metalxr_surface_decode true \
-      --ez metalxr_surface_present true >/dev/null
-    return
+    start_args+=(--ez metalxr_surface_decode true)
+    start_args+=(--ez metalxr_surface_present true)
+  elif [[ "$quest_surface_decode" == "1" ]]; then
+    start_args+=(--ez metalxr_surface_decode true)
+  elif [[ "$quest_surface_present" == "1" ]]; then
+    start_args+=(--ez metalxr_surface_present true)
   fi
 
-  if [[ "$quest_surface_decode" == "1" ]]; then
-    adb_cmd shell am start -W \
-      -a android.intent.action.MAIN \
-      -c "$quest_launch_category" \
-      -n "$package_name/$quest_activity" \
-      --ez metalxr_surface_decode true >/dev/null
-    return
+  if [[ -n "$quest_presentation_mode" ]]; then
+    start_args+=(--es metalxr_presentation_mode "$quest_presentation_mode")
+  fi
+  if [[ -n "$quest_render_scale" ]]; then
+    start_args+=(--ef metalxr_render_scale "$quest_render_scale")
   fi
 
-  if [[ "$quest_surface_present" == "1" ]]; then
-    adb_cmd shell am start -W \
-      -a android.intent.action.MAIN \
-      -c "$quest_launch_category" \
-      -n "$package_name/$quest_activity" \
-      --ez metalxr_surface_present true >/dev/null
-    return
-  fi
-
-  adb_cmd shell am start -W \
-    -a android.intent.action.MAIN \
-    -c "$quest_launch_category" \
-    -n "$package_name/$quest_activity" >/dev/null
+  adb_cmd "${start_args[@]}" >/dev/null
 }
 
 launch_quest_client() {

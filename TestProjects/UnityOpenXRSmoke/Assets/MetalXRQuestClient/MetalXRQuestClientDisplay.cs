@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -20,10 +21,19 @@ namespace MetalXR.QuestClient
         private const float DefaultVerticalFovDegrees = 62.0f;
         private const float MinVerticalFovDegrees = 20.0f;
         private const float MaxVerticalFovDegrees = 140.0f;
+        private const float DefaultQuestRenderScale = 1.2f;
+        private const float MinQuestRenderScale = 0.5f;
+        private const float MaxQuestRenderScale = 1.5f;
         private const int MaxStreamFrameSetsPerUpdate = 4;
         private const int MaxDecodedFrameSets = 8;
         private const int MaxHapticCommandsPerUpdate = 4;
         private static readonly Vector3 DefaultPresentationPanelScale = new Vector3(2.2f, 1.2375f, 1.0f);
+
+        private enum PresentationMode
+        {
+            ProjectionPanel,
+            DiagnosticPanel
+        }
 
         private Texture2D _leftTexture;
         private Texture2D _rightTexture;
@@ -55,12 +65,22 @@ namespace MetalXR.QuestClient
         private readonly Dictionary<ulong, DecodedStereoFrameSet> _decodedFrameSets = new Dictionary<ulong, DecodedStereoFrameSet>();
         private ulong _displayedFrameSetId;
         private ulong _displayedStereoFrameSets;
+        private PresentationMode _presentationMode = PresentationMode.ProjectionPanel;
+        private float _questRenderScale = DefaultQuestRenderScale;
 
         private void Start()
         {
             Application.targetFrameRate = 72;
             Screen.sleepTimeout = SleepTimeout.NeverSleep;
 
+            _presentationMode = ReadPresentationMode();
+            _questRenderScale = ReadFloatFlag(
+                "--metalxr-render-scale",
+                "metalxr_render_scale",
+                DefaultQuestRenderScale,
+                MinQuestRenderScale,
+                MaxQuestRenderScale);
+            ApplyQuestRenderingQuality(_questRenderScale);
             CreatePresentationRig();
             UpdateDiagnosticTexture(true, 0);
             UpdateDiagnosticTexture(false, 0);
@@ -95,6 +115,9 @@ namespace MetalXR.QuestClient
                 " graphics=" + SystemInfo.graphicsDeviceType +
                 " experimental_surface_decode=" + experimentalSurfaceDecode +
                 " experimental_surface_present=" + experimentalSurfacePresent +
+                " presentation_mode=" + PresentationModeName(_presentationMode) +
+                " render_scale=" + _questRenderScale.ToString("0.00") +
+                " xr_eye_texture=" + XRSettings.eyeTextureWidth + "x" + XRSettings.eyeTextureHeight +
                 " capabilities=0x" + clientCapabilities.ToString("x8"));
         }
 
@@ -175,9 +198,11 @@ namespace MetalXR.QuestClient
                 string.IsNullOrEmpty(SystemInfo.deviceModel) ?
                     MetalXRQuestDeviceProfile.Default.DeviceName :
                     SystemInfo.deviceModel;
+            int maxVideoWidth = Mathf.Max(eyeTextureWidth, (int)MetalXRQuestDeviceProfile.Default.MaxVideoWidth);
+            int maxVideoHeight = Mathf.Max(eyeTextureHeight, (int)MetalXRQuestDeviceProfile.Default.MaxVideoHeight);
             return new MetalXRQuestDeviceProfile(
-                (uint)Mathf.Max(1, eyeTextureWidth),
-                (uint)Mathf.Max(1, eyeTextureHeight),
+                (uint)Mathf.Max(1, maxVideoWidth),
+                (uint)Mathf.Max(1, maxVideoHeight),
                 (uint)Mathf.Max(1, preferredFps),
                 deviceName);
         }
@@ -198,10 +223,43 @@ namespace MetalXR.QuestClient
                 false);
         }
 
+        private static PresentationMode ReadPresentationMode()
+        {
+            string value = ReadStringFlag(
+                "--metalxr-presentation-mode",
+                "metalxr_presentation_mode",
+                "projection");
+            if (string.Equals(value, "diagnostic", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "diagnostic-panel", StringComparison.OrdinalIgnoreCase))
+            {
+                return PresentationMode.DiagnosticPanel;
+            }
+
+            return PresentationMode.ProjectionPanel;
+        }
+
+        private static string PresentationModeName(PresentationMode mode)
+        {
+            return mode == PresentationMode.DiagnosticPanel ? "diagnostic-panel" : "projection-panel";
+        }
+
         private static bool SurfaceDecodeGraphicsSupported()
         {
-            return SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3 ||
-                   SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES2;
+            return SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3;
+        }
+
+        private static void ApplyQuestRenderingQuality(float renderScale)
+        {
+            QualitySettings.globalTextureMipmapLimit = 0;
+            try
+            {
+                XRSettings.eyeTextureResolutionScale = renderScale;
+                XRSettings.renderViewportScale = 1.0f;
+            }
+            catch (Exception exception)
+            {
+                Debug.Log(LogPrefix + " could not apply XR render scale: " + exception.Message);
+            }
         }
 
         private static uint CreateClientCapabilities(bool experimentalSurfaceDecode, bool experimentalSurfacePresent)
@@ -269,6 +327,117 @@ namespace MetalXR.QuestClient
 #endif
 
             return enabled;
+        }
+
+        private static string ReadStringFlag(string commandLineFlag, string intentExtraName, string defaultValue)
+        {
+            string value = defaultValue;
+            string[] args = Environment.GetCommandLineArgs();
+            for (int i = 0; i < args.Length; i++)
+            {
+                string arg = args[i];
+                string prefix = commandLineFlag + "=";
+                if (arg.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    value = arg.Substring(prefix.Length);
+                }
+            }
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using (AndroidJavaClass unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
+                {
+                    using (AndroidJavaObject activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity"))
+                    {
+                        if (activity == null)
+                        {
+                            return value;
+                        }
+
+                        using (AndroidJavaObject intent = activity.Call<AndroidJavaObject>("getIntent"))
+                        {
+                            if (intent == null)
+                            {
+                                return value;
+                            }
+
+                            string intentValue = intent.Call<string>("getStringExtra", intentExtraName);
+                            if (!string.IsNullOrEmpty(intentValue))
+                            {
+                                value = intentValue;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.Log(LogPrefix + " could not read Android intent extra " + intentExtraName + ": " + exception.Message);
+            }
+#endif
+
+            return value;
+        }
+
+        private static float ReadFloatFlag(
+            string commandLineFlag,
+            string intentExtraName,
+            float defaultValue,
+            float minimumValue,
+            float maximumValue)
+        {
+            float value = defaultValue;
+            string[] args = Environment.GetCommandLineArgs();
+            for (int i = 0; i < args.Length; i++)
+            {
+                string arg = args[i];
+                string prefix = commandLineFlag + "=";
+                if (arg.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    float parsed;
+                    if (float.TryParse(
+                        arg.Substring(prefix.Length),
+                        NumberStyles.Float,
+                        CultureInfo.InvariantCulture,
+                        out parsed))
+                    {
+                        value = parsed;
+                    }
+                }
+            }
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using (AndroidJavaClass unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
+                {
+                    using (AndroidJavaObject activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity"))
+                    {
+                        if (activity == null)
+                        {
+                            return Mathf.Clamp(value, minimumValue, maximumValue);
+                        }
+
+                        using (AndroidJavaObject intent = activity.Call<AndroidJavaObject>("getIntent"))
+                        {
+                            if (intent == null)
+                            {
+                                return Mathf.Clamp(value, minimumValue, maximumValue);
+                            }
+
+                            value = intent.Call<float>("getFloatExtra", intentExtraName, value);
+                        }
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.Log(LogPrefix + " could not read Android intent extra " + intentExtraName + ": " + exception.Message);
+            }
+#endif
+
+            return Mathf.Clamp(value, minimumValue, maximumValue);
         }
 
         private static void LogClientMessage(string message)
@@ -847,6 +1016,13 @@ namespace MetalXR.QuestClient
 
         private void ApplyPresentationMetadata(MetalXRQuestDecodedVideoFrame leftFrame, MetalXRQuestDecodedVideoFrame rightFrame)
         {
+            if (_presentationMode == PresentationMode.DiagnosticPanel)
+            {
+                ApplyDefaultEyePresentation(_leftPresentationCamera, _leftPresentationPanel);
+                ApplyDefaultEyePresentation(_rightPresentationCamera, _rightPresentationPanel);
+                return;
+            }
+
             ApplyEyePresentationMetadata(_leftPresentationCamera, _leftPresentationPanel, leftFrame);
             ApplyEyePresentationMetadata(_rightPresentationCamera, _rightPresentationPanel, rightFrame);
         }
@@ -864,10 +1040,7 @@ namespace MetalXR.QuestClient
             float angleDown;
             if (!TryReadFov(frame.Fov, out angleLeft, out angleRight, out angleUp, out angleDown))
             {
-                camera.fieldOfView = DefaultVerticalFovDegrees;
-                camera.aspect = DefaultPresentationPanelScale.x / DefaultPresentationPanelScale.y;
-                panel.localPosition = new Vector3(0.0f, 0.0f, PresentationPanelDistance);
-                panel.localScale = DefaultPresentationPanelScale;
+                ApplyDefaultEyePresentation(camera, panel);
                 return;
             }
 
@@ -888,6 +1061,21 @@ namespace MetalXR.QuestClient
             camera.aspect = width / height;
             panel.localPosition = new Vector3(centerX, centerY, PresentationPanelDistance);
             panel.localScale = new Vector3(width, height, 1.0f);
+        }
+
+        private static void ApplyDefaultEyePresentation(Camera camera, Transform panel)
+        {
+            if (camera != null)
+            {
+                camera.fieldOfView = DefaultVerticalFovDegrees;
+                camera.aspect = DefaultPresentationPanelScale.x / DefaultPresentationPanelScale.y;
+            }
+
+            if (panel != null)
+            {
+                panel.localPosition = new Vector3(0.0f, 0.0f, PresentationPanelDistance);
+                panel.localScale = DefaultPresentationPanelScale;
+            }
         }
 
         private static bool TryReadFov(
@@ -1027,6 +1215,7 @@ namespace MetalXR.QuestClient
             }
 
             SetEyeMaterialTexture(frame.IsLeftEye, texture);
+            SetEyeMaterialVerticalFlip(frame.IsLeftEye, false);
             return true;
         }
 
@@ -1085,6 +1274,7 @@ namespace MetalXR.QuestClient
             texture.SetPixels32(pixels);
             texture.Apply(false);
             SetEyeMaterialTexture(frame.IsLeftEye, texture);
+            SetEyeMaterialVerticalFlip(frame.IsLeftEye, false);
             return true;
         }
 

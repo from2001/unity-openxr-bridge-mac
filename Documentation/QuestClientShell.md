@@ -87,6 +87,8 @@ METALXR_QUEST_GRAPHICS_API=gles3 Scripts/build-quest-client-apk.sh
 
 Then launch the full workflow with `METALXR_QUEST_SURFACE_DECODE=1`. A second opt-in, `METALXR_QUEST_SURFACE_PRESENT=1`, asks the Unity client to wrap the decoded external texture with `Texture2D.CreateExternalTexture` and bind it to the per-eye presentation materials. This is still experimental; the Unity client advertises `METALXR_CAPABILITY_SURFACE_DECODE` only when both opt-ins are active on a supported OpenGLES backend. The Image-plane path remains the supported diagnostic fallback for default Vulkan builds and for frames where external texture update does not complete. `Runtime/MetalXRQuestGLPlugin` creates external OES texture ids through a Unity render-thread plugin event and also issues `SurfaceTexture.updateTexImage()` through the same render-thread bridge.
 
+The Quest client defaults to `projection` presentation mode. In that mode, the per-eye cameras and panels are sized from the `VIDEO_FRAME` projection FOV metadata so the stream is treated as a headset eye image rather than a fixed debug quad. `METALXR_QUEST_PRESENTATION_MODE=diagnostic` forces the previous fixed panel layout for transport debugging. The app also applies `METALXR_QUEST_RENDER_SCALE` when present, with an app-side default of `1.2`, to keep the Quest presentation render target from becoming the bottleneck while this Unity-panel path remains the active presentation route.
+
 To make HMD/casting black-frame regressions visible during device smoke tests, capture and analyze a Quest screenshot:
 
 ```sh
