@@ -265,6 +265,15 @@ typedef void (*PFN_objc_msgSend_get_bytes)(
     uint64_t bytesPerRow,
     MetalXrRegion region,
     uint64_t mipmapLevel);
+typedef void (*PFN_objc_msgSend_get_slice_bytes)(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    void* bytes,
+    uint64_t bytesPerRow,
+    uint64_t bytesPerImage,
+    MetalXrRegion region,
+    uint64_t mipmapLevel,
+    uint64_t slice);
 
 typedef struct MetalXrObjcBridge {
     void* library;
@@ -1087,14 +1096,24 @@ static int metalxr_string_contains(const char* text, const char* needle)
     return text != NULL && needle != NULL && strstr(text, needle) != NULL;
 }
 
-static int metalxr_path_is_left_hand(XrPath path)
+static const char* metalxr_path_text(XrPath path)
 {
+    const char* text = NULL;
+    pthread_mutex_lock(&g_mutex);
     for (uint32_t i = 0; i < g_pathTableCount; ++i) {
         if (g_pathTable[i].path == path) {
-            return strstr(g_pathTable[i].text, "/left") != NULL;
+            text = g_pathTable[i].text;
+            break;
         }
     }
-    return 0;
+    pthread_mutex_unlock(&g_mutex);
+    return text;
+}
+
+static int metalxr_path_is_left_hand(XrPath path)
+{
+    const char* text = metalxr_path_text(path);
+    return text != NULL && strstr(text, "/left") != NULL;
 }
 
 static uint32_t metalxr_hand_index_from_path(XrPath path)
@@ -1764,6 +1783,26 @@ static void metalxr_objc_get_texture_bytes(
 
     PFN_objc_msgSend_get_bytes send = (PFN_objc_msgSend_get_bytes)bridge->objc_msgSend;
     send(receiver, selector, bytes, bytesPerRow, region, mipmapLevel);
+}
+
+static void metalxr_objc_get_texture_slice_bytes(
+    MetalXrObjcId receiver,
+    MetalXrSel selector,
+    void* bytes,
+    uint64_t bytesPerRow,
+    uint64_t bytesPerImage,
+    MetalXrRegion region,
+    uint64_t mipmapLevel,
+    uint64_t slice)
+{
+    MetalXrObjcBridge* bridge = metalxr_objc_bridge();
+    if (bridge == NULL || receiver == NULL || selector == NULL || bytes == NULL) {
+        return;
+    }
+
+    PFN_objc_msgSend_get_slice_bytes send =
+        (PFN_objc_msgSend_get_slice_bytes)bridge->objc_msgSend;
+    send(receiver, selector, bytes, bytesPerRow, bytesPerImage, region, mipmapLevel, slice);
 }
 
 static void* metalxr_retain_objc(void* object)
@@ -2810,6 +2849,9 @@ static XrResult XRAPI_CALL metalxr_xrCreateAction(
     if (actionSet->actionCount >= kMaxActionSetActions) {
         return XR_ERROR_LIMIT_REACHED;
     }
+    if (createInfo->countSubactionPaths > 0 && createInfo->subactionPaths == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
 
     XrAction created = (XrAction)calloc(1, sizeof(*created));
     if (created == NULL) {
@@ -2869,6 +2911,110 @@ static XrResult XRAPI_CALL metalxr_xrSuggestInteractionProfileBindings(
     return XR_SUCCESS;
 }
 
+static XrResult XRAPI_CALL metalxr_xrGetCurrentInteractionProfile(
+    XrSession session,
+    XrPath topLevelUserPath,
+    XrInteractionProfileState* interactionProfile)
+{
+    if (!metalxr_is_session(session) || interactionProfile == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    interactionProfile->type = XR_TYPE_INTERACTION_PROFILE_STATE;
+    interactionProfile->interactionProfile = XR_NULL_PATH;
+
+    const char* topLevelPath = metalxr_path_text(topLevelUserPath);
+    if (topLevelPath != NULL && strstr(topLevelPath, "/user/hand/") != NULL) {
+        XrPath oculusTouchPath = XR_NULL_PATH;
+        XrResult result = metalxr_xrStringToPath(
+            session->instance,
+            "/interaction_profiles/oculus/touch_controller",
+            &oculusTouchPath);
+        if (result != XR_SUCCESS) {
+            return result;
+        }
+        interactionProfile->interactionProfile = oculusTouchPath;
+    }
+
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrEnumerateBoundSourcesForAction(
+    XrSession session,
+    const XrBoundSourcesForActionEnumerateInfo* enumerateInfo,
+    uint32_t sourceCapacityInput,
+    uint32_t* sourceCountOutput,
+    XrPath* sources)
+{
+    if (!metalxr_is_session(session) || enumerateInfo == NULL || !metalxr_is_action(enumerateInfo->action) ||
+        sourceCountOutput == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    XrPath defaultSources[2] = { XR_NULL_PATH, XR_NULL_PATH };
+    uint32_t sourceCount = enumerateInfo->action->subactionPathCount;
+    const XrPath* actionSources = enumerateInfo->action->subactionPaths;
+    if (sourceCount == 0) {
+        XrResult leftResult = metalxr_xrStringToPath(session->instance, "/user/hand/left", &defaultSources[0]);
+        XrResult rightResult = metalxr_xrStringToPath(session->instance, "/user/hand/right", &defaultSources[1]);
+        if (leftResult != XR_SUCCESS) {
+            return leftResult;
+        }
+        if (rightResult != XR_SUCCESS) {
+            return rightResult;
+        }
+        sourceCount = 2;
+        actionSources = defaultSources;
+    }
+
+    *sourceCountOutput = sourceCount;
+    if (sourceCapacityInput == 0) {
+        return XR_SUCCESS;
+    }
+    if (sources == NULL || sourceCapacityInput < sourceCount) {
+        return XR_ERROR_SIZE_INSUFFICIENT;
+    }
+
+    for (uint32_t i = 0; i < sourceCount; ++i) {
+        sources[i] = actionSources[i];
+    }
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL metalxr_xrGetInputSourceLocalizedName(
+    XrSession session,
+    const XrInputSourceLocalizedNameGetInfo* getInfo,
+    uint32_t bufferCapacityInput,
+    uint32_t* bufferCountOutput,
+    char* buffer)
+{
+    if (!metalxr_is_session(session) || getInfo == NULL || bufferCountOutput == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    const char* sourcePath = metalxr_path_text(getInfo->sourcePath);
+    const char* localizedName = "MetalXR Controller";
+    if (sourcePath != NULL && strstr(sourcePath, "/left") != NULL) {
+        localizedName = "Left Oculus Touch Controller";
+    } else if (sourcePath != NULL && strstr(sourcePath, "/right") != NULL) {
+        localizedName = "Right Oculus Touch Controller";
+    } else if (sourcePath != NULL && strstr(sourcePath, "oculus/touch_controller") != NULL) {
+        localizedName = "Oculus Touch Controller";
+    }
+
+    uint32_t required = (uint32_t)strlen(localizedName) + 1;
+    *bufferCountOutput = required;
+    if (bufferCapacityInput == 0) {
+        return XR_SUCCESS;
+    }
+    if (buffer == NULL || bufferCapacityInput < required) {
+        return XR_ERROR_SIZE_INSUFFICIENT;
+    }
+
+    metalxr_copy_string(buffer, bufferCapacityInput, localizedName);
+    return XR_SUCCESS;
+}
+
 static XrResult XRAPI_CALL metalxr_xrAttachSessionActionSets(
     XrSession session,
     const XrSessionActionSetsAttachInfo* attachInfo)
@@ -2923,6 +3069,15 @@ static uint32_t metalxr_hand_from_action_info(const XrActionStateGetInfo* getInf
 {
     if (getInfo != NULL && getInfo->subactionPath != XR_NULL_PATH) {
         return metalxr_hand_index_from_path(getInfo->subactionPath);
+    }
+
+    if (getInfo != NULL && metalxr_is_action(getInfo->action)) {
+        if (metalxr_string_contains(getInfo->action->name, "left")) {
+            return 0;
+        }
+        if (metalxr_string_contains(getInfo->action->name, "right")) {
+            return 1;
+        }
     }
 
     return 1;
@@ -3415,8 +3570,13 @@ static XrResult XRAPI_CALL metalxr_xrWaitFrame(
         return XR_ERROR_SESSION_NOT_RUNNING;
     }
 
-    if (session->frameWaited || session->frameBegun) {
-        return XR_ERROR_CALL_ORDER_INVALID;
+    if (session->frameBegun) {
+        metalxr_log("xrWaitFrame recovering unfinished frame=%" PRIu64, session->frameIndex);
+        session->frameBegun = XR_FALSE;
+        session->frameWaited = XR_FALSE;
+    } else if (session->frameWaited) {
+        metalxr_log("xrWaitFrame replacing unbegun waited frame=%" PRIu64, session->frameIndex);
+        session->frameWaited = XR_FALSE;
     }
 
     const MetalXrRuntimeTimingState timing = metalxr_load_runtime_timing_state();
@@ -3498,7 +3658,12 @@ static XrResult XRAPI_CALL metalxr_xrBeginFrame(
         return XR_ERROR_SESSION_NOT_RUNNING;
     }
 
-    if (!session->frameWaited || session->frameBegun) {
+    if (session->frameBegun) {
+        metalxr_log("xrBeginFrame duplicate frame=%" PRIu64, session->frameIndex);
+        return XR_SUCCESS;
+    }
+
+    if (!session->frameWaited) {
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
@@ -4028,20 +4193,30 @@ static int metalxr_read_texture_payload(
         return 0;
     }
 
-    MetalXrRegion region = {
-        x,
-        y,
-        arrayIndex,
-        width,
-        height,
-        1
-    };
-    metalxr_objc_get_texture_bytes((MetalXrObjcId)texture,
-                                   metalxr_sel(bridge, "getBytes:bytesPerRow:fromRegion:mipmapLevel:"),
-                                   bytes,
-                                   (uint64_t)bytesPerRow,
-                                   region,
-                                   0);
+    MetalXrRegion region = { x, y, 0, width, height, 1 };
+    if (swapchain->arraySize > 1) {
+        if (arrayIndex >= swapchain->arraySize) {
+            return 0;
+        }
+
+        metalxr_objc_get_texture_slice_bytes(
+            (MetalXrObjcId)texture,
+            metalxr_sel(bridge, "getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:"),
+            bytes,
+            (uint64_t)bytesPerRow,
+            (uint64_t)bytesPerRow * height,
+            region,
+            0,
+            arrayIndex);
+    } else {
+        metalxr_objc_get_texture_bytes(
+            (MetalXrObjcId)texture,
+            metalxr_sel(bridge, "getBytes:bytesPerRow:fromRegion:mipmapLevel:"),
+            bytes,
+            (uint64_t)bytesPerRow,
+            region,
+            0);
+    }
     return 1;
 }
 
@@ -4851,6 +5026,9 @@ static const MetalXrProc kProcTable[] = {
     { "xrCreateAction", (PFN_xrVoidFunction)metalxr_xrCreateAction },
     { "xrDestroyAction", (PFN_xrVoidFunction)metalxr_xrDestroyAction },
     { "xrSuggestInteractionProfileBindings", (PFN_xrVoidFunction)metalxr_xrSuggestInteractionProfileBindings },
+    { "xrGetCurrentInteractionProfile", (PFN_xrVoidFunction)metalxr_xrGetCurrentInteractionProfile },
+    { "xrEnumerateBoundSourcesForAction", (PFN_xrVoidFunction)metalxr_xrEnumerateBoundSourcesForAction },
+    { "xrGetInputSourceLocalizedName", (PFN_xrVoidFunction)metalxr_xrGetInputSourceLocalizedName },
     { "xrAttachSessionActionSets", (PFN_xrVoidFunction)metalxr_xrAttachSessionActionSets },
     { "xrSyncActions", (PFN_xrVoidFunction)metalxr_xrSyncActions },
     { "xrGetActionStateBoolean", (PFN_xrVoidFunction)metalxr_xrGetActionStateBoolean },

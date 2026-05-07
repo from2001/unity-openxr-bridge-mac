@@ -142,6 +142,7 @@ typedef enum XrStructureType {
     XR_TYPE_VIEW_CONFIGURATION_PROPERTIES = 45,
     XR_TYPE_FRAME_BEGIN_INFO = 46,
     XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW = 48,
+    XR_TYPE_INTERACTION_PROFILE_STATE = 53,
     XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO = 55,
     XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO = 56,
     XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO = 57,
@@ -158,6 +159,8 @@ typedef enum XrStructureType {
     XR_TYPE_HAPTIC_ACTION_INFO = 59,
     XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO = 60,
     XR_TYPE_ACTIONS_SYNC_INFO = 61,
+    XR_TYPE_BOUND_SOURCES_FOR_ACTION_ENUMERATE_INFO = 62,
+    XR_TYPE_INPUT_SOURCE_LOCALIZED_NAME_GET_INFO = 63,
     XR_TYPE_GRAPHICS_BINDING_METAL_KHR = 1000029000,
     XR_TYPE_SWAPCHAIN_IMAGE_METAL_KHR = 1000029001,
     XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR = 1000029002,
@@ -221,6 +224,7 @@ typedef XrFlags64 XrSwapchainCreateFlags;
 typedef XrFlags64 XrSwapchainUsageFlags;
 typedef XrFlags64 XrActionSetCreateFlags;
 typedef XrFlags64 XrActionCreateFlags;
+typedef XrFlags64 XrInputSourceLocalizedNameFlags;
 
 static const XrSpaceLocationFlags XR_SPACE_LOCATION_ORIENTATION_VALID_BIT = 0x00000001;
 static const XrSpaceLocationFlags XR_SPACE_LOCATION_POSITION_VALID_BIT = 0x00000002;
@@ -242,6 +246,10 @@ static const XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT = 0x00000
 static const XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT = 0x00000010;
 static const XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_SAMPLED_BIT = 0x00000020;
 static const XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT = 0x00000040;
+
+static const XrInputSourceLocalizedNameFlags XR_INPUT_SOURCE_LOCALIZED_NAME_USER_PATH_BIT = 0x00000001;
+static const XrInputSourceLocalizedNameFlags XR_INPUT_SOURCE_LOCALIZED_NAME_INTERACTION_PROFILE_BIT = 0x00000002;
+static const XrInputSourceLocalizedNameFlags XR_INPUT_SOURCE_LOCALIZED_NAME_COMPONENT_BIT = 0x00000004;
 
 typedef struct XrApiLayerProperties {
     XrStructureType type;
@@ -420,7 +428,6 @@ typedef struct XrActionSetCreateInfo {
 typedef struct XrActionCreateInfo {
     XrStructureType type;
     const void* next;
-    XrActionCreateFlags createFlags;
     char actionName[XR_MAX_ACTION_NAME_SIZE];
     XrActionType actionType;
     uint32_t countSubactionPaths;
@@ -448,6 +455,12 @@ typedef struct XrSessionActionSetsAttachInfo {
     const XrActionSet* actionSets;
 } XrSessionActionSetsAttachInfo;
 
+typedef struct XrInteractionProfileState {
+    XrStructureType type;
+    void* next;
+    XrPath interactionProfile;
+} XrInteractionProfileState;
+
 typedef struct XrActiveActionSet {
     XrActionSet actionSet;
     XrPath subactionPath;
@@ -459,6 +472,19 @@ typedef struct XrActionsSyncInfo {
     uint32_t countActiveActionSets;
     const XrActiveActionSet* activeActionSets;
 } XrActionsSyncInfo;
+
+typedef struct XrBoundSourcesForActionEnumerateInfo {
+    XrStructureType type;
+    const void* next;
+    XrAction action;
+} XrBoundSourcesForActionEnumerateInfo;
+
+typedef struct XrInputSourceLocalizedNameGetInfo {
+    XrStructureType type;
+    const void* next;
+    XrPath sourcePath;
+    XrInputSourceLocalizedNameFlags whichComponents;
+} XrInputSourceLocalizedNameGetInfo;
 
 typedef struct XrActionStateGetInfo {
     XrStructureType type;
