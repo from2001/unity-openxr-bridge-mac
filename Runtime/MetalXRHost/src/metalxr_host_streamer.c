@@ -31,6 +31,7 @@
 #define METALXR_DEFAULT_STREAM_PORT 47000
 #define METALXR_MAX_UNITY_EXPORT_PAYLOAD_BYTES (512ull * 1024ull * 1024ull)
 #define METALXR_MAX_PENDING_SHARED_SURFACES 64u
+#define METALXR_MAX_INPUT_PACKETS_PER_TICK 32
 
 typedef enum FrameSourceMode {
     FRAME_SOURCE_SYNTHETIC = 0,
@@ -155,6 +156,7 @@ typedef struct HostTimingState {
 
 typedef struct StreamSession {
     int clientFd;
+    uint64_t sessionId;
     uint64_t sequence;
     volatile int failed;
     pthread_mutex_t sendLock;
@@ -246,6 +248,14 @@ static uint64_t host_time_ns(void)
     return metalxr_protocol_now_ns();
 }
 
+static volatile sig_atomic_t g_stop_requested = 0;
+
+static void handle_stop_signal(int signalNumber)
+{
+    (void)signalNumber;
+    g_stop_requested = 1;
+}
+
 static int reserve_encoder_queue_slot(EncoderContext* context, uint64_t frameId);
 static void release_encoder_queue_slot(EncoderContext* context);
 static int shared_iosurface_is_pending(EncoderContext* context, uint32_t ioSurfaceId);
@@ -255,6 +265,10 @@ static void release_shared_iosurface(EncoderContext* context, uint32_t ioSurface
 static void sleep_until_ns(uint64_t targetNs)
 {
     for (;;) {
+        if (g_stop_requested) {
+            return;
+        }
+
         const uint64_t now = host_time_ns();
         if (now >= targetNs) {
             return;
@@ -1109,6 +1123,16 @@ static int stream_video_frame(
         payloadSize);
     const int sent = metalxr_protocol_send_packet(session->clientFd, &header, payload);
     if (!sent) {
+        if (!session->failed) {
+            fprintf(stderr,
+                    "{\"event\":\"send_failed\",\"session\":%" PRIu64
+                    ",\"packet\":\"video_frame\",\"frame\":%" PRIu64
+                    ",\"eye\":%d,\"bytes\":%zu}\n",
+                    session->sessionId,
+                    frame->frameId,
+                    frame->eyeIndex,
+                    encoded->size);
+        }
         session->failed = 1;
     }
     pthread_mutex_unlock(&session->sendLock);
@@ -2527,6 +2551,13 @@ static int send_timing_sample(StreamSession* session, const MetalXRTimingSampleP
         sizeof(*sample));
     const int sent = metalxr_protocol_send_packet(session->clientFd, &header, sample);
     if (!sent) {
+        if (!session->failed) {
+            fprintf(stderr,
+                    "{\"event\":\"send_failed\",\"session\":%" PRIu64
+                    ",\"packet\":\"timing_sample\",\"frame\":%" PRIu64 "}\n",
+                    session->sessionId,
+                    sample->frameId);
+        }
         session->failed = 1;
     }
     pthread_mutex_unlock(&session->sendLock);
@@ -2662,13 +2693,20 @@ static void handle_timing_sample(
 
 static void drain_client_input_packets(StreamSession* session, HostInputState* state)
 {
-    while (!session->failed && socket_has_data(session->clientFd)) {
+    int drained = 0;
+    while (!session->failed &&
+           drained < METALXR_MAX_INPUT_PACKETS_PER_TICK &&
+           socket_has_data(session->clientFd)) {
         MetalXRPacketHeader header;
         uint8_t payload[sizeof(MetalXRControllerInputPayload)];
         if (!metalxr_protocol_recv_packet(session->clientFd, &header, payload, sizeof(payload))) {
+            fprintf(stderr,
+                    "{\"event\":\"client_input_read_failed\",\"session\":%" PRIu64 "}\n",
+                    session->sessionId);
             session->failed = 1;
             return;
         }
+        ++drained;
 
         if (header.type == METALXR_PACKET_POSE_SAMPLE &&
             header.payloadSize == sizeof(MetalXRPoseSamplePayload)) {
@@ -2685,7 +2723,24 @@ static void drain_client_input_packets(StreamSession* session, HostInputState* s
             MetalXRTimingSamplePayload sample;
             memcpy(&sample, payload, sizeof(sample));
             handle_timing_sample(session, &sample, host_time_ns());
+        } else {
+            fprintf(stderr,
+                    "{\"event\":\"client_input_ignored\",\"session\":%" PRIu64
+                    ",\"packet\":\"%s\",\"payload_size\":%u}\n",
+                    session->sessionId,
+                    metalxr_packet_type_name(header.type),
+                    header.payloadSize);
         }
+    }
+
+    if (!session->failed &&
+        drained == METALXR_MAX_INPUT_PACKETS_PER_TICK &&
+        socket_has_data(session->clientFd)) {
+        fprintf(stderr,
+                "{\"event\":\"client_input_backlog\",\"session\":%" PRIu64
+                ",\"drained\":%d}\n",
+                session->sessionId,
+                drained);
     }
 }
 
@@ -2699,6 +2754,13 @@ static int send_haptic_command(StreamSession* session, const MetalXRHapticComman
         sizeof(*command));
     const int sent = metalxr_protocol_send_packet(session->clientFd, &header, command);
     if (!sent) {
+        if (!session->failed) {
+            fprintf(stderr,
+                    "{\"event\":\"send_failed\",\"session\":%" PRIu64
+                    ",\"packet\":\"haptic_command\",\"command\":%" PRIu64 "}\n",
+                    session->sessionId,
+                    command->commandId);
+        }
         session->failed = 1;
     }
     pthread_mutex_unlock(&session->sendLock);
@@ -3116,7 +3178,7 @@ static int configure_unity_export_stream(
     return 1;
 }
 
-static int stream_client(int clientFd, const StreamerOptions* options)
+static int stream_client(int clientFd, const StreamerOptions* options, uint64_t sessionId)
 {
     MetalXRHelloPayload clientHello;
     uint64_t firstSequence = 0;
@@ -3134,6 +3196,7 @@ static int stream_client(int clientFd, const StreamerOptions* options)
     StreamSession stream;
     memset(&stream, 0, sizeof(stream));
     stream.clientFd = clientFd;
+    stream.sessionId = sessionId;
     stream.sequence = firstSequence + 1;
     snprintf(stream.trackingStatePath, sizeof(stream.trackingStatePath), "%s", activeOptions.trackingStatePath);
     snprintf(stream.hapticCommandPath, sizeof(stream.hapticCommandPath), "%s", activeOptions.hapticCommandPath);
@@ -3160,6 +3223,13 @@ static int stream_client(int clientFd, const StreamerOptions* options)
     stream.timing = make_default_timing_state(&activeOptions);
     pthread_mutex_init(&stream.sendLock, NULL);
     HostInputState inputState = make_default_input_state();
+
+    printf("{\"event\":\"session_start\",\"session\":%" PRIu64
+           ",\"first_sequence\":%" PRIu64 ",\"source\":\"%s\"}\n",
+           sessionId,
+           firstSequence,
+           frame_source_name(activeOptions.frameSource));
+    fflush(stdout);
 
     if (!configure_unity_export_stream(&activeOptions, &unityExportSource, &initialUnityPair)) {
         if (stream.hasSharedState) {
@@ -3221,7 +3291,10 @@ static int stream_client(int clientFd, const StreamerOptions* options)
     const uint64_t startNs = host_time_ns();
     const uint64_t framePeriodNs = 1000000000ull / (uint64_t)activeOptions.fps;
     const uint64_t clockSyncIntervalNs = (uint64_t)activeOptions.clockSyncIntervalMs * 1000000ull;
-    for (int frame = 0; ok && !stream.failed && (activeOptions.frames == 0 || frame < activeOptions.frames); ++frame) {
+    for (int frame = 0;
+         ok && !stream.failed && !g_stop_requested &&
+         (activeOptions.frames == 0 || frame < activeOptions.frames);
+         ++frame) {
         drain_client_input_packets(&stream, &inputState);
         poll_haptic_commands(&stream);
         send_clock_sync_if_due(&stream, clockSyncIntervalNs);
@@ -3296,9 +3369,25 @@ static int stream_client(int clientFd, const StreamerOptions* options)
 
     write_summary(&left);
     write_summary(&right);
+    const int stopped = g_stop_requested ? 1 : 0;
+    ok = ok && !stream.failed &&
+         (stopped || (left.stats.droppedFrames == 0 && right.stats.droppedFrames == 0));
+    printf("{\"event\":\"session_end\",\"session\":%" PRIu64
+           ",\"ok\":%s,\"failed\":%s,\"stopped\":%s,"
+           "\"pose_samples\":%" PRIu64 ",\"controller_samples\":%" PRIu64 ","
+           "\"left_encoded\":%" PRIu64 ",\"right_encoded\":%" PRIu64 ","
+           "\"left_dropped\":%" PRIu64 ",\"right_dropped\":%" PRIu64 "}\n",
+           sessionId,
+           ok ? "true" : "false",
+           stream.failed ? "true" : "false",
+           stopped ? "true" : "false",
+           inputState.poseSamples,
+           inputState.controllerSamples,
+           left.stats.encodedFrames,
+           right.stats.encodedFrames,
+           left.stats.droppedFrames,
+           right.stats.droppedFrames);
     fflush(stdout);
-
-    ok = ok && !stream.failed && left.stats.droppedFrames == 0 && right.stats.droppedFrames == 0;
 
     destroy_encoder(&left);
     destroy_encoder(&right);
@@ -3313,6 +3402,8 @@ static int stream_client(int clientFd, const StreamerOptions* options)
 int main(int argc, char** argv)
 {
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGINT, handle_stop_signal);
+    signal(SIGTERM, handle_stop_signal);
 
     const StreamerOptions options = parse_options(argc, argv);
     const int serverFd = create_server_socket(&options);
@@ -3345,7 +3436,8 @@ int main(int argc, char** argv)
 
     int exitCode = 0;
     int reconnectsUsed = 0;
-    for (;;) {
+    uint64_t sessionId = 0;
+    while (!g_stop_requested) {
         struct sockaddr_storage address;
         socklen_t addressLength = sizeof(address);
         const int clientFd = accept(serverFd, (struct sockaddr*)&address, &addressLength);
@@ -3363,17 +3455,27 @@ int main(int argc, char** argv)
 
         char clientDescription[128];
         describe_client(clientFd, clientDescription, sizeof(clientDescription));
+        ++sessionId;
         printf("Quest stream client connected from %s\n", clientDescription);
+        printf("{\"event\":\"client_connected\",\"session\":%" PRIu64
+               ",\"peer\":\"%s\"}\n",
+               sessionId,
+               clientDescription);
         fflush(stdout);
 
-        const int ok = stream_client(clientFd, &options);
+        const int ok = stream_client(clientFd, &options, sessionId);
         close(clientFd);
+        if (g_stop_requested) {
+            break;
+        }
 
         if (!ok) {
             const int canReconnect = options.frames == 0 || reconnectsUsed < options.reconnectAttempts;
             fprintf(stderr,
-                    "{\"event\":\"client_disconnect\",\"reconnects_used\":%d,"
+                    "{\"event\":\"client_disconnect\",\"session\":%" PRIu64
+                    ",\"reconnects_used\":%d,"
                     "\"reconnect_attempts\":%d,\"recovering\":%s}\n",
+                    sessionId,
                     reconnectsUsed,
                     options.reconnectAttempts,
                     canReconnect ? "true" : "false");

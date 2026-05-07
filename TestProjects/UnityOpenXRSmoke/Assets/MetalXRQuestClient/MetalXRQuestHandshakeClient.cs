@@ -18,6 +18,7 @@ namespace MetalXR.QuestClient
         private const int MaxPartialFrameSets = 4;
         private const int MaxQueuedOutgoingPackets = 32;
         private const int MaxQueuedHaptics = 8;
+        private const int MaxOutgoingPacketsPerFlush = 8;
         private readonly MetalXRQuestEndpoint _endpoint;
         private readonly MetalXRQuestDeviceProfile _deviceProfile;
         private readonly uint _capabilities;
@@ -32,7 +33,13 @@ namespace MetalXR.QuestClient
         private bool _stopRequested;
         private ulong _sequence = 1;
         private int _failureCount;
+        private int _connectionAttempt;
+        private int _connectedSessions;
         private ulong _receivedFrameSets;
+        private long _droppedOutgoingPackets;
+        private long _droppedFrameSets;
+        private long _droppedPartialFrameSets;
+        private long _droppedHapticCommands;
 
         public MetalXRQuestHandshakeClient(MetalXRQuestEndpoint endpoint, MetalXRQuestDeviceProfile deviceProfile)
             : this(endpoint, deviceProfile, MetalXRQuestProtocol.DefaultClientCapabilities)
@@ -132,6 +139,10 @@ namespace MetalXR.QuestClient
                 {
                     break;
                 }
+                LogDroppedQueuedItem(
+                    ref _droppedOutgoingPackets,
+                    "outgoing control packet",
+                    "bytes=" + dropped.Length);
             }
         }
 
@@ -200,10 +211,16 @@ namespace MetalXR.QuestClient
                 _stopRequested = true;
                 if (_thread != null && _thread.IsAlive)
                 {
-                    _thread.Join(250);
+                    if (!_thread.Join(1000))
+                    {
+                        _logs.Enqueue("stream thread did not stop within dispose timeout");
+                    }
                 }
 
-                _thread = null;
+                if (_thread != null && !_thread.IsAlive)
+                {
+                    _thread = null;
+                }
             }
         }
 
@@ -227,6 +244,10 @@ namespace MetalXR.QuestClient
 
         private void RunConnectionOnce()
         {
+            int attempt = Interlocked.Increment(ref _connectionAttempt);
+            _logs.Enqueue(
+                "connecting to host stream " + _endpoint.Host + ":" + _endpoint.Port +
+                " attempt=" + attempt);
             try
             {
                 using (TcpClient client = new TcpClient())
@@ -244,6 +265,9 @@ namespace MetalXR.QuestClient
                     client.ReceiveTimeout = ReadTimeoutMs;
                     client.SendTimeout = WriteTimeoutMs;
                     _failureCount = 0;
+                    _logs.Enqueue(
+                        "connected to host stream " + _endpoint.Host + ":" + _endpoint.Port +
+                        " attempt=" + attempt);
 
                     using (NetworkStream stream = client.GetStream())
                     {
@@ -269,6 +293,9 @@ namespace MetalXR.QuestClient
                                 }
 
                                 _logs.Enqueue("received HELLO_ACK from host");
+                                ClearReceiveQueuesForReconnect();
+                                int session = Interlocked.Increment(ref _connectedSessions);
+                                _logs.Enqueue("stream session established id=" + session + " attempt=" + attempt);
                                 ConnectionWriterState writerState = new ConnectionWriterState();
                                 Thread writerThread = StartOutgoingWriter(stream, writerState);
                                 try
@@ -280,8 +307,19 @@ namespace MetalXR.QuestClient
                                     writerState.StopRequested = true;
                                     if (writerThread != null && writerThread.IsAlive)
                                     {
-                                        writerThread.Join(250);
+                                        if (!writerThread.Join(1000))
+                                        {
+                                            _logs.Enqueue("control writer did not stop within session timeout id=" + session);
+                                        }
                                     }
+                                    _logs.Enqueue(
+                                        "stream session closed id=" + session +
+                                        " queued_frame_sets=" + _frameSets.Count +
+                                        " outgoing_packets=" + _outgoingPackets.Count +
+                                        " dropped_frame_sets=" + _droppedFrameSets +
+                                        " dropped_partial_frame_sets=" + _droppedPartialFrameSets +
+                                        " dropped_outgoing_packets=" + _droppedOutgoingPackets +
+                                        " dropped_haptics=" + _droppedHapticCommands);
                                 }
                             }
                             else if (header.Type == MetalXRQuestProtocol.PacketError)
@@ -455,6 +493,7 @@ namespace MetalXR.QuestClient
                 {
                     break;
                 }
+                LogDroppedQueuedItem(ref _droppedFrameSets, "VIDEO_FRAME FrameSet", "frame=" + dropped.FrameId);
             }
 
             _receivedFrameSets++;
@@ -490,6 +529,10 @@ namespace MetalXR.QuestClient
                 }
 
                 _partialFrameSets.Remove(oldestFrameId);
+                LogDroppedQueuedItem(
+                    ref _droppedPartialFrameSets,
+                    "partial VIDEO_FRAME FrameSet",
+                    "frame=" + oldestFrameId);
             }
         }
 
@@ -526,6 +569,10 @@ namespace MetalXR.QuestClient
                 {
                     break;
                 }
+                LogDroppedQueuedItem(
+                    ref _droppedHapticCommands,
+                    "HAPTIC_COMMAND",
+                    "command=" + dropped.CommandId);
             }
 
             string handName = command.IsLeftHand ? "left" : "right";
@@ -540,10 +587,12 @@ namespace MetalXR.QuestClient
         {
             bool wrotePacket = false;
             byte[] packet;
-            while (_outgoingPackets.TryDequeue(out packet))
+            int flushed = 0;
+            while (flushed < MaxOutgoingPacketsPerFlush && _outgoingPackets.TryDequeue(out packet))
             {
                 stream.Write(packet, 0, packet.Length);
                 wrotePacket = true;
+                flushed++;
             }
 
             return wrotePacket;
@@ -586,7 +635,24 @@ namespace MetalXR.QuestClient
             int offset = 0;
             while (offset < count)
             {
-                int read = stream.Read(buffer, offset, count - offset);
+                int read;
+                try
+                {
+                    read = stream.Read(buffer, offset, count - offset);
+                }
+                catch (IOException)
+                {
+                    return false;
+                }
+                catch (SocketException)
+                {
+                    return false;
+                }
+                catch (ObjectDisposedException)
+                {
+                    return false;
+                }
+
                 if (read <= 0)
                 {
                     return false;
@@ -604,6 +670,37 @@ namespace MetalXR.QuestClient
             if (_failureCount <= 3 || (_failureCount % 10) == 0)
             {
                 _logs.Enqueue("host stream unavailable at " + _endpoint.Host + ":" + _endpoint.Port + " (" + reason + ")");
+            }
+        }
+
+        private void ClearReceiveQueuesForReconnect()
+        {
+            int droppedComplete = 0;
+            MetalXRQuestEncodedStereoFrameSet frameSet;
+            while (_frameSets.TryDequeue(out frameSet))
+            {
+                droppedComplete++;
+            }
+
+            int droppedPartial = _partialFrameSets.Count;
+            _partialFrameSets.Clear();
+            if (droppedComplete > 0 || droppedPartial > 0)
+            {
+                _logs.Enqueue(
+                    "cleared stale receive queues complete=" + droppedComplete +
+                    " partial=" + droppedPartial);
+            }
+        }
+
+        private void LogDroppedQueuedItem(ref long counter, string itemName, string detail)
+        {
+            long count = Interlocked.Increment(ref counter);
+            if (count <= 4 || (count % 120) == 0)
+            {
+                _logs.Enqueue(
+                    "dropped queued " + itemName +
+                    " count=" + count +
+                    " " + detail);
             }
         }
 
