@@ -17,6 +17,7 @@ Environment:
   METALXR_WORKFLOW_AUTO_PLAY           Use uloop to enter Play Mode after Unity launches. Defaults to 1.
   METALXR_WORKFLOW_RESTART_UNITY       Quit an existing Unity editor before launch. Defaults to 1.
   METALXR_WORKFLOW_KEEP_RUNNING        Keep Unity and streamer running after smoke checks. Defaults to 1.
+  METALXR_WORKFLOW_UNITY_READY_SECONDS Seconds to wait for Unity/uloop readiness. Defaults to 600.
   METALXR_QUEST_ACTIVITY               Android activity class. Defaults to UnityPlayerGameActivity.
   METALXR_QUEST_LAUNCH_CATEGORY        Android launch category. Defaults to Quest VR category.
   METALXR_QUEST_SURFACE_DECODE         Pass the experimental Surface decode opt-in to Quest. Defaults to 0.
@@ -32,8 +33,12 @@ Environment:
                                       iosurface is experimental and requires
                                       METALXR_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1.
   METALXR_SWAPCHAIN_STORAGE_MODE       shared, managed, or private. Defaults to shared for Unity export.
-  METALXR_VIEW_WIDTH                   Runtime eye width. Defaults to 640 for Quest debug streaming.
-  METALXR_VIEW_HEIGHT                  Runtime eye height. Defaults to 360 for Quest debug streaming.
+  METALXR_WORKFLOW_QUALITY             debug, balanced, or native. Defaults to debug for fixture and balanced for readback.
+                                      debug: 640x360 at 8 Mbps. balanced: 1344x1408 at 40 Mbps.
+                                      native: 1832x1920 at 80 Mbps.
+  METALXR_VIEW_WIDTH                   Runtime eye width. Defaults to the selected quality preset.
+  METALXR_VIEW_HEIGHT                  Runtime eye height. Defaults to the selected quality preset.
+  METALXR_STREAM_BITRATE               H.264 bitrate. Defaults to the selected quality preset.
   METALXR_FRAME_DUMP_DIR               Runtime frame dump directory. Defaults to TMPDIR/metalxr_unity_frames.
   METALXR_RUNTIME_LOG                  Runtime log path. Defaults to TMPDIR/metalxr_unity_runtime.log.
   METALXR_UNITY_LAUNCH_LOG             Unity launch log path. Defaults to TMPDIR/metalxr_unity_launch.log.
@@ -60,6 +65,7 @@ install_apk="${METALXR_WORKFLOW_INSTALL_APK:-1}"
 auto_play="${METALXR_WORKFLOW_AUTO_PLAY:-1}"
 restart_unity="${METALXR_WORKFLOW_RESTART_UNITY:-1}"
 keep_running="${METALXR_WORKFLOW_KEEP_RUNNING:-1}"
+unity_ready_seconds="${METALXR_WORKFLOW_UNITY_READY_SECONDS:-600}"
 export_wait_seconds="${METALXR_WORKFLOW_EXPORT_WAIT_SECONDS:-120}"
 stream_wait_seconds="${METALXR_WORKFLOW_STREAM_WAIT_SECONDS:-60}"
 tmp_root="${TMPDIR:-/tmp}"
@@ -78,8 +84,38 @@ else
 fi
 frame_export_mode="${METALXR_FRAME_EXPORT_MODE:-fixture}"
 swapchain_storage_mode="${METALXR_SWAPCHAIN_STORAGE_MODE:-shared}"
-view_width="${METALXR_VIEW_WIDTH:-640}"
-view_height="${METALXR_VIEW_HEIGHT:-360}"
+workflow_quality="${METALXR_WORKFLOW_QUALITY:-}"
+if [[ -z "$workflow_quality" ]]; then
+  if [[ "$frame_export_mode" == "readback" ]]; then
+    workflow_quality="balanced"
+  else
+    workflow_quality="debug"
+  fi
+fi
+case "$workflow_quality" in
+  debug)
+    preset_view_width=640
+    preset_view_height=360
+    preset_stream_bitrate=8000000
+    ;;
+  balanced)
+    preset_view_width=1344
+    preset_view_height=1408
+    preset_stream_bitrate=40000000
+    ;;
+  native)
+    preset_view_width=1832
+    preset_view_height=1920
+    preset_stream_bitrate=80000000
+    ;;
+  *)
+    echo "METALXR_WORKFLOW_QUALITY must be debug, balanced, or native, got: $workflow_quality" >&2
+    exit 1
+    ;;
+esac
+view_width="${METALXR_VIEW_WIDTH:-$preset_view_width}"
+view_height="${METALXR_VIEW_HEIGHT:-$preset_view_height}"
+stream_bitrate="${METALXR_STREAM_BITRATE:-$preset_stream_bitrate}"
 frame_dump_dir="${METALXR_FRAME_DUMP_DIR:-$tmp_root/metalxr_unity_frames}"
 runtime_log="${METALXR_RUNTIME_LOG:-$tmp_root/metalxr_unity_runtime.log}"
 unity_log="${METALXR_UNITY_LAUNCH_LOG:-$tmp_root/metalxr_unity_launch.log}"
@@ -356,7 +392,10 @@ MetalXR frame exports: ${frame_export_dir:-disabled}
 MetalXR frame export socket: ${frame_export_socket:-disabled}
 MetalXR frame export mode: $frame_export_mode
 MetalXR swapchain storage mode: $swapchain_storage_mode
+MetalXR workflow quality: $workflow_quality
 MetalXR view size: ${view_width}x${view_height}
+MetalXR stream bitrate: $stream_bitrate
+MetalXR Unity ready timeout: ${unity_ready_seconds}s
 MetalXR tracking state: ${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}
 MetalXR haptic commands: ${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}
 MetalXR timing state: ${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}
@@ -394,7 +433,11 @@ EOF
     unity_pid="$!"
 
     local ready=0
-    for _ in $(seq 1 90); do
+    local unity_ready_polls=$(((unity_ready_seconds + 1) / 2))
+    if (( unity_ready_polls < 1 )); then
+      unity_ready_polls=1
+    fi
+    for _ in $(seq 1 "$unity_ready_polls"); do
       if uloop compile --project-path "$project_path" --force-recompile false --wait-for-domain-reload true >>"$unity_log" 2>&1; then
         ready=1
         break
@@ -465,6 +508,7 @@ start_unity_export_streamer() {
   METALXR_FRAME_EXPORT_SOCKET="$frame_export_socket" \
   METALXR_FRAME_EXPORT_ACK_SOCKET="$frame_export_ack_socket" \
   METALXR_FRAME_EXPORT_WAIT_MS="$((export_wait_seconds * 1000))" \
+  METALXR_STREAM_BITRATE="$stream_bitrate" \
   METALXR_TRACKING_STATE_PATH="${METALXR_TRACKING_STATE_PATH:-/tmp/metalxr_tracking_state.txt}" \
   METALXR_HAPTIC_COMMAND_PATH="${METALXR_HAPTIC_COMMAND_PATH:-/tmp/metalxr_haptic_command.txt}" \
   METALXR_TIMING_STATE_PATH="${METALXR_TIMING_STATE_PATH:-/tmp/metalxr_timing_state.txt}" \
