@@ -1371,6 +1371,7 @@ namespace MetalXR.QuestClient
         private int _surfaceConfiguredWidth;
         private int _surfaceConfiguredHeight;
         private int _surfaceTextureName;
+        private int _surfaceUnityTextureName;
         private bool _surfaceDecoderLogged;
         private bool _surfaceDecoderFallbackLogged;
         private bool _surfaceDecoderUnavailable;
@@ -1394,6 +1395,12 @@ namespace MetalXR.QuestClient
 
         [DllImport("metalxrquestgl")]
         private static extern int MetalXRQuestGL_GetExternalTexture(int slot);
+
+        [DllImport("metalxrquestgl")]
+        private static extern int MetalXRQuestGL_GetUnityTexture(int slot);
+
+        [DllImport("metalxrquestgl")]
+        private static extern void MetalXRQuestGL_SetExternalTextureSize(int slot, int width, int height);
 
         [DllImport("metalxrquestgl")]
         private static extern int MetalXRQuestGL_GetSurfaceUpdateSerial(int slot);
@@ -1424,6 +1431,12 @@ namespace MetalXR.QuestClient
                 TryDecodeWithSurfaceDecoder(frame, out decodedFrame))
             {
                 return true;
+            }
+            if (_enableExperimentalSurfaceDecode &&
+                _enableExperimentalSurfacePresent &&
+                !_surfaceDecoderUnavailable)
+            {
+                return false;
             }
 
             if (TryDecodeWithMediaCodec(frame, out decodedFrame))
@@ -1550,7 +1563,7 @@ namespace MetalXR.QuestClient
 
             try
             {
-                if (!EnsureRenderThreadExternalTexture())
+                if (!EnsureRenderThreadExternalTexture(frame.Width, frame.Height))
                 {
                     return false;
                 }
@@ -1579,7 +1592,8 @@ namespace MetalXR.QuestClient
                     Log(
                         "experimental Surface decoder initialized for " + _eyeName +
                         " eye " + frame.Width + "x" + frame.Height +
-                        " texture=" + _surfaceTextureName +
+                        " surface_texture=" + _surfaceTextureName +
+                        " unity_texture=" + _surfaceUnityTextureName +
                         "; render-thread texture update path enabled");
                 }
 
@@ -1643,11 +1657,14 @@ namespace MetalXR.QuestClient
             if (updateSuccess == 0)
             {
                 LogSurfaceTextureUpdateFallbackOnce();
+                _surfaceDecoderUnavailable = true;
+                DisposeSurfaceDecoder();
                 return false;
             }
 
             string outputFormat =
-                "external-oes-texture=" + _surfaceTextureName +
+                "surface-oes-texture=" + _surfaceTextureName +
+                ";unity-2d-texture=" + _surfaceUnityTextureName +
                 ";updated_on_render_thread=true;serial=" + updateSerial;
             decodedFrame = new MetalXRQuestDecodedVideoFrame(
                 sourceFrame,
@@ -1656,19 +1673,22 @@ namespace MetalXR.QuestClient
                 true,
                 "surface-external-texture",
                 outputFormat,
-                new IntPtr(_surfaceTextureName));
+                new IntPtr(_surfaceUnityTextureName));
             return true;
         }
 
-        private bool EnsureRenderThreadExternalTexture()
+        private bool EnsureRenderThreadExternalTexture(int width, int height)
         {
             int slot = _leftEye ? 0 : 1;
             try
             {
-                int textureName = MetalXRQuestGL_GetExternalTexture(slot);
-                if (textureName != 0)
+                MetalXRQuestGL_SetExternalTextureSize(slot, width, height);
+                int surfaceTextureName = MetalXRQuestGL_GetExternalTexture(slot);
+                int unityTextureName = MetalXRQuestGL_GetUnityTexture(slot);
+                if (surfaceTextureName != 0 && unityTextureName != 0)
                 {
-                    _surfaceTextureName = textureName;
+                    _surfaceTextureName = surfaceTextureName;
+                    _surfaceUnityTextureName = unityTextureName;
                     return true;
                 }
 
@@ -1688,7 +1708,7 @@ namespace MetalXR.QuestClient
                     if (!_surfaceTextureWaitingLogged)
                     {
                         _surfaceTextureWaitingLogged = true;
-                        Log("requested render-thread external OES texture for " + _eyeName + " eye");
+                        Log("requested render-thread SurfaceTexture/OES and Unity 2D textures for " + _eyeName + " eye");
                     }
                 }
 
@@ -1760,7 +1780,7 @@ namespace MetalXR.QuestClient
 
             Log(
                 string.IsNullOrEmpty(error) ?
-                    "SurfaceTexture update was not ready for " + _eyeName + " eye; falling back to MediaCodec Image-plane decode" :
+                    "SurfaceTexture presentation was not usable for " + _eyeName + " eye; falling back to MediaCodec Image-plane decode" :
                     error + "; falling back to MediaCodec Image-plane decode");
         }
 
@@ -2344,6 +2364,7 @@ namespace MetalXR.QuestClient
             _surfaceConfiguredWidth = 0;
             _surfaceConfiguredHeight = 0;
             _surfaceTextureName = 0;
+            _surfaceUnityTextureName = 0;
             _surfaceTextureCreateRequested = false;
             _surfaceTextureUpdateEventRequested = false;
             _surfaceTextureUpdateTargetSerial = 0;
