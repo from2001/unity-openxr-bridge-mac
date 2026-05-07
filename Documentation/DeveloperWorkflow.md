@@ -56,6 +56,15 @@ METALXR_PROBE_ENABLE_EXPERIMENTAL_IOSURFACE_EXPORT=1 \
 Scripts/probe-metalxr-runtime.sh
 ```
 
+Compare the stable readback export and guarded IOSurface socket export records:
+
+```sh
+Scripts/probe-metalxr-frame-export-modes.sh
+```
+
+The comparison writes a summary under `${TMPDIR:-/tmp}/metalxr_frame_export_compare_*`, verifies that readback produces BGRA payload files, and verifies that IOSurface socket export publishes `ioSurfaceId` and frame slot generation metadata without requiring payload files.
+The script keeps its Unix datagram socket path short under `/tmp` by default because macOS limits `sockaddr_un.sun_path` length; set `METALXR_FRAME_EXPORT_COMPARE_SOCKET_PREFIX` only if the resulting path remains short enough.
+
 ## 3. Build And Install The Quest Client
 
 ```sh
@@ -146,7 +155,8 @@ Manual `unity-export` streaming defaults to `METALXR_STREAM_QUALITY=balanced` so
 - `METALXR_STREAM_MAX_FRAME_AGE_MS` to drop stale `unity-export` source frames before encoding.
 - `METALXR_STREAM_RECONNECT_ATTEMPTS`
 - `METALXR_WORKFLOW_MAX_FRAME_AGE_MS` and `METALXR_WORKFLOW_MAX_QUEUE_DEPTH` to fail the coordinated smoke workflow when output is obviously stale or backed up.
-- `METALXR_WORKFLOW_ARCHIVE_SCENE_RECOVERY=1` to move Unity scene recovery backups out of the smoke project before launch. The default archive destination is `${TMPDIR:-/tmp}/metalxr_unity_scene_recovery`; override it with `METALXR_WORKFLOW_SCENE_RECOVERY_ARCHIVE_DIR`.
+- `METALXR_WORKFLOW_ARCHIVE_SCENE_RECOVERY=1` to move Unity scene recovery backups out of the smoke project before workflow launch. The default archive destination is `${TMPDIR:-/tmp}/metalxr_unity_scene_recovery`; override it with `METALXR_WORKFLOW_SCENE_RECOVERY_ARCHIVE_DIR`.
+- `METALXR_ARCHIVE_SCENE_RECOVERY=1` to apply the same scene recovery preflight when using `Scripts/launch-unity-openxr.sh` directly. Override the archive destination with `METALXR_SCENE_RECOVERY_ARCHIVE_DIR`.
 - `METALXR_TRACKING_STALE_TIMEOUT_MS`
 - `METALXR_PREDICTION_OFFSET_MS`
 - `METALXR_WORKFLOW_KEEP_RUNNING=1` to leave Unity and the streamer running after the workflow succeeds.

@@ -33,6 +33,10 @@ Environment:
                            Haptic command file. Defaults to /tmp/metalxr_haptic_command.txt.
   METALXR_TIMING_STATE_PATH
                            Timing state file. Defaults to /tmp/metalxr_timing_state.txt.
+  METALXR_ARCHIVE_SCENE_RECOVERY
+                           Archive Unity scene recovery backups before launch. Defaults to 1.
+  METALXR_SCENE_RECOVERY_ARCHIVE_DIR
+                           Archive destination. Defaults to TMPDIR/metalxr_unity_scene_recovery.
   UNITY_APP                Full path to Unity.app. If omitted, the project version is used first.
   METALXR_START_SIMULATOR  Set to 0 to avoid launching MetaXRSimulator.app automatically.
   METALXR_START_ULOOP_SERVER
@@ -106,6 +110,41 @@ if [[ -n "$project_path" ]]; then
     exit 1
   fi
   unity_args+=("-projectPath" "$project_path")
+fi
+
+archive_scene_recovery="${METALXR_ARCHIVE_SCENE_RECOVERY:-1}"
+scene_recovery_archive_dir="${METALXR_SCENE_RECOVERY_ARCHIVE_DIR:-${TMPDIR:-/tmp}/metalxr_unity_scene_recovery}"
+
+archive_scene_recovery_path_if_exists() {
+  local source_path="$1"
+  local archive_label="$2"
+
+  if [[ ! -e "$source_path" ]]; then
+    return
+  fi
+
+  if [[ "$archive_scene_recovery" != "1" ]]; then
+    echo "Unity scene recovery backup detected and left in place: $source_path"
+    return
+  fi
+
+  mkdir -p "$scene_recovery_archive_dir"
+  local timestamp
+  timestamp="$(date +%Y%m%d_%H%M%S)"
+  local destination="$scene_recovery_archive_dir/${archive_label}_${timestamp}"
+  local suffix=1
+  while [[ -e "$destination" ]]; do
+    destination="$scene_recovery_archive_dir/${archive_label}_${timestamp}_$suffix"
+    suffix=$((suffix + 1))
+  done
+
+  mv "$source_path" "$destination"
+  echo "Archived Unity scene recovery backup: $source_path -> $destination"
+}
+
+if [[ -n "$project_path" ]]; then
+  archive_scene_recovery_path_if_exists "$project_path/Temp/__Backupscenes" "backupscenes"
+  archive_scene_recovery_path_if_exists "$project_path/Assets/_Recovery" "assets_recovery"
 fi
 
 if [[ "${METALXR_START_ULOOP_SERVER:-0}" == "1" ]]; then
