@@ -120,7 +120,13 @@ METALXR_WORKFLOW_REPEAT_COUNT=2 Scripts/probe-metalxr-playmode-workflow-repeat.s
 
 The coordinated workflow prints latency metrics from the streamer log and fails when the latest exported frame age or Quest queue depth exceeds the configured smoke thresholds.
 
-If Unity left scene recovery backups after a crash or forced quit, the workflow archives `Temp/__Backupscenes` and `Assets/_Recovery` before launch so the editor does not block on the recovery prompt. Set `METALXR_WORKFLOW_ARCHIVE_SCENE_RECOVERY=0` to keep those folders in place for manual recovery.
+If Unity left scene recovery backups after a crash or forced quit, the workflow archives `Temp/__Backupscenes` and `Assets/_Recovery` before launch so the editor does not block on the recovery prompt. `Scripts/launch-unity-openxr.sh` performs the same preflight for direct launches. Set `METALXR_WORKFLOW_ARCHIVE_SCENE_RECOVERY=0` for the workflow or `METALXR_ARCHIVE_SCENE_RECOVERY=0` for the direct launcher to keep those folders in place for manual recovery.
+
+To compare the current readback export with the guarded IOSurface/socket metadata path:
+
+```sh
+Scripts/probe-metalxr-frame-export-modes.sh
+```
 
 For a manual stream after Unity is already exporting frames:
 
