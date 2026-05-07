@@ -837,6 +837,36 @@ static MetalXrTrackingState metalxr_default_tracking_state(void)
     return state;
 }
 
+static XrPosef metalxr_unity_pose_to_openxr_pose(XrPosef pose)
+{
+    /*
+     * Quest client samples are produced by Unity XR input in Unity's
+     * left-handed world space (+Z forward). OpenXR poses exposed by this
+     * runtime are right-handed (+X right, +Y up, -Z forward). Unity's OpenXR
+     * provider converts the returned XrPosef back to Unity space, so the
+     * bridge must store incoming live tracking samples in OpenXR space here.
+     */
+    pose.position.z = -pose.position.z;
+    pose.orientation.x = -pose.orientation.x;
+    pose.orientation.y = -pose.orientation.y;
+    return pose;
+}
+
+static void metalxr_convert_tracking_state_from_unity_to_openxr(MetalXrTrackingState* state)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    state->hmdPose = metalxr_unity_pose_to_openxr_pose(state->hmdPose);
+    for (size_t hand = 0; hand < 2; ++hand) {
+        state->controllers[hand].aimPose =
+            metalxr_unity_pose_to_openxr_pose(state->controllers[hand].aimPose);
+        state->controllers[hand].gripPose =
+            metalxr_unity_pose_to_openxr_pose(state->controllers[hand].gripPose);
+    }
+}
+
 static uint64_t metalxr_stat_mtime_ns(const struct stat* metadata)
 {
     if (metadata == NULL) {
@@ -1019,6 +1049,7 @@ static int metalxr_load_tracking_state(MetalXrTrackingState* state)
                 memcpy(&target->gripPose.position, source->gripPosition, sizeof(source->gripPosition));
                 memcpy(&target->gripPose.orientation, source->gripOrientation, sizeof(source->gripOrientation));
             }
+            metalxr_convert_tracking_state_from_unity_to_openxr(state);
             metalxr_apply_shared_tracking_stale_policy(state, shared.hostTimestampNs);
             return 1;
         }
@@ -1087,6 +1118,7 @@ static int metalxr_load_tracking_state(MetalXrTrackingState* state)
 
     fclose(input);
     state->hostTimestampNs = (uint64_t)metalxr_now_ns();
+    metalxr_convert_tracking_state_from_unity_to_openxr(state);
     metalxr_apply_tracking_stale_policy(state, hasMetadata ? &metadata : NULL);
     return 1;
 }
