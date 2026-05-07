@@ -107,6 +107,9 @@ run_stream_probe() {
     --frame-source "$frame_source"
     --no-realtime
   )
+  if [[ "$frame_source" == "unity-export" ]]; then
+    streamer_args+=(--max-frame-age-ms 0)
+  fi
 
   if [[ -n "$frame_export_dir" ]]; then
     streamer_args+=(--frame-export-dir "$frame_export_dir")
