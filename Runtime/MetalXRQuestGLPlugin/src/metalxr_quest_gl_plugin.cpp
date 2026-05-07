@@ -29,6 +29,7 @@ std::atomic<int> g_texture_height[kMaxSlots];
 std::atomic<int> g_surface_update_serial[kMaxSlots];
 std::atomic<int> g_surface_update_success[kMaxSlots];
 std::atomic<int> g_blit_visible[kMaxSlots];
+std::atomic<int> g_blit_invisible_count[kMaxSlots];
 std::atomic<int> g_blit_near_black_logged[kMaxSlots];
 std::atomic<int> g_surface_present_unavailable;
 
@@ -451,9 +452,15 @@ bool BlitSurfaceTextureToUnityTexture(int slot, const float matrix[16]) {
         visible = BlitOutputLooksVisible(width, height);
         if (visible) {
             g_blit_visible[slot].store(1);
-        } else if (g_blit_near_black_logged[slot].exchange(1) == 0) {
-            g_surface_present_unavailable.store(1);
-            LogPluginError("surface texture blit output was near-black; using CPU decode fallback");
+            g_blit_invisible_count[slot].store(0);
+        } else {
+            const int invisible_count = g_blit_invisible_count[slot].fetch_add(1) + 1;
+            if (invisible_count < 6) {
+                visible = true;
+            } else if (g_blit_near_black_logged[slot].exchange(1) == 0) {
+                g_surface_present_unavailable.store(1);
+                LogPluginError("surface texture blit output stayed near-black; using CPU decode fallback");
+            }
         }
     }
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
@@ -578,6 +585,7 @@ void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API MetalXRQuestGL_ResetExternalText
     g_surface_update_serial[slot].store(0);
     g_surface_update_success[slot].store(0);
     g_blit_visible[slot].store(0);
+    g_blit_invisible_count[slot].store(0);
     g_blit_near_black_logged[slot].store(0);
 }
 

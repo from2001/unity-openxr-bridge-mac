@@ -12,8 +12,8 @@ namespace MetalXR.QuestClient
         private const string LogPrefix = "MetalXRQuestClient";
         private const int EyeLayerLeft = 28;
         private const int EyeLayerRight = 29;
-        private const int TextureWidth = 640;
-        private const int TextureHeight = 360;
+        private const int DiagnosticTextureWidth = 640;
+        private const int DiagnosticTextureHeight = 360;
         private const float FrameUpdateIntervalSeconds = 1.0f / 12.0f;
         private const float InputSampleIntervalSeconds = 1.0f / 72.0f;
         private const float PresentationPanelDistance = 2.0f;
@@ -108,7 +108,9 @@ namespace MetalXR.QuestClient
                 EnqueueTrackingSamples();
             }
 
-            if (Time.unscaledTime - _lastStreamFrameTime > 0.5f && Time.unscaledTime >= _nextFrameTime)
+            if (_displayedStereoFrameSets == 0 &&
+                Time.unscaledTime - _lastStreamFrameTime > 0.5f &&
+                Time.unscaledTime >= _nextFrameTime)
             {
                 _nextFrameTime = Time.unscaledTime + FrameUpdateIntervalSeconds;
                 _frameIndex++;
@@ -698,11 +700,19 @@ namespace MetalXR.QuestClient
                 unlitShader = Shader.Find("Unlit/Texture");
             }
 
-            _leftTexture = CreateTexture("MetalXR Left Diagnostic");
-            _rightTexture = CreateTexture("MetalXR Right Diagnostic");
+            _leftTexture = CreateTexture(
+                "MetalXR Left Diagnostic",
+                DiagnosticTextureWidth,
+                DiagnosticTextureHeight,
+                FilterMode.Point);
+            _rightTexture = CreateTexture(
+                "MetalXR Right Diagnostic",
+                DiagnosticTextureWidth,
+                DiagnosticTextureHeight,
+                FilterMode.Point);
             _quadMesh = CreateQuadMesh();
-            _leftPixels = new Color32[TextureWidth * TextureHeight];
-            _rightPixels = new Color32[TextureWidth * TextureHeight];
+            _leftPixels = new Color32[DiagnosticTextureWidth * DiagnosticTextureHeight];
+            _rightPixels = new Color32[DiagnosticTextureWidth * DiagnosticTextureHeight];
 
             _leftMaterial = CreateMaterial(unlitShader, _leftTexture, "MetalXR Left Material");
             _rightMaterial = CreateMaterial(unlitShader, _rightTexture, "MetalXR Right Material");
@@ -715,12 +725,12 @@ namespace MetalXR.QuestClient
             _rightPresentationCamera = CreateEyeCamera(rigRoot.transform, "MetalXR Right Presentation Camera", EyeLayerRight, StereoTargetEyeMask.Right);
         }
 
-        private static Texture2D CreateTexture(string name)
+        private static Texture2D CreateTexture(string name, int width, int height, FilterMode filterMode)
         {
-            Texture2D texture = new Texture2D(TextureWidth, TextureHeight, TextureFormat.RGBA32, false);
+            Texture2D texture = new Texture2D(width, height, TextureFormat.RGBA32, false);
             texture.name = name;
             texture.wrapMode = TextureWrapMode.Clamp;
-            texture.filterMode = FilterMode.Point;
+            texture.filterMode = filterMode;
             return texture;
         }
 
@@ -762,6 +772,27 @@ namespace MetalXR.QuestClient
             {
                 material.mainTexture = texture;
             }
+
+            SetMaterialVerticalFlip(material, false);
+        }
+
+        private static void SetMaterialVerticalFlip(Material material, bool flipY)
+        {
+            if (material == null)
+            {
+                return;
+            }
+
+            Vector2 scale = flipY ? new Vector2(1.0f, -1.0f) : Vector2.one;
+            Vector2 offset = flipY ? new Vector2(0.0f, 1.0f) : Vector2.zero;
+            if (material.HasProperty("_BaseMap"))
+            {
+                material.SetTextureScale("_BaseMap", scale);
+                material.SetTextureOffset("_BaseMap", offset);
+            }
+
+            material.mainTextureScale = scale;
+            material.mainTextureOffset = offset;
         }
 
         private GameObject CreateRigRoot()
@@ -915,6 +946,7 @@ namespace MetalXR.QuestClient
 
         private void UpdateDiagnosticTexture(bool leftEye, int frameIndex)
         {
+            EnsureDiagnosticTexture(leftEye);
             Color32[] pixels = leftEye ? _leftPixels : _rightPixels;
             Texture2D texture = leftEye ? _leftTexture : _rightTexture;
             if (pixels == null || texture == null)
@@ -922,11 +954,11 @@ namespace MetalXR.QuestClient
                 return;
             }
 
-            for (int y = 0; y < TextureHeight; y++)
+            for (int y = 0; y < DiagnosticTextureHeight; y++)
             {
-                for (int x = 0; x < TextureWidth; x++)
+                for (int x = 0; x < DiagnosticTextureWidth; x++)
                 {
-                    int index = y * TextureWidth + x;
+                    int index = y * DiagnosticTextureWidth + x;
                     pixels[index] = DiagnosticColor(leftEye, x, y, frameIndex);
                 }
             }
@@ -1000,9 +1032,14 @@ namespace MetalXR.QuestClient
 
         private bool UpdateCpuStreamTexture(MetalXRQuestDecodedVideoFrame frame)
         {
-            Color32[] pixels = frame.IsLeftEye ? _leftPixels : _rightPixels;
-            Texture2D texture = frame.IsLeftEye ? _leftTexture : _rightTexture;
-            if (pixels == null || texture == null || frame.RgbaBytes == null)
+            if (frame.RgbaBytes == null)
+            {
+                return false;
+            }
+
+            Texture2D texture;
+            Color32[] pixels;
+            if (!EnsureCpuStreamTexture(frame, out texture, out pixels))
             {
                 return false;
             }
@@ -1017,15 +1054,27 @@ namespace MetalXR.QuestClient
                 return false;
             }
 
-            for (int y = 0; y < TextureHeight; y++)
+            int tightlyPackedBytes = sourceRowBytes * sourceHeight;
+            if (strideBytes == sourceRowBytes && frame.RgbaBytes.Length == tightlyPackedBytes)
             {
-                int sourceY = sourceHeight - 1 - ((y * sourceHeight) / TextureHeight);
+                texture.LoadRawTextureData(frame.RgbaBytes);
+                texture.Apply(false);
+                SetEyeMaterialTexture(frame.IsLeftEye, texture);
+                SetEyeMaterialVerticalFlip(frame.IsLeftEye, true);
+                return true;
+            }
+
+            int targetWidth = texture.width;
+            int targetHeight = texture.height;
+            for (int y = 0; y < targetHeight; y++)
+            {
+                int sourceY = sourceHeight - 1 - ((y * sourceHeight) / targetHeight);
                 int sourceRow = sourceY * strideBytes;
-                for (int x = 0; x < TextureWidth; x++)
+                for (int x = 0; x < targetWidth; x++)
                 {
-                    int sourceX = (x * sourceWidth) / TextureWidth;
+                    int sourceX = (x * sourceWidth) / targetWidth;
                     int sourceIndex = sourceRow + (sourceX * 4);
-                    pixels[y * TextureWidth + x] = new Color32(
+                    pixels[y * targetWidth + x] = new Color32(
                         frame.RgbaBytes[sourceIndex],
                         frame.RgbaBytes[sourceIndex + 1],
                         frame.RgbaBytes[sourceIndex + 2],
@@ -1039,10 +1088,120 @@ namespace MetalXR.QuestClient
             return true;
         }
 
+        private void EnsureDiagnosticTexture(bool leftEye)
+        {
+            Texture2D texture = leftEye ? _leftTexture : _rightTexture;
+            Color32[] pixels = leftEye ? _leftPixels : _rightPixels;
+            bool recreateTexture =
+                texture == null ||
+                texture.width != DiagnosticTextureWidth ||
+                texture.height != DiagnosticTextureHeight;
+            bool recreatePixels =
+                pixels == null ||
+                pixels.Length != DiagnosticTextureWidth * DiagnosticTextureHeight;
+
+            if (recreateTexture)
+            {
+                Texture2D newTexture = CreateTexture(
+                    leftEye ? "MetalXR Left Diagnostic" : "MetalXR Right Diagnostic",
+                    DiagnosticTextureWidth,
+                    DiagnosticTextureHeight,
+                    FilterMode.Point);
+                if (leftEye)
+                {
+                    DestroyUnityObject(_leftTexture);
+                    _leftTexture = newTexture;
+                }
+                else
+                {
+                    DestroyUnityObject(_rightTexture);
+                    _rightTexture = newTexture;
+                }
+
+                SetEyeMaterialTexture(leftEye, newTexture);
+            }
+
+            if (recreatePixels)
+            {
+                if (leftEye)
+                {
+                    _leftPixels = new Color32[DiagnosticTextureWidth * DiagnosticTextureHeight];
+                }
+                else
+                {
+                    _rightPixels = new Color32[DiagnosticTextureWidth * DiagnosticTextureHeight];
+                }
+            }
+        }
+
+        private bool EnsureCpuStreamTexture(
+            MetalXRQuestDecodedVideoFrame frame,
+            out Texture2D texture,
+            out Color32[] pixels)
+        {
+            texture = null;
+            pixels = null;
+            if (frame == null || frame.Width <= 0 || frame.Height <= 0)
+            {
+                return false;
+            }
+
+            texture = frame.IsLeftEye ? _leftTexture : _rightTexture;
+            pixels = frame.IsLeftEye ? _leftPixels : _rightPixels;
+            bool recreateTexture =
+                texture == null ||
+                texture.width != frame.Width ||
+                texture.height != frame.Height;
+            if (recreateTexture)
+            {
+                Texture2D newTexture = CreateTexture(
+                    frame.IsLeftEye ? "MetalXR Left Stream" : "MetalXR Right Stream",
+                    frame.Width,
+                    frame.Height,
+                    FilterMode.Bilinear);
+                if (frame.IsLeftEye)
+                {
+                    DestroyUnityObject(_leftTexture);
+                    _leftTexture = newTexture;
+                    texture = _leftTexture;
+                }
+                else
+                {
+                    DestroyUnityObject(_rightTexture);
+                    _rightTexture = newTexture;
+                    texture = _rightTexture;
+                }
+
+                SetEyeMaterialTexture(frame.IsLeftEye, texture);
+            }
+
+            int pixelCount = frame.Width * frame.Height;
+            if (pixels == null || pixels.Length != pixelCount)
+            {
+                pixels = new Color32[pixelCount];
+                if (frame.IsLeftEye)
+                {
+                    _leftPixels = pixels;
+                }
+                else
+                {
+                    _rightPixels = pixels;
+                }
+            }
+
+            return texture != null && pixels != null;
+        }
+
         private void SetEyeMaterialTexture(bool leftEye, Texture texture)
         {
             Material material = leftEye ? _leftMaterial : _rightMaterial;
             SetMaterialTexture(material, texture);
+        }
+
+        private void SetEyeMaterialVerticalFlip(bool leftEye, bool flipY)
+        {
+            Material material = leftEye ? _leftMaterial : _rightMaterial;
+            SetMaterialVerticalFlip(material, flipY);
         }
 
         private void MarkFrameDisplayed(MetalXRQuestDecodedVideoFrame frame, ulong displayTimeNs)
@@ -1130,11 +1289,13 @@ namespace MetalXR.QuestClient
 
         private static Color32 DiagnosticColor(bool leftEye, int x, int y, int frameIndex)
         {
-            int band = (x * 6) / TextureWidth;
+            int band = (x * 6) / DiagnosticTextureWidth;
             int phase = (x + frameIndex * 13) & 255;
             bool grid = (x % 128) < 4 || (y % 96) < 4;
             bool movingLine = ((x + frameIndex * 19) % 256) < 10;
-            bool centerCross = Math.Abs(x - TextureWidth / 2) < 5 || Math.Abs(y - TextureHeight / 2) < 5;
+            bool centerCross =
+                Math.Abs(x - DiagnosticTextureWidth / 2) < 5 ||
+                Math.Abs(y - DiagnosticTextureHeight / 2) < 5;
 
             byte r;
             byte g;
