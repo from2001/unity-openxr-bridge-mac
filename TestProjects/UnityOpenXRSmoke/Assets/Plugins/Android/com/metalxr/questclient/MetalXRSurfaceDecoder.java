@@ -28,6 +28,7 @@ public final class MetalXRSurfaceDecoder {
     private MediaCodec codec;
     private SurfaceTexture surfaceTexture;
     private Surface surface;
+    private final float[] textureTransform;
     private int textureName;
     private int configuredWidth;
     private int configuredHeight;
@@ -43,7 +44,9 @@ public final class MetalXRSurfaceDecoder {
         this.eyeName = eyeName == null ? "unknown" : eyeName;
         this.textureSlot = textureSlot;
         this.bufferInfo = new MediaCodec.BufferInfo();
+        this.textureTransform = new float[16];
         this.lastError = "";
+        setIdentityTransform();
     }
 
     private static native void nativeRegisterClass();
@@ -174,6 +177,7 @@ public final class MetalXRSurfaceDecoder {
 
         try {
             surfaceTexture.updateTexImage();
+            surfaceTexture.getTransformMatrix(textureTransform);
             frameAvailable = false;
             return true;
         } catch (Exception exception) {
@@ -189,6 +193,15 @@ public final class MetalXRSurfaceDecoder {
         }
 
         return decoder.updateTexImage();
+    }
+
+    public static float[] transformMatrixForSlot(int textureSlot) {
+        MetalXRSurfaceDecoder decoder = decoderForSlot(textureSlot);
+        if (decoder == null) {
+            return identityTransform();
+        }
+
+        return decoder.copyTextureTransform();
     }
 
     public String getLastError() {
@@ -244,6 +257,33 @@ public final class MetalXRSurfaceDecoder {
         configuredWidth = 0;
         configuredHeight = 0;
         frameAvailable = false;
+        setIdentityTransform();
+    }
+
+    private float[] copyTextureTransform() {
+        float[] copy = new float[16];
+        System.arraycopy(textureTransform, 0, copy, 0, textureTransform.length);
+        return copy;
+    }
+
+    private void setIdentityTransform() {
+        for (int index = 0; index < textureTransform.length; index++) {
+            textureTransform[index] = 0.0f;
+        }
+
+        textureTransform[0] = 1.0f;
+        textureTransform[5] = 1.0f;
+        textureTransform[10] = 1.0f;
+        textureTransform[15] = 1.0f;
+    }
+
+    private static float[] identityTransform() {
+        float[] matrix = new float[16];
+        matrix[0] = 1.0f;
+        matrix[5] = 1.0f;
+        matrix[10] = 1.0f;
+        matrix[15] = 1.0f;
+        return matrix;
     }
 
     private void registerSlot() {
