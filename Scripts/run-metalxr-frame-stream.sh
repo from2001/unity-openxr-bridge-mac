@@ -15,10 +15,14 @@ Environment:
   METALXR_HOST_PORT           Stream/control TCP port. Defaults to 47000.
   METALXR_ADB_REVERSE_REFRESH_SECONDS
                               USB adb reverse refresh interval. Defaults to 5, set 0 to disable.
-  METALXR_STREAM_WIDTH        Encoded eye width. Defaults to 640.
-  METALXR_STREAM_HEIGHT       Encoded eye height. Defaults to 360.
+  METALXR_STREAM_QUALITY      debug, balanced, or native. Defaults to debug for synthetic and balanced for unity-export.
+                              debug: 640x360 at 8 Mbps. balanced: 1344x1408 at 40 Mbps.
+                              native: 1832x1920 at 80 Mbps.
+  METALXR_STREAM_WIDTH        Encoded eye width. Defaults to the selected quality preset.
+                              unity-export mode adopts the exported Unity frame dimensions.
+  METALXR_STREAM_HEIGHT       Encoded eye height. Defaults to the selected quality preset.
   METALXR_STREAM_FPS          Stream frame rate override. Defaults to the Quest HELLO preferred FPS, with host fallback 60.
-  METALXR_STREAM_BITRATE      H.264 bitrate in bits per second. Defaults to 8000000.
+  METALXR_STREAM_BITRATE      H.264 bitrate in bits per second. Defaults to the selected quality preset.
   METALXR_STREAM_FRAMES       Frame count. Defaults to 0, which streams until disconnect.
   METALXR_STREAM_QUEUE_DEPTH  Max pending encoder frames per eye. Defaults to 3.
   METALXR_STREAM_RECONNECT_ATTEMPTS
@@ -53,14 +57,43 @@ streamer="$repo_root/Runtime/MetalXRHost/build/metalxr_host_streamer"
 transport="${METALXR_TRANSPORT:-usb}"
 port="${METALXR_HOST_PORT:-47000}"
 adb_reverse_refresh_seconds="${METALXR_ADB_REVERSE_REFRESH_SECONDS:-5}"
-width="${METALXR_STREAM_WIDTH:-640}"
-height="${METALXR_STREAM_HEIGHT:-360}"
+frame_source="${METALXR_FRAME_SOURCE:-synthetic}"
+stream_quality="${METALXR_STREAM_QUALITY:-}"
+if [[ -z "$stream_quality" ]]; then
+  if [[ "$frame_source" == "unity-export" ]]; then
+    stream_quality="balanced"
+  else
+    stream_quality="debug"
+  fi
+fi
+case "$stream_quality" in
+  debug)
+    preset_width=640
+    preset_height=360
+    preset_bitrate=8000000
+    ;;
+  balanced)
+    preset_width=1344
+    preset_height=1408
+    preset_bitrate=40000000
+    ;;
+  native)
+    preset_width=1832
+    preset_height=1920
+    preset_bitrate=80000000
+    ;;
+  *)
+    echo "METALXR_STREAM_QUALITY must be debug, balanced, or native, got: $stream_quality" >&2
+    exit 1
+    ;;
+esac
+width="${METALXR_STREAM_WIDTH:-$preset_width}"
+height="${METALXR_STREAM_HEIGHT:-$preset_height}"
 fps="${METALXR_STREAM_FPS:-}"
-bitrate="${METALXR_STREAM_BITRATE:-8000000}"
+bitrate="${METALXR_STREAM_BITRATE:-$preset_bitrate}"
 frames="${METALXR_STREAM_FRAMES:-0}"
 queue_depth="${METALXR_STREAM_QUEUE_DEPTH:-3}"
 reconnect_attempts="${METALXR_STREAM_RECONNECT_ATTEMPTS:-0}"
-frame_source="${METALXR_FRAME_SOURCE:-synthetic}"
 frame_export_dir="${METALXR_FRAME_EXPORT_DIR:-}"
 frame_export_socket="${METALXR_FRAME_EXPORT_SOCKET:-}"
 frame_export_ack_socket="${METALXR_FRAME_EXPORT_ACK_SOCKET:-}"

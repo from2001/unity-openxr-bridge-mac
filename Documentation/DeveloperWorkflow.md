@@ -99,6 +99,8 @@ Use readback mode when validating Unity-submitted texture data:
 METALXR_FRAME_EXPORT_MODE=readback Scripts/run-metalxr-playmode-workflow.sh
 ```
 
+`readback` mode defaults to `METALXR_WORKFLOW_QUALITY=balanced`, which uses a `1344x1408` runtime eye texture and a 40 Mbps H.264 target bitrate for Quest 3 smoke testing. Set `METALXR_WORKFLOW_QUALITY=debug` to use the older `640x360` path when you only need fast connection validation. `METALXR_WORKFLOW_QUALITY=native` uses `1832x1920` at 80 Mbps and is intended for isolated quality experiments because the current readback/file path is much heavier at that size.
+
 Readback defaults to `METALXR_SWAPCHAIN_STORAGE_MODE=shared`. `managed` is retained only as a debugging override because it can stop Unity's OpenXR session on Apple Silicon.
 
 ## 5. Manual Play Mode Loop
@@ -117,7 +119,7 @@ METALXR_FRAME_EXPORT_DIR="${TMPDIR:-/tmp}/metalxr_unity_frames" \
 Scripts/run-metalxr-frame-stream.sh
 ```
 
-For USB, the stream script binds to `127.0.0.1`, configures `adb reverse`, and refreshes the reverse tunnel every `METALXR_ADB_REVERSE_REFRESH_SECONDS` seconds while running.
+Manual `unity-export` streaming defaults to `METALXR_STREAM_QUALITY=balanced` so the encoder bitrate is high enough for Unity-rendered frames. For USB, the stream script binds to `127.0.0.1`, configures `adb reverse`, and refreshes the reverse tunnel every `METALXR_ADB_REVERSE_REFRESH_SECONDS` seconds while running.
 
 ## Useful Environment Variables
 
@@ -129,12 +131,15 @@ For USB, the stream script binds to `127.0.0.1`, configures `adb reverse`, and r
 - `METALXR_FRAME_EXPORT_SOCKET` - optional Unix datagram socket path for frame metadata records. `METALXR_FRAME_EXPORT_MODE=iosurface` can use the socket without a frame export directory because the payload is carried by `ioSurfaceId`; `fixture` and `readback` still require the directory because they write payload files.
 - `METALXR_FRAME_EXPORT_ACK_SOCKET` - optional Unix datagram socket path for IOSurface frame slot release acks. `Scripts/run-metalxr-playmode-workflow.sh` defaults this to `METALXR_FRAME_EXPORT_SOCKET.ack` when socket export is enabled.
 - `METALXR_SWAPCHAIN_STORAGE_MODE=shared|managed|private`
+- `METALXR_WORKFLOW_QUALITY=debug|balanced|native`
+- `METALXR_STREAM_QUALITY=debug|balanced|native`
 - `METALXR_STREAM_WIDTH`, `METALXR_STREAM_HEIGHT`, `METALXR_STREAM_FPS`
 - `METALXR_STREAM_BITRATE`, `METALXR_STREAM_QUEUE_DEPTH`
 - `METALXR_STREAM_RECONNECT_ATTEMPTS`
 - `METALXR_TRACKING_STALE_TIMEOUT_MS`
 - `METALXR_PREDICTION_OFFSET_MS`
 - `METALXR_WORKFLOW_KEEP_RUNNING=1` to leave Unity and the streamer running after the workflow succeeds.
+- `METALXR_WORKFLOW_UNITY_READY_SECONDS` to extend the Unity/uloop readiness wait during first imports or project upgrades.
 
 ## Expected Logs
 

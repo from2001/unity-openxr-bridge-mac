@@ -108,6 +108,8 @@ By default the workflow uses deterministic fixture frames so the launcher, runti
 METALXR_FRAME_EXPORT_MODE=readback Scripts/run-metalxr-playmode-workflow.sh
 ```
 
+`readback` mode defaults to the `balanced` quality preset, which raises the runtime eye texture to `1344x1408` per eye and the H.264 target bitrate to 40 Mbps. Use `METALXR_WORKFLOW_QUALITY=debug` for the old `640x360` smoke-test path, or override `METALXR_VIEW_WIDTH`, `METALXR_VIEW_HEIGHT`, and `METALXR_STREAM_BITRATE` explicitly.
+
 For a manual stream after Unity is already exporting frames:
 
 ```sh
@@ -115,6 +117,8 @@ METALXR_FRAME_SOURCE=unity-export \
 METALXR_FRAME_EXPORT_DIR=/tmp/metalxr_unity_frames \
 Scripts/run-metalxr-frame-stream.sh
 ```
+
+Manual `unity-export` streaming also defaults to the `balanced` stream preset. Use `METALXR_STREAM_QUALITY=debug` when validating only connection and packet flow.
 
 ## Documentation
 
