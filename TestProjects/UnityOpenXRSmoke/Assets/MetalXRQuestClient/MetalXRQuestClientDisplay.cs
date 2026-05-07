@@ -27,6 +27,7 @@ namespace MetalXR.QuestClient
         private const int MaxStreamFrameSetsPerUpdate = 4;
         private const int MaxDecodedFrameSets = 8;
         private const int MaxHapticCommandsPerUpdate = 4;
+        private const ulong MaxClientFrameSetAgeNs = 500000000ul;
         private static readonly Vector3 DefaultPresentationPanelScale = new Vector3(2.2f, 1.2375f, 1.0f);
 
         private enum PresentationMode
@@ -65,6 +66,8 @@ namespace MetalXR.QuestClient
         private readonly Dictionary<ulong, DecodedStereoFrameSet> _decodedFrameSets = new Dictionary<ulong, DecodedStereoFrameSet>();
         private ulong _displayedFrameSetId;
         private ulong _displayedStereoFrameSets;
+        private ulong _droppedStaleFrameSets;
+        private ulong _droppedSupersededFrameSets;
         private PresentationMode _presentationMode = PresentationMode.ProjectionPanel;
         private float _questRenderScale = DefaultQuestRenderScale;
 
@@ -126,7 +129,7 @@ namespace MetalXR.QuestClient
             if (_handshakeClient != null)
             {
                 _handshakeClient.DrainLogs(LogClientMessage);
-                _handshakeClient.DrainFrameSets(HandleEncodedFrameSet, MaxStreamFrameSetsPerUpdate);
+                _handshakeClient.DrainLatestFrameSet(HandleEncodedFrameSet, MaxStreamFrameSetsPerUpdate);
                 _handshakeClient.DrainHapticCommands(HandleHapticCommand, MaxHapticCommandsPerUpdate);
                 EnqueueTrackingSamples();
             }
@@ -452,6 +455,13 @@ namespace MetalXR.QuestClient
                 return;
             }
 
+            ulong frameAgeMs;
+            if (IsEncodedFrameSetStale(frameSet, MetalXRQuestProtocol.NowNs(), out frameAgeMs))
+            {
+                LogDroppedClientFrameSet("encoded_stale", frameSet.FrameId, frameAgeMs);
+                return;
+            }
+
             MetalXRQuestDecodedVideoFrame leftFrame;
             MetalXRQuestDecodedVideoFrame rightFrame;
             if (TryDecodeFrame(frameSet.Left, out leftFrame))
@@ -547,23 +557,53 @@ namespace MetalXR.QuestClient
                 return;
             }
 
+            ulong frameAgeMs;
+            if (IsDecodedFrameSetStale(latestComplete, MetalXRQuestProtocol.NowNs(), out frameAgeMs))
+            {
+                LogDroppedClientFrameSet("decoded_stale", latestComplete.FrameId, frameAgeMs);
+                RemoveDecodedFrameSetsAtOrBefore(latestComplete.FrameId);
+                return;
+            }
+
             bool updatedLeft = UpdateStreamTexture(latestComplete.Left);
             bool updatedRight = UpdateStreamTexture(latestComplete.Right);
             if (updatedLeft && updatedRight)
             {
+                ulong displayTimeNs = MetalXRQuestProtocol.NowNs();
                 ApplyPresentationMetadata(latestComplete.Left, latestComplete.Right);
                 _displayedFrameSetId = latestComplete.FrameId;
                 _displayedStereoFrameSets++;
                 if (_displayedStereoFrameSets <= 4 || (_displayedStereoFrameSets % 120) == 0)
                 {
+                    ulong leftAgeMs = FrameAgeMs(latestComplete.Left.ReceiveTimeNs, displayTimeNs);
+                    ulong rightAgeMs = FrameAgeMs(latestComplete.Right.ReceiveTimeNs, displayTimeNs);
+                    ulong leftDecodeUs = ElapsedUs(latestComplete.Left.DecodeStartTimeNs, latestComplete.Left.DecodeEndTimeNs);
+                    ulong rightDecodeUs = ElapsedUs(latestComplete.Right.DecodeStartTimeNs, latestComplete.Right.DecodeEndTimeNs);
                     LogClientMessage(
                         "displayed stereo FrameSet frame=" + latestComplete.FrameId +
                         " left_decoder=" + latestComplete.Left.DecoderMode +
-                        " right_decoder=" + latestComplete.Right.DecoderMode);
+                        " right_decoder=" + latestComplete.Right.DecoderMode +
+                        " left_age_ms=" + leftAgeMs +
+                        " right_age_ms=" + rightAgeMs +
+                        " left_decode_us=" + leftDecodeUs +
+                        " right_decode_us=" + rightDecodeUs +
+                        " queued_eye_frames=" + CurrentQueuedFrameCount());
                 }
             }
 
-            RemoveDecodedFrameSetsAtOrBefore(latestComplete.FrameId);
+            int removed = RemoveDecodedFrameSetsAtOrBefore(latestComplete.FrameId);
+            int superseded = updatedLeft && updatedRight ? removed - 1 : removed;
+            if (superseded > 0)
+            {
+                _droppedSupersededFrameSets += (ulong)superseded;
+                if (_droppedSupersededFrameSets <= 4 || (_droppedSupersededFrameSets % 120) == 0)
+                {
+                    LogClientMessage(
+                        "dropped superseded decoded FrameSets count=" + _droppedSupersededFrameSets +
+                        " removed=" + superseded +
+                        " displayed_frame=" + latestComplete.FrameId);
+                }
+            }
         }
 
         private void DropStaleDecodedFrameSets()
@@ -585,10 +625,17 @@ namespace MetalXR.QuestClient
                 }
 
                 _decodedFrameSets.Remove(oldestFrameId);
+                _droppedSupersededFrameSets++;
+                if (_droppedSupersededFrameSets <= 4 || (_droppedSupersededFrameSets % 120) == 0)
+                {
+                    LogClientMessage(
+                        "dropped decoded FrameSet by queue limit count=" + _droppedSupersededFrameSets +
+                        " frame=" + oldestFrameId);
+                }
             }
         }
 
-        private void RemoveDecodedFrameSetsAtOrBefore(ulong frameId)
+        private int RemoveDecodedFrameSetsAtOrBefore(ulong frameId)
         {
             List<ulong> frameIdsToRemove = new List<ulong>();
             foreach (ulong pendingFrameId in _decodedFrameSets.Keys)
@@ -603,6 +650,70 @@ namespace MetalXR.QuestClient
             {
                 _decodedFrameSets.Remove(frameIdsToRemove[i]);
             }
+
+            return frameIdsToRemove.Count;
+        }
+
+        private bool IsEncodedFrameSetStale(
+            MetalXRQuestEncodedStereoFrameSet frameSet,
+            ulong nowNs,
+            out ulong ageMs)
+        {
+            ageMs = 0;
+            if (frameSet == null || !frameSet.IsComplete)
+            {
+                return false;
+            }
+
+            ulong oldestReceiveNs =
+                frameSet.Left.ReceiveTimeNs < frameSet.Right.ReceiveTimeNs ?
+                    frameSet.Left.ReceiveTimeNs :
+                    frameSet.Right.ReceiveTimeNs;
+            ageMs = FrameAgeMs(oldestReceiveNs, nowNs);
+            return ageMs > MaxClientFrameSetAgeNs / 1000000ul;
+        }
+
+        private bool IsDecodedFrameSetStale(
+            DecodedStereoFrameSet frameSet,
+            ulong nowNs,
+            out ulong ageMs)
+        {
+            ageMs = 0;
+            if (frameSet == null || !frameSet.IsComplete)
+            {
+                return false;
+            }
+
+            ulong oldestReceiveNs =
+                frameSet.Left.ReceiveTimeNs < frameSet.Right.ReceiveTimeNs ?
+                    frameSet.Left.ReceiveTimeNs :
+                    frameSet.Right.ReceiveTimeNs;
+            ageMs = FrameAgeMs(oldestReceiveNs, nowNs);
+            return ageMs > MaxClientFrameSetAgeNs / 1000000ul;
+        }
+
+        private void LogDroppedClientFrameSet(string reason, ulong frameId, ulong ageMs)
+        {
+            _droppedStaleFrameSets++;
+            if (_droppedStaleFrameSets <= 4 || (_droppedStaleFrameSets % 120) == 0)
+            {
+                LogClientMessage(
+                    "dropped stale FrameSet reason=" + reason +
+                    " frame=" + frameId +
+                    " age_ms=" + ageMs +
+                    " count=" + _droppedStaleFrameSets +
+                    " queued_eye_frames=" + CurrentQueuedFrameCount());
+            }
+        }
+
+        private static ulong FrameAgeMs(ulong startTimeNs, ulong endTimeNs)
+        {
+            return endTimeNs >= startTimeNs ? (endTimeNs - startTimeNs) / 1000000ul : 0ul;
+        }
+
+        private static ulong ElapsedUs(ulong startTimeNs, ulong endTimeNs)
+        {
+            return endTimeNs >= startTimeNs ? (endTimeNs - startTimeNs) / 1000ul : 0ul;
         }
 
         private static bool IsFreshMediaCodecFrame(MetalXRQuestDecodedVideoFrame frame)

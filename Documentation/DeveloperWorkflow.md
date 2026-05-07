@@ -99,7 +99,7 @@ Use readback mode when validating Unity-submitted texture data:
 METALXR_FRAME_EXPORT_MODE=readback Scripts/run-metalxr-playmode-workflow.sh
 ```
 
-`readback` mode defaults to `METALXR_WORKFLOW_QUALITY=balanced`, which uses a `1344x1408` runtime eye texture and a 40 Mbps H.264 target bitrate for Quest 3 smoke testing. Set `METALXR_WORKFLOW_QUALITY=debug` to use the older `640x360` path when you only need fast connection validation. `METALXR_WORKFLOW_QUALITY=native` uses `1832x1920` at 80 Mbps and is intended for isolated quality experiments because the current readback/file path is much heavier at that size.
+`readback` mode defaults to `METALXR_WORKFLOW_QUALITY=debug` for smoke reliability because the current Quest CPU Image-plane decode path can fall behind at higher resolutions. Set `METALXR_WORKFLOW_QUALITY=balanced` to use a `1344x1408` runtime eye texture and a 40 Mbps H.264 target bitrate when validating quality. `METALXR_WORKFLOW_QUALITY=native` uses `1832x1920` at 80 Mbps and is intended for isolated quality experiments because the current readback/file path is much heavier at that size.
 
 Readback defaults to `METALXR_SWAPCHAIN_STORAGE_MODE=shared`. `managed` is retained only as a debugging override because it can stop Unity's OpenXR session on Apple Silicon.
 
@@ -143,7 +143,10 @@ Manual `unity-export` streaming defaults to `METALXR_STREAM_QUALITY=balanced` so
 - `METALXR_STREAM_QUALITY=debug|balanced|native`
 - `METALXR_STREAM_WIDTH`, `METALXR_STREAM_HEIGHT`, `METALXR_STREAM_FPS`
 - `METALXR_STREAM_BITRATE`, `METALXR_STREAM_QUEUE_DEPTH`
+- `METALXR_STREAM_MAX_FRAME_AGE_MS` to drop stale `unity-export` source frames before encoding.
 - `METALXR_STREAM_RECONNECT_ATTEMPTS`
+- `METALXR_WORKFLOW_MAX_FRAME_AGE_MS` and `METALXR_WORKFLOW_MAX_QUEUE_DEPTH` to fail the coordinated smoke workflow when output is obviously stale or backed up.
+- `METALXR_WORKFLOW_ARCHIVE_SCENE_RECOVERY=1` to move Unity scene recovery backups out of the smoke project before launch. The default archive destination is `${TMPDIR:-/tmp}/metalxr_unity_scene_recovery`; override it with `METALXR_WORKFLOW_SCENE_RECOVERY_ARCHIVE_DIR`.
 - `METALXR_TRACKING_STALE_TIMEOUT_MS`
 - `METALXR_PREDICTION_OFFSET_MS`
 - `METALXR_WORKFLOW_KEEP_RUNNING=1` to leave Unity and the streamer running after the workflow succeeds.

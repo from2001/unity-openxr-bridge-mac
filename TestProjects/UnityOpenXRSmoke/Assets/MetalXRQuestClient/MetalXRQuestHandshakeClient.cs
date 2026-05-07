@@ -106,6 +106,38 @@ namespace MetalXR.QuestClient
             return drained;
         }
 
+        public int DrainLatestFrameSet(Action<MetalXRQuestEncodedStereoFrameSet> sink, int maxFrameSets)
+        {
+            if (sink == null || maxFrameSets <= 0)
+            {
+                return 0;
+            }
+
+            int drained = 0;
+            MetalXRQuestEncodedStereoFrameSet latest = null;
+            MetalXRQuestEncodedStereoFrameSet frameSet;
+            while (drained < maxFrameSets && _frameSets.TryDequeue(out frameSet))
+            {
+                if (latest != null)
+                {
+                    LogDroppedQueuedItem(
+                        ref _droppedFrameSets,
+                        "superseded VIDEO_FRAME FrameSet",
+                        "frame=" + latest.FrameId + " next=" + frameSet.FrameId);
+                }
+
+                latest = frameSet;
+                drained++;
+            }
+
+            if (latest != null)
+            {
+                sink(latest);
+            }
+
+            return drained;
+        }
+
         public int DrainHapticCommands(Action<MetalXRQuestHapticCommand> sink, int maxCommands)
         {
             if (sink == null || maxCommands <= 0)

@@ -108,7 +108,7 @@ By default the workflow uses deterministic fixture frames so the launcher, runti
 METALXR_FRAME_EXPORT_MODE=readback Scripts/run-metalxr-playmode-workflow.sh
 ```
 
-`readback` mode defaults to the `balanced` quality preset, which raises the runtime eye texture to `1344x1408` per eye and the H.264 target bitrate to 40 Mbps. Use `METALXR_WORKFLOW_QUALITY=debug` for the old `640x360` smoke-test path, or override `METALXR_VIEW_WIDTH`, `METALXR_VIEW_HEIGHT`, and `METALXR_STREAM_BITRATE` explicitly.
+`readback` mode defaults to the `debug` quality preset for smoke reliability because the current CPU Image-plane decode path on Quest can fall behind at higher resolutions. Use `METALXR_WORKFLOW_QUALITY=balanced` for `1344x1408` per eye at 40 Mbps, `native` for isolated quality experiments, or override `METALXR_VIEW_WIDTH`, `METALXR_VIEW_HEIGHT`, and `METALXR_STREAM_BITRATE` explicitly.
 
 The Quest client now starts in `projection` presentation mode by default. It uses the per-eye projection metadata carried by each VIDEO_FRAME packet to size the in-headset eye panels and applies a default Quest render scale of 1.2 so the diagnostic Unity presentation does not render below headset resolution. Use `METALXR_QUEST_PRESENTATION_MODE=diagnostic` to force the old fixed debug panel layout, or `METALXR_QUEST_RENDER_SCALE=1.0` to lower the Quest app render scale for stability experiments.
 
@@ -117,6 +117,10 @@ For restart and reconnect smoke testing, run the workflow repeat probe:
 ```sh
 METALXR_WORKFLOW_REPEAT_COUNT=2 Scripts/probe-metalxr-playmode-workflow-repeat.sh
 ```
+
+The coordinated workflow prints latency metrics from the streamer log and fails when the latest exported frame age or Quest queue depth exceeds the configured smoke thresholds.
+
+If Unity left scene recovery backups after a crash or forced quit, the workflow archives `Temp/__Backupscenes` and `Assets/_Recovery` before launch so the editor does not block on the recovery prompt. Set `METALXR_WORKFLOW_ARCHIVE_SCENE_RECOVERY=0` to keep those folders in place for manual recovery.
 
 For a manual stream after Unity is already exporting frames:
 
