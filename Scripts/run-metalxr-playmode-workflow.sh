@@ -217,6 +217,7 @@ cleanup() {
     return
   fi
   terminate_pid_with_timeout "$streamer_pid" 5
+  run_cleanup_command_with_timeout 10 adb_cmd shell am force-stop "$package_name"
   if command -v uloop >/dev/null 2>&1; then
     run_cleanup_command_with_timeout 10 uloop control-play-mode --project-path "$project_path" --action Stop
     run_cleanup_command_with_timeout 10 uloop launch --quit "$project_path"
@@ -438,6 +439,16 @@ EOF
       unity_ready_polls=1
     fi
     for _ in $(seq 1 "$unity_ready_polls"); do
+      if [[ -n "$unity_pid" ]] && ! kill -0 "$unity_pid" >/dev/null 2>&1; then
+        echo "Unity exited before uloop became ready. Check $unity_log." >&2
+        {
+          echo
+          echo "Unity process $unity_pid exited before uloop became ready."
+          echo "Recent Unity Editor.log:"
+          tail -n 120 "$HOME/Library/Logs/Unity/Editor.log" 2>/dev/null || true
+        } >>"$unity_log"
+        return 1
+      fi
       if uloop compile --project-path "$project_path" --force-recompile false --wait-for-domain-reload true >>"$unity_log" 2>&1; then
         ready=1
         break
@@ -458,6 +469,16 @@ EOF
     local play_ready=0
     local play_output
     for _ in $(seq 1 30); do
+      if [[ -n "$unity_pid" ]] && ! kill -0 "$unity_pid" >/dev/null 2>&1; then
+        echo "Unity exited before entering Play Mode. Check $unity_log." >&2
+        {
+          echo
+          echo "Unity process $unity_pid exited before entering Play Mode."
+          echo "Recent Unity Editor.log:"
+          tail -n 120 "$HOME/Library/Logs/Unity/Editor.log" 2>/dev/null || true
+        } >>"$unity_log"
+        return 1
+      fi
       play_output="$(uloop control-play-mode --project-path "$project_path" --action Play 2>&1)" || {
         printf '%s\n' "$play_output" >>"$unity_log"
         sleep 1

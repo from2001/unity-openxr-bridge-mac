@@ -10,7 +10,8 @@ namespace MetalXR.QuestClient
     public sealed class MetalXRQuestHandshakeClient : IDisposable
     {
         private const int ConnectTimeoutMs = 1000;
-        private const int ReadTimeoutMs = 1000;
+        private const int ReadTimeoutMs = 5000;
+        private const int WriteTimeoutMs = 5000;
         private const int RetryDelayMs = 2500;
         private const int MaxPayloadBytes = 8 * 1024 * 1024;
         private const int MaxQueuedFrameSets = 4;
@@ -240,11 +241,14 @@ namespace MetalXR.QuestClient
 
                     client.EndConnect(connectResult);
                     client.NoDelay = true;
+                    client.ReceiveTimeout = ReadTimeoutMs;
+                    client.SendTimeout = WriteTimeoutMs;
                     _failureCount = 0;
 
                     using (NetworkStream stream = client.GetStream())
                     {
                         stream.ReadTimeout = ReadTimeoutMs;
+                        stream.WriteTimeout = WriteTimeoutMs;
                         byte[] hello = MetalXRQuestProtocol.CreateHelloPacket(NextSequence(), _deviceProfile, _capabilities);
                         stream.Write(hello, 0, hello.Length);
                         _logs.Enqueue(
